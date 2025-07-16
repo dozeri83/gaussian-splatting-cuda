@@ -23,7 +23,7 @@ int main(int argc, char* argv[]) {
         //----------------------------------------------------------------------
         // 3. Create dataset from COLMAP
         //----------------------------------------------------------------------
-        auto [dataset, scene_center] = create_dataset_from_colmap(params.dataset);
+        auto [dataset, scene_center] = create_dataset(params.dataset);
 
         //----------------------------------------------------------------------
         // 4. Model initialisation

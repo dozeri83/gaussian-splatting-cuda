@@ -83,6 +83,14 @@ private:
     std::vector<size_t> _indices;
 };
 
+
+
+inline std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor> create_dataset_from_transforms(const gs::param::DatasetConfig& datasetConfig)
+{
+    read_t
+    return std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor>();
+}
+
 inline std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor> create_dataset_from_colmap(
     const gs::param::DatasetConfig& datasetConfig) {
 
@@ -126,6 +134,20 @@ inline std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor> create_dataset_
 
     return {dataset, scene_center};
 }
+
+
+inline std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor> create_dataset(
+    const gs::param::DatasetConfig& datasetConfig)
+{
+    if (datasetConfig.data_path.extension() == ".json")
+    {
+        return create_dataset_from_transforms(datasetConfig);
+    }
+    else{
+        return create_dataset_from_colmap(datasetConfig);
+    }
+}
+
 
 inline auto create_dataloader_from_dataset(
     std::shared_ptr<CameraDataset> dataset,
