@@ -2,6 +2,8 @@
 
 #include "core/camera.hpp"
 #include "core/colmap_reader.hpp"
+#include "core/transforms_reader.hpp"
+
 #include "core/parameters.hpp"
 #include <memory>
 #include <torch/torch.h>
@@ -87,8 +89,44 @@ private:
 
 inline std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor> create_dataset_from_transforms(const gs::param::DatasetConfig& datasetConfig)
 {
-    read_t
-    return std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor>();
+    if (!std::filesystem::exists(datasetConfig.data_path)) {
+        throw std::runtime_error("transforms path does not exist: " +
+                                 datasetConfig.data_path.string());
+    }
+
+    auto [camera_infos, scene_center] = read_transforms_cameras_and_images(
+        datasetConfig.data_path, datasetConfig.images);
+
+    std::vector<std::shared_ptr<Camera>> cameras;
+    cameras.reserve(camera_infos.size());
+
+    for (size_t i = 0; i < camera_infos.size(); ++i) {
+        const auto& info = camera_infos[i];
+
+        auto cam = std::make_shared<Camera>(
+            info._R,
+            info._T,
+            info._focal_x,
+            info._focal_y,
+            info._center_x,
+            info._center_y,
+            info._radial_distortion,
+            info._tangential_distortion,
+            info._camera_model_type,
+            info._image_name,
+            info._image_path,
+            info._width,
+            info._height,
+            static_cast<int>(i));
+
+        cameras.push_back(std::move(cam));
+    }
+
+    // Create dataset with ALL images
+    auto dataset = std::make_shared<CameraDataset>(
+        std::move(cameras), datasetConfig, CameraDataset::Split::ALL);
+
+    return {dataset, scene_center};
 }
 
 inline std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor> create_dataset_from_colmap(
