@@ -146,7 +146,7 @@ tar -xf libtorch-win-shared-with-deps-2.7.0+cu128.zip -C external\release
 del libtorch-win-shared-with-deps-2.7.0+cu128.zip
 
 # Build the project
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DSEPARATE_TORCH_DIR=ON
 cmake --build build --config Release -j
 
 ```

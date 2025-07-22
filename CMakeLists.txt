@@ -9,8 +9,11 @@ project(gaussian_splatting_cuda LANGUAGES CUDA CXX C)
 # Setup
 get_filename_component(PROJ_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
 
+# Define the boolean option
+option(SEPARATE_TORCH_DIR "Use separate torch directories for Debug/Release builds" OFF)
+
 # Set Torch_DIR based on platform and build type
-if (WIN32)
+if (WIN32 AND SEPARATE_TORCH_DIR)
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
         set(Torch_DIR "${PROJ_ROOT_DIR}/external/release/libtorch/share/cmake/Torch")
     elseif (CMAKE_BUILD_TYPE STREQUAL "Debug")
