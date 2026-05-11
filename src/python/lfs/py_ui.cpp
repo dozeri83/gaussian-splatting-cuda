@@ -4304,7 +4304,8 @@ namespace lfs::python {
                     {"rectangle", 1},
                     {"polygon", 2},
                     {"lasso", 3},
-                    {"rings", 4}};
+                    {"rings", 4},
+                    {"color", 5}};
                 if (const auto it = MODE_MAP.find(mode); it != MODE_MAP.end()) {
                     lfs::core::events::tools::SetSelectionSubMode{.selection_mode = it->second}.emit();
                 }

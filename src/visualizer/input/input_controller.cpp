@@ -234,6 +234,10 @@ namespace lfs::vis {
                 submode = SelectionSubMode::Rings;
                 submode_id = "rings";
                 break;
+            case input::Action::SELECT_MODE_COLOR:
+                submode = SelectionSubMode::Color;
+                submode_id = "color";
+                break;
             default:
                 return false;
             }

@@ -90,6 +90,7 @@ namespace lfs::vis::input {
         SELECT_MODE_POLYGON,
         SELECT_MODE_LASSO,
         SELECT_MODE_RINGS,
+        SELECT_MODE_COLOR,
         // Misc
         APPLY_CROP_BOX,
         // Node picking

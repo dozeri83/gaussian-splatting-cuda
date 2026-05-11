@@ -720,6 +720,7 @@
     "polygon_selection": "ポリゴン選択 (Ctrl+3)",
     "lasso_selection": "投げ縄選択 (Ctrl+4)",
     "ring_selection": "リング選択 (Ctrl+5)",
+    "color_selection": "Color selection",
     "local_space": "ローカル空間",
     "world_space": "ワールド空間",
     "origin_pivot": "原点",

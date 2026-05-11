@@ -719,6 +719,7 @@
     "polygon_selection": "Selezione poligono (Ctrl+3)",
     "lasso_selection": "Selezione lazo (Ctrl+4)",
     "ring_selection": "Selezione anello (Ctrl+5)",
+    "color_selection": "Color selection",
     "local_space": "Spazio Locale",
     "world_space": "Spazio Mondo",
     "origin_pivot": "Origine",

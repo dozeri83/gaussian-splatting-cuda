@@ -722,6 +722,7 @@
     "polygon_selection": "Polygon selection (Ctrl+3)",
     "lasso_selection": "Lasso selection (Ctrl+4)",
     "ring_selection": "Ring selection (Ctrl+5)",
+    "color_selection": "Color selection (Ctrl+6)",
     "local_space": "Local Space",
     "world_space": "World Space",
     "origin_pivot": "Origin",

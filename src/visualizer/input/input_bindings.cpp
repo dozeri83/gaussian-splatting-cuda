@@ -898,6 +898,7 @@ namespace lfs::vis::input {
             {KeyTrigger{KEY_3, MODIFIER_CTRL}, Action::SELECT_MODE_POLYGON, "Polygon"},
             {KeyTrigger{KEY_4, MODIFIER_CTRL}, Action::SELECT_MODE_LASSO, "Lasso"},
             {KeyTrigger{KEY_5, MODIFIER_CTRL}, Action::SELECT_MODE_RINGS, "Rings"},
+            {KeyTrigger{KEY_6, MODIFIER_CTRL}, Action::SELECT_MODE_COLOR, "Color"},
             {KeyTrigger{KEY_ESCAPE, MODIFIER_NONE}, Action::CANCEL_POLYGON, "Cancel"},
             // UI
             {KeyTrigger{KEY_F12, MODIFIER_NONE}, Action::TOGGLE_UI, "Hide UI"},
@@ -1041,6 +1042,7 @@ namespace lfs::vis::input {
         case Action::SELECT_MODE_POLYGON: return "Selection: Polygon";
         case Action::SELECT_MODE_LASSO: return "Selection: Lasso";
         case Action::SELECT_MODE_RINGS: return "Selection: Rings";
+        case Action::SELECT_MODE_COLOR: return "Selection: Color";
         case Action::APPLY_CROP_BOX: return "Apply Crop Box";
         case Action::NODE_PICK: return "Pick Node";
         case Action::NODE_RECT_SELECT: return "Rectangle Select Nodes";
@@ -1623,6 +1625,7 @@ namespace lfs::vis::input {
         case Action::SELECT_MODE_POLYGON:
         case Action::SELECT_MODE_LASSO:
         case Action::SELECT_MODE_RINGS:
+        case Action::SELECT_MODE_COLOR:
             return d_selection_mode_key;
 
         case Action::APPLY_CROP_BOX:
@@ -1673,6 +1676,7 @@ namespace lfs::vis::input {
         case Action::SELECT_MODE_POLYGON:
         case Action::SELECT_MODE_LASSO:
         case Action::SELECT_MODE_RINGS:
+        case Action::SELECT_MODE_COLOR:
         case Action::UNDO:
         case Action::REDO:
         case Action::DELETE_SELECTED:

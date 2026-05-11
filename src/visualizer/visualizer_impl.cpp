@@ -1025,12 +1025,14 @@ namespace lfs::vis {
             LOG_INFO("Loading {} splat file(s)", paths.size());
             if (const auto result = data_loader_->loadPLY(paths[0]); !result) {
                 LOG_ERROR("Failed to load {}: {}", lfs::core::path_to_utf8(paths[0]), result.error());
+                state::SplatFileLoadFailed{.path = paths[0], .error = result.error()}.emit();
             } else {
                 for (size_t i = 1; i < paths.size(); ++i) {
                     try {
                         data_loader_->addSplatFileToScene(paths[i]);
                     } catch (const std::exception& e) {
                         LOG_ERROR("Failed to add {}: {}", lfs::core::path_to_utf8(paths[i]), e.what());
+                        state::SplatFileLoadFailed{.path = paths[i], .error = e.what()}.emit();
                     }
                 }
                 if (paths.size() > 1) {

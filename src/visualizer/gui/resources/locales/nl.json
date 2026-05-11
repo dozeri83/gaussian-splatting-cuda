@@ -717,6 +717,7 @@
     "polygon_selection": "Polygoon selectie (Ctrl+3)",
     "lasso_selection": "Lasso selectie (Ctrl+4)",
     "ring_selection": "Ring selectie (Ctrl+5)",
+    "color_selection": "Color selection",
     "local_space": "Lokale Ruimte",
     "world_space": "Wereld Ruimte",
     "origin_pivot": "Oorsprong",

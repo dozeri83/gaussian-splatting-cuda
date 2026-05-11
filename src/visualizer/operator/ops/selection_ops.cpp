@@ -3,8 +3,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "selection_ops.hpp"
+#include "core/cuda/selection_ops.hpp"
+#include "core/services.hpp"
 #include "input/key_codes.hpp"
+#include "operation/undo_entry.hpp"
+#include "operation/undo_history.hpp"
 #include "operator/operator_registry.hpp"
+#include "rendering/dirty_flags.hpp"
+#include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
 
 namespace lfs::vis::op {
@@ -64,7 +70,7 @@ namespace lfs::vis::op {
             return OperatorResult::CANCELLED;
         }
 
-        shape_ = toSelectionShape(props.get_or<int>("mode", 0));
+        const int mode_int = props.get_or<int>("mode", 0);
         mode_ = toSelectionMode(props.get_or<int>("op", 0));
         brush_radius_ = props.get_or<float>("brush_radius", 20.0f);
         stroke_button_ = props.get_or<int>("button", static_cast<int>(input::AppMouseButton::LEFT));
@@ -72,6 +78,59 @@ namespace lfs::vis::op {
         filters_.depth_filter = props.get_or<bool>("use_depth_filter", false);
         filters_.restrict_to_selected_nodes = props.get_or<bool>("restrict_to_selected_nodes", true);
 
+        // Color selection mode (5): pick Gaussian under cursor and select by color similarity
+        if (mode_int == 5) {
+            const float click_x = static_cast<float>(props.get_or<double>("x", 0.0));
+            const float click_y = static_cast<float>(props.get_or<double>("y", 0.0));
+
+            // GPU pick pass to find which Gaussian is under the cursor
+            const auto picked = service->pickGaussianAt(click_x, click_y);
+            if (!picked) {
+                return OperatorResult::CANCELLED;
+            }
+            const int hovered_id = *picked;
+
+            auto& scene = ctx.scene().getScene();
+            auto* model = scene.getCombinedModel();
+            if (!model) {
+                return OperatorResult::CANCELLED;
+            }
+
+            const auto& sh0 = model->sh0();
+            if (!sh0.is_valid() || static_cast<size_t>(hovered_id) >= sh0.size(0)) {
+                return OperatorResult::CANCELLED;
+            }
+
+            // Decode the reference Gaussian's SH DC color on CPU
+            auto sh0_cpu = sh0.cpu();
+            const float* sh0_data = sh0_cpu.ptr<float>();
+            if (!sh0_data) {
+                return OperatorResult::CANCELLED;
+            }
+
+            constexpr float SH_C0 = 0.28209479177387814f;
+            const float ref_r = std::clamp(0.5f + sh0_data[hovered_id * 3] * SH_C0, 0.0f, 1.0f);
+            const float ref_g = std::clamp(0.5f + sh0_data[hovered_id * 3 + 1] * SH_C0, 0.0f, 1.0f);
+            const float ref_b = std::clamp(0.5f + sh0_data[hovered_id * 3 + 2] * SH_C0, 0.0f, 1.0f);
+
+            constexpr float COLOR_THRESHOLD = 0.2f;
+            const auto group_id = scene.getActiveSelectionGroup();
+            auto mask = core::cuda::select_by_color(sh0, ref_r, ref_g, ref_b, COLOR_THRESHOLD, group_id);
+
+            // Apply with undo support (overwrite the ring selection with color selection)
+            auto snapshot = std::make_unique<op::SceneSnapshot>(ctx.scene(), "selection.by_color");
+            snapshot->captureSelection();
+            scene.setSelectionMask(std::make_shared<core::Tensor>(std::move(mask)));
+            snapshot->captureAfter();
+            op::pushSceneSnapshotIfChanged(std::move(snapshot));
+
+            if (auto* rm = services().renderingOrNull()) {
+                rm->markDirty(DirtyFlag::SELECTION);
+            }
+            return OperatorResult::FINISHED;
+        }
+
+        shape_ = toSelectionShape(mode_int);
         const glm::vec2 start_pos(props.get_or<double>("x", 0.0), props.get_or<double>("y", 0.0));
         if (!service->beginInteractiveSelection(shape_, mode_, start_pos, brush_radius_, filters_)) {
             return OperatorResult::CANCELLED;

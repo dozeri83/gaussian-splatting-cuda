@@ -720,6 +720,7 @@
     "polygon_selection": "Zaznaczenie wielokąta (Ctrl+3)",
     "lasso_selection": "Zaznaczenie lasso (Ctrl+4)",
     "ring_selection": "Zaznaczenie pierścieniowe (Ctrl+5)",
+    "color_selection": "Color selection",
     "local_space": "Przestrzeń Lokalna",
     "world_space": "Przestrzeń Światowa",
     "origin_pivot": "Początek",

@@ -5840,6 +5840,20 @@ namespace lfs::vis::gui {
             }
         });
 
+        state::SplatFileLoadFailed::when([this](const auto& e) {
+            lfs::core::ModalRequest req;
+            req.title = "Failed to load file";
+            req.body_rml = std::format(
+                "<div>Could not load <b>{}</b>:</div>"
+                "<div class=\"content-row error-text\" style=\"margin-top: 8dp;\">{}</div>",
+                lfs::core::path_to_utf8(e.path.filename()),
+                e.error);
+            req.style = lfs::core::ModalStyle::Error;
+            req.width_dp = 520;
+            req.buttons = {{"OK", "primary"}};
+            rml_modal_overlay_->enqueue(std::move(req));
+        });
+
         internal::TrainerReady::when([this](const auto&) {
             focus_panel_name_ = "Training";
         });
