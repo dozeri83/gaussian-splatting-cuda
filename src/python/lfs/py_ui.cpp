@@ -3855,6 +3855,14 @@ namespace lfs::python {
             "Open a file dialog to select a CSV file. Returns empty string if cancelled.");
 
         m.def(
+            "open_xml_file_dialog",
+            []() -> std::string {
+                auto result = lfs::vis::gui::OpenXmlFileDialog();
+                return result.empty() ? "" : lfs::core::path_to_utf8(result);
+            },
+            "Open a file dialog to select a Metashape XML file. Returns empty string if cancelled.");
+
+        m.def(
             "open_las_file_dialog",
             []() -> std::string {
                 auto result = lfs::vis::gui::OpenLasFileDialog();

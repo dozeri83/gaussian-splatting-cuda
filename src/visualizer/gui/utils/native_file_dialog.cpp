@@ -378,6 +378,10 @@ namespace lfs::vis::gui {
             return {makeFilter("CSV Files", {".csv"})};
         }
 
+        [[nodiscard]] std::vector<DialogFilter> xmlFilters() {
+            return {makeFilter("Metashape XML Files", {".xml"})};
+        }
+
         [[nodiscard]] std::vector<DialogFilter> lasFilters() {
             return {makeFilter("LAS Point Cloud Files", {".las"})};
         }
@@ -461,6 +465,12 @@ namespace lfs::vis::gui {
     std::filesystem::path OpenCsvFileDialog(const std::filesystem::path& defaultPath) {
         std::filesystem::path result;
         runDialog(makeOpenFileRequest(csvFilters(), defaultPath), result);
+        return result;
+    }
+
+    std::filesystem::path OpenXmlFileDialog(const std::filesystem::path& defaultPath) {
+        std::filesystem::path result;
+        runDialog(makeOpenFileRequest(xmlFilters(), defaultPath), result);
         return result;
     }
 

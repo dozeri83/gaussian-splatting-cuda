@@ -19,6 +19,7 @@ namespace lfs::vis::gui {
     LFS_VIS_API std::filesystem::path OpenDatasetFolderDialog(const std::filesystem::path& defaultPath = {});
     LFS_VIS_API std::filesystem::path OpenJsonFileDialog(const std::filesystem::path& defaultPath = {});
     LFS_VIS_API std::filesystem::path OpenCsvFileDialog(const std::filesystem::path& defaultPath = {});
+    LFS_VIS_API std::filesystem::path OpenXmlFileDialog(const std::filesystem::path& defaultPath = {});
     LFS_VIS_API std::filesystem::path OpenLasFileDialog(const std::filesystem::path& defaultPath = {});
     LFS_VIS_API std::filesystem::path OpenVideoFileDialog(const std::filesystem::path& defaultPath = {});
 
