@@ -195,6 +195,7 @@ namespace lfs::vis {
                                            SelectionFilterState filters = {});
         void updatePassiveBrushHoverPreview(glm::vec2 cursor_pos, float brush_radius,
                                             SelectionMode mode);
+        void suppressPassiveHoverPreview();
         void setInteractiveSelectionMode(SelectionMode mode) { interactive_selection_.mode = mode; }
         // Test-only observable for the incremental brush-preview cache: the number of
         // brush points already folded into the interactive preview. Zero after
@@ -389,6 +390,7 @@ namespace lfs::vis {
         [[nodiscard]] bool hasTestingScreenPositionsForCamera(int camera_index) const;
         [[nodiscard]] bool commandCameraValidationRequired(int camera_index) const;
         void clearInteractivePreviewState();
+        bool allowPassiveHoverPreview(glm::vec2 cursor_pos);
         [[nodiscard]] std::vector<bool> effectiveNodeMask(bool restrict_to_selected_nodes) const;
         [[nodiscard]] SelectionFilterState defaultFilterState() const;
 
@@ -396,6 +398,8 @@ namespace lfs::vis {
         RenderingManager* rendering_manager_;
 
         bool stroke_active_ = false;
+        std::optional<glm::vec2> last_passive_hover_position_;
+        bool passive_hover_suppressed_ = false;
         core::Tensor stroke_selection_;
         std::shared_ptr<core::Tensor> selection_before_stroke_;
         core::Tensor command_selection_buffer_;

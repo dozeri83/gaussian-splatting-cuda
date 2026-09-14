@@ -95,13 +95,17 @@ PACK_STRUCT(struct VulkanGSRendererUniforms {
     float expected_far;
     // Explicit padding: dist_coeffs is a float4 on the shader side and must
     // sit on a 16-byte boundary. shN_address occupies the former pad1/pad2
-    // (8-byte aligned at offset 104) so C++ and Slang stay 192 bytes.
+    // (8-byte aligned at offset 104) to preserve the camera field offsets.
     uint32_t depth_wave;
     uint64_t shN_address;
     float dist_coeffs[4];
     float world_view_transform[16];
+    float color_exposure;
+    uint32_t color_tonemapping;
+    uint32_t splat_render_profile;
+    uint32_t color_padding;
 });
-static_assert(sizeof(VulkanGSRendererUniforms) == 192);
+static_assert(sizeof(VulkanGSRendererUniforms) == 208);
 static_assert(offsetof(VulkanGSRendererUniforms, shN_address) % 8 == 0);
 static_assert(offsetof(VulkanGSRendererUniforms, dist_coeffs) % 16 == 0);
 
@@ -141,7 +145,7 @@ PACK_STRUCT(struct VulkanGSLodSelectUniforms {
     // Frame clock + fade window for newly streamed pages (0 disables fading).
     uint32_t current_frame;
     uint32_t fade_frames;
-    uint32_t pad4;
+    uint32_t budget_pass;
 });
 static_assert(sizeof(VulkanGSLodSelectUniforms) == 144);
 
@@ -208,6 +212,7 @@ public:
         bool count_overflow = false;
     };
     struct LodSelectionStats {
+        float threshold_scale = 1.0f;
         size_t candidate_count = 0;
         size_t rendered_capacity = 0;
         size_t overflow_count = 0;

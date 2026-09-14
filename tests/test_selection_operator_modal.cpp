@@ -7,6 +7,7 @@
 #include "core/services.hpp"
 #include "core/splat_data.hpp"
 #include "core/tensor.hpp"
+#include "gui/gui_focus_state.hpp"
 #include "input/input_controller.hpp"
 #include "input/key_codes.hpp"
 #include "internal/viewport.hpp"
@@ -1164,4 +1165,82 @@ TEST_F(DepthWindowDragLifecycleTest, FocusLossClearsDepthWindowDragPreview) {
     input.onWindowFocusLost();
     EXPECT_FALSE(rendering_manager_->depthWindowDragPreview());
     EXPECT_FALSE(lfs::vis::op::operators().hasModalOperator());
+}
+
+TEST_F(SelectionOperatorModalTest, PolygonIgnoresDockClicksAndContinuesInViewport) {
+    using namespace lfs::vis;
+    auto& registry = op::operators();
+    registry.setSceneManager(scene_manager_.get());
+    registry.registerOperator(op::BuiltinOp::SelectionStroke, SelectionStrokeOperator::DESCRIPTOR,
+                              [] { return std::make_unique<SelectionStrokeOperator>(); });
+    Viewport viewport(100, 100);
+    input::InputBindings::setPersistenceEnabled(false);
+    InputController controller(nullptr, viewport);
+    controller.initialize();
+    controller.updateViewportBounds(0, 0, 100, 100);
+    OperatorProperties props;
+    props.set("mode", 2);
+    props.set("x", 10.0);
+    props.set("y", 10.0);
+    EXPECT_EQ(registry.invoke(op::BuiltinOp::SelectionStroke, &props).status,
+              OperatorResult::RUNNING_MODAL);
+    const int left = static_cast<int>(input::AppMouseButton::LEFT);
+    controller.handleMouseButton(left, input::ACTION_PRESS, 80, 10);
+    controller.handleMouseButton(left, input::ACTION_RELEASE, 80, 10);
+    gui::guiFocusState().want_capture_mouse = true;
+    controller.handleMouseButton(left, input::ACTION_PRESS, 80, 80);
+    controller.handleMouseButton(left, input::ACTION_RELEASE, 80, 80);
+    gui::guiFocusState().reset();
+    controller.handleMouseButton(left, input::ACTION_PRESS, 80, 150);
+    controller.handleMouseButton(left, input::ACTION_RELEASE, 80, 150);
+    EXPECT_TRUE(service().undoInteractivePolygonVertex());
+    EXPECT_FALSE(service().undoInteractivePolygonVertex());
+    controller.handleMouseButton(left, input::ACTION_PRESS, 80, 10);
+    controller.handleMouseButton(left, input::ACTION_RELEASE, 80, 10);
+    EXPECT_TRUE(service().undoInteractivePolygonVertex());
+    registry.cancelModalOperator();
+    registry.unregisterOperator(op::BuiltinOp::SelectionStroke);
+    registry.setSceneManager(nullptr);
+    input::InputBindings::setPersistenceEnabled(true);
+}
+
+TEST_F(SelectionOperatorModalTest, DeleteSuppressesStationaryBrushHoverUntilMouseMoves) {
+    using namespace lfs::vis;
+    set_initial_selection({1, 0});
+    service().updatePassiveBrushHoverPreview({50, 50}, 20, SelectionMode::Replace);
+    ASSERT_TRUE(rendering_manager_->isCursorPreviewActive());
+
+    ASSERT_TRUE(scene_manager_->deleteSelectedGaussiansWithHistory().has_value());
+    EXPECT_FALSE(rendering_manager_->isCursorPreviewActive());
+    service().updatePassiveBrushHoverPreview({50, 50}, 20, SelectionMode::Replace);
+    EXPECT_FALSE(rendering_manager_->isCursorPreviewActive());
+    EXPECT_TRUE(selection_values(*scene_manager_).empty());
+
+    service().updatePassiveBrushHoverPreview({51, 50}, 20, SelectionMode::Replace);
+    EXPECT_TRUE(rendering_manager_->isCursorPreviewActive());
+    EXPECT_TRUE(selection_values(*scene_manager_).empty());
+}
+
+TEST_F(SelectionOperatorModalTest, CameraMotionClearsPassiveHoverWithoutChangingSelection) {
+    using namespace lfs::vis;
+    set_initial_selection({1, 0});
+    Viewport viewport(100, 100);
+    input::InputBindings::setPersistenceEnabled(false);
+    InputController controller(nullptr, viewport);
+    controller.initialize();
+    controller.updateViewportBounds(0, 0, 100, 100);
+    ToolContext tool_context(rendering_manager_.get(), scene_manager_.get(), &viewport, nullptr);
+    tool_context.updateViewportBounds(0, 0, 100, 100);
+    tools::SelectionTool tool;
+    EXPECT_TRUE(tool.initialize(tool_context));
+    tool.setEnabled(true);
+    controller.handleMouseMove(50, 50);
+    controller.handleScroll(0, 1);
+    EXPECT_TRUE(controller.isCameraNavigating());
+    rendering_manager_->setCursorPreviewState(true, 50, 50, 20, true);
+    tool.update(tool_context);
+    EXPECT_FALSE(rendering_manager_->isCursorPreviewActive());
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0}));
+    tool.setEnabled(false);
+    input::InputBindings::setPersistenceEnabled(true);
 }

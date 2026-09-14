@@ -61,6 +61,7 @@ namespace lfs::vis::gui {
                    element->IsClassSet("toolbar-drag-handle") ||
                    element->IsClassSet("viewport-transform-option") ||
                    element->IsClassSet("viewport-transform-action") ||
+                   element->IsClassSet("viewport-transfer-queue") ||
                    element->IsClassSet("vram-hud-tree-row") ||
                    element->IsClassSet("vram-hud-expand-toggle") ||
                    element->IsClassSet("vram-hud-tab") ||
@@ -563,6 +564,7 @@ namespace lfs::vis::gui {
             }));
         document_sync_subscriptions_.push_back(
             store.language_generation.subscribe(mark_document_dirty));
+        document_sync_subscriptions_.push_back(store.gallery_state.subscribe(mark_document_dirty));
     }
 
     void RmlViewportOverlay::refreshGTMetricsOverlayFromStore() {
@@ -994,6 +996,7 @@ namespace lfs::vis::gui {
 
     void RmlViewportOverlay::setProjectDragOverlay(ProjectDragOverlayState state) {
         if (project_drag_overlay_.visible == state.visible &&
+            project_drag_overlay_.gallery_scene == state.gallery_scene &&
             project_drag_overlay_.label == state.label) {
             return;
         }
@@ -1013,6 +1016,10 @@ namespace lfs::vis::gui {
                 "width",
                 std::format("{:.1f}px", std::max(vp_size_.x - viewport_content_offset_, 0.0f)));
         }
+        if (auto* const title = document_->GetElementById("project-drop-title"))
+            title->SetClass("hidden", project_drag_overlay_.gallery_scene);
+        if (auto* const title = document_->GetElementById("gallery-drop-title"))
+            title->SetClass("hidden", !project_drag_overlay_.gallery_scene);
         if (auto* const label = document_->GetElementById("project-drop-label")) {
             label->SetInnerRML(
                 Rml::StringUtilities::EncodeRml(project_drag_overlay_.label));

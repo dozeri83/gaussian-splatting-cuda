@@ -111,7 +111,8 @@ namespace lfs::vis {
     // Plain Device::GPU tensors (Vulkan storage) when the process default GPU backend is Vulkan.
     // Otherwise one-tensor-per-VkBuffer CUDA-exportable VMM imported into the window context.
     // Empty when interop is unavailable on the CUDA path (headless). Shared by the file loader
-    // and in-memory inserts (Python API).
-    [[nodiscard]] LFS_VIS_API lfs::core::SplatTensorAllocator makeViewerSplatTensorAllocator();
+    // and in-memory inserts (Python API). preserve_float_shN keeps SplatData.shN out of the
+    // q16 workspace elision on the CUDA-interop path.
+    [[nodiscard]] LFS_VIS_API lfs::core::SplatTensorAllocator makeViewerSplatTensorAllocator(bool preserve_float_shN = false);
 
 } // namespace lfs::vis

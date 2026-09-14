@@ -220,9 +220,20 @@ namespace lfs::vis::project {
         createProjectAt(
             const std::filesystem::path& path,
             ProjectSwitchDisposition disposition =
-                ProjectSwitchDisposition::RequireClean);
+                ProjectSwitchDisposition::RequireClean,
+            bool allow_existing_destination_replacement = false);
+        // Normalize, reject scratch/unpublished paths, and inspect an
+        // existing destination without mutating the live scene or file.
+        [[nodiscard]] lfs::Result<void>
+        preflightCreateDestination(
+            const std::filesystem::path& path,
+            bool allow_existing_destination_replacement = false);
         [[nodiscard]] bool isDirty();
         [[nodiscard]] bool hasSourcePath() const;
+        [[nodiscard]] std::shared_ptr<lfs::io::project::ProjectDocument>
+        boundDocument() const noexcept {
+            return document_;
+        }
         [[nodiscard]] bool isScratchBoundSession() const;
         [[nodiscard]] bool isBlankProject() const;
         [[nodiscard]] bool isHydrating() const;
@@ -594,7 +605,8 @@ namespace lfs::vis::project {
             bool allow_during_application_close = false);
         [[nodiscard]] lfs::Result<void>
         bindUntitledSessionToMaster(
-            const std::filesystem::path& destination);
+            const std::filesystem::path& destination,
+            bool allow_existing_destination_replacement = false);
         void resetAdoptedSnapshotCountOnServiceRestart(
             std::uint64_t completed_snapshots);
         [[nodiscard]] lfs::Result<void>

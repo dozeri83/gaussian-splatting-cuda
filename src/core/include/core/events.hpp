@@ -31,7 +31,11 @@ namespace lfs::core {
                               NUREC_USDZ = 5,
                               RAD = 6,
                               COLMAP = 7,
-                              SSOG = 8 };
+                              SSOG = 8,
+                              GALLERY_SCENE = 9,
+                              GALLERY_SOG = 10,
+                              GALLERY_SSOG = 11,
+                              GALLERY_SPZ = 12 }; // Internal local-node staging for gallery bundles.
 
 // Event macro using shared event bridge (solves singleton duplication between exe and Python module)
 #define EVENT(Name, ...)                                   \
@@ -61,6 +65,8 @@ namespace lfs::core {
             EVENT(StopTraining, );
             EVENT(ResetTraining, );
             EVENT(LoadFile, std::filesystem::path path; bool is_dataset; std::filesystem::path output_path = {}; std::filesystem::path init_path = {}; std::string centralize_dataset = {}; std::optional<int> max_width = {}; std::optional<int> min_track_length = {}; bool apply_auto_crop = false; bool stop_training = false; bool discard_changes = false; bool replace = false;);
+            EVENT(PrepareGalleryProject, std::filesystem::path source_path; std::filesystem::path destination; ExportFormat payload_format = ExportFormat::GALLERY_SOG; std::string expected_commit_uuid;);
+            EVENT(LoadGalleryScene, std::vector<std::filesystem::path> paths; std::vector<std::string> names; std::vector<glm::mat4> transforms; std::vector<int> sh_degrees; std::string group_name; bool hidden = false;);
             EVENT(LoadCheckpointForTraining, std::filesystem::path checkpoint_path; std::filesystem::path dataset_path; std::filesystem::path output_path;);
             EVENT(ImportColmapCameras, std::filesystem::path sparse_path;);
             EVENT(LoadConfigFile, std::filesystem::path path;);
@@ -70,13 +76,13 @@ namespace lfs::core {
             EVENT(NewProject, bool discard_changes = false; bool stop_training = false;);
             EVENT(ProjectSave, bool regenerate_preview = true;);
             EVENT(ProjectSaveAs, std::filesystem::path path;);
-            EVENT(ProjectCreate, std::filesystem::path path; bool discard_changes = false; bool stop_training = false;);
+            EVENT(ProjectCreate, std::filesystem::path path; bool discard_changes = false; bool stop_training = false; bool allow_existing_destination_replacement = false;);
             EVENT(ProjectOpen, std::filesystem::path path; bool discard_changes = false; bool stop_training = false; bool keep_asset_manager_open = false;);
             EVENT(ProjectCompact, );
             EVENT(ProjectEmbedDataset, );
-            EVENT(ShowProjectSwitchConfirmation, bool new_project = false; std::filesystem::path path; bool keep_asset_manager_open = false; std::filesystem::path create_path = {};);
+            EVENT(ShowProjectSwitchConfirmation, bool new_project = false; std::filesystem::path path; bool keep_asset_manager_open = false; std::filesystem::path create_path = {}; bool allow_existing_destination_replacement = false;);
             EVENT(ShowLoadFileConfirmation, std::vector<std::filesystem::path> paths; bool is_dataset = false; bool replace = false;);
-            EVENT(ShowStopTrainingConfirmation, bool new_project = false; std::filesystem::path path; bool discard_changes = false; bool keep_asset_manager_open = false; std::filesystem::path create_path = {};);
+            EVENT(ShowStopTrainingConfirmation, bool new_project = false; std::filesystem::path path; bool discard_changes = false; bool keep_asset_manager_open = false; std::filesystem::path create_path = {}; bool allow_existing_destination_replacement = false;);
             EVENT(SetReopenLastProject, bool enabled;);
             EVENT(SetAutoSaveOnClose, bool enabled;);
             EVENT(SetEmbedDatasetByDefault, bool enabled;);

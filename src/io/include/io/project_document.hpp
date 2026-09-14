@@ -59,6 +59,9 @@ namespace lfs::io::project {
         [[nodiscard]] static lfs::Result<LazyChunkValue>
         from_owned(std::vector<std::byte> bytes,
                    const lfs::core::Uuid& snapshot_uuid);
+        // Independent owner of the same file-backed or owned bytes. Safe to
+        // retain after the source ProjectDocument is closed or replaced.
+        [[nodiscard]] lfs::Result<LazyChunkValue> share() const;
 
         [[nodiscard]] std::uint64_t size() const noexcept;
         [[nodiscard]] const lfs::core::Uuid& snapshot_uuid() const noexcept;
@@ -103,7 +106,8 @@ namespace lfs::io::project {
         lfs::core::Uuid save_as_project_uuid = {};
         IndexCompression index_compression = IndexCompression::Zstd;
         std::uint64_t disk_reserve_bytes = 64ull * 1024 * 1024;
-        // Only a file-dialog-confirmed Save As may replace a first-save destination.
+        // First-save replacement requires explicit caller authorization
+        // (file-dialog Save As, or New Project overwrite consent).
         bool allow_existing_destination_replacement = false;
         // Explicit GUI saves may replace THMB. An empty span means carry the
         // current preview forward without regenerating it.
@@ -122,6 +126,15 @@ namespace lfs::io::project {
         // the live document to that app-private path.
         bool leave_unbound = false;
     };
+
+    // Inspect a first-save destination without creating, truncating, or
+    // unlinking it. Unauthorized collisions return AlreadyExists. Authorized
+    // replacement still refuses unreadable or writer-incompatible files so
+    // the previous bytes stay in place.
+    [[nodiscard]] LFS_IO_API lfs::Result<void>
+    preflight_first_save_destination(
+        const std::filesystem::path& path,
+        bool allow_existing_destination_replacement);
 
     [[nodiscard]] LFS_IO_API lfs::Result<std::vector<std::byte>>
     dataset_preview_png(const std::filesystem::path& first_image,
@@ -294,6 +307,9 @@ namespace lfs::io::project {
 
         [[nodiscard]] const LazyChunkValue*
         find_dataset_source(const lfs::core::Uuid& instance_uuid) const noexcept;
+        [[nodiscard]] lfs::Result<std::filesystem::path> embedded_asset_directory() const;
+        [[nodiscard]] lfs::Result<std::filesystem::path>
+        materialize_embedded_asset(const lfs::core::Uuid& uuid, std::string_view extension) const;
         [[nodiscard]] std::vector<lfs::core::Uuid>
         dataset_source_uuids() const;
         [[nodiscard]] lfs::Result<ProjectDocumentSaveReport>

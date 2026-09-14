@@ -50,9 +50,14 @@ PANEL_SPECS = {
         "FLOATING", 100, "rmlui/about.rml", "CONTENT", (400, 0),
         update_policy="dirty",
     ),
-    "account": _PanelSpec(
-        "lfs_plugins.account_panel", "AccountPanel", "lfs.account", "Account",
-        "FLOATING", 95, "rmlui/account_panel.rml", "CONTENT", (440, 0),
+    "gallery_transfer": _PanelSpec(
+        "lfs_plugins.gallery_transfer_panel", "GalleryTransferPanel", "lfs.gallery_transfer", "Transfers",
+        "FLOATING", 93, "rmlui/gallery_transfer_panel.rml", "CONTENT", (460, 0), update_policy="dirty",
+    ),
+    "gallery_file": _PanelSpec(
+        "lfs_plugins.gallery_file_panel", "GalleryFilePanel", "lfs.gallery_file", "Gallery",
+        "FLOATING", 94, "rmlui/gallery_file_panel.rml", "CONTENT", (500, 0),
+        update_policy="dirty", has_poll=True,
     ),
     "bug_report": _PanelSpec(
         "lfs_plugins.bug_report_panel", "BugReportPanel", "lfs.bug_report",
@@ -272,9 +277,6 @@ def _build_builtin_panel_steps(lf):
     def about_panel():
         _register_lazy_panel(lf, "about")
 
-    def account_panel():
-        _register_lazy_panel(lf, "account")
-
     def bug_report_panel():
         _register_lazy_panel(lf, "bug_report")
 
@@ -284,6 +286,11 @@ def _build_builtin_panel_steps(lf):
         from .portal_account import initialize_portal_account
 
         initialize_portal_account()
+        from .gallery_controller import get_gallery_controller
+
+        gallery = get_gallery_controller()
+        if gallery.service.snapshot().get("signed_in"):
+            gallery.refresh()
 
     def getting_started_panel():
         _register_lazy_panel(lf, "getting_started")
@@ -320,6 +327,8 @@ def _build_builtin_panel_steps(lf):
 
     def asset_manager_panel():
         _register_lazy_panel(lf, "asset_manager")
+        _register_lazy_panel(lf, "gallery_transfer")
+        _register_lazy_panel(lf, "gallery_file")
 
     def overlays():
         from .overlays import register as register_overlays
@@ -337,7 +346,6 @@ def _build_builtin_panel_steps(lf):
         ("menus", menus),
         ("export_panel", export_panel),
         ("about_panel", about_panel),
-        ("account_panel", account_panel),
         ("bug_report_panel", bug_report_panel),
         ("portal_account", portal_account),
         ("getting_started_panel", getting_started_panel),

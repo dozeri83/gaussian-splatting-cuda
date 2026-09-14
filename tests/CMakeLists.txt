@@ -340,6 +340,8 @@ set(TEST_FILES
     test_sh_value_storage.cpp
     test_morton_reorder.cpp
     test_transform_bake_q16.cpp
+    test_splat_affine_transform.cpp
+    test_splat_sh_affine.cpp
     test_splat_data_clone.cpp
     test_tensor_reduction.cpp
     test_tensor_reduction_alignment.cpp
@@ -423,6 +425,7 @@ set(TEST_FILES
     test_geometry_payload.cpp
     test_selection_chapter.cpp
     test_project_document.cpp
+    test_gallery_scene_publication.cpp
     test_project_lifecycle.cpp
     test_p8_compatibility.cpp
     test_job_registry.cpp
@@ -449,6 +452,7 @@ set(TEST_FILES
     test_video_reconstruction.cpp
     test_video_export_utils.cpp
     test_video_frame_extractor_naming.cpp
+    test_video_cuda_frame_handoff.cpp
     test_video_hdr_logic.cpp
     test_visualizer_post_work.cpp
     test_panel_registry_animation_demand.cpp
@@ -492,10 +496,12 @@ set(TEST_FILES
     test_python_io.cpp
     test_extended_unary_ops_vs_torch.cpp
     test_scene_validity.cpp
+    test_training_scene_init_concurrency.cpp
     test_scene_consolidation.cpp
     test_scene_graph_fuzz.cpp
     test_uuid.cpp
     test_render_settings_defaults.cpp
+    test_portal_render_profile.cpp
     test_scene_upscaler_registry.cpp
     test_scene_upscaler_plugin_api.cpp
     test_scene_motion_contract.cpp
@@ -525,6 +531,7 @@ set(TEST_FILES
     test_normal_prior_decode.cpp
     test_normal_auto_generate.cpp
     test_metrics_evaluator.cpp
+    test_metrics_eval_mask.cpp
     test_background_image.cpp
     test_nvcodec_jpeg2k_16bit.cpp
     test_nvcodec_sentinel_validation.cpp

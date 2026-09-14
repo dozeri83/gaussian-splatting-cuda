@@ -10,6 +10,7 @@
 #include "core/tensor.hpp"
 #include "operation/undo_history.hpp"
 #include "rendering/rendering_manager.hpp"
+#include "rendering/rendering_types.hpp"
 #include "scene/scene_manager.hpp"
 #include "selection/selection_service.hpp"
 #include <filesystem>
@@ -1162,4 +1163,49 @@ TEST_F(SelectionServiceInteractionsTest, DepthWindowChangeInvalidatesInteractive
     const auto brush_result = service_->finishInteractiveSelection();
     ASSERT_TRUE(brush_result.success) << brush_result.error;
     EXPECT_EQ(selection_values(*scene_manager_), fresh_left_values);
+}
+
+TEST_F(SelectionServiceInteractionsTest, ComparisonSelectAllFilteredStillAppliesDepthFilter) {
+    ASSERT_NE(scene_manager_->getScene().addSplat(
+                  "right",
+                  make_test_splat({
+                      5.0f,
+                      0.0f,
+                      0.0f,
+                  })),
+              lfs::core::NULL_NODE);
+    EXPECT_FALSE(scene_manager_->getScene().hasPreparedCombinedModel());
+
+    auto settings = rendering_manager_->getSettings();
+    settings.split_view_mode = lfs::vis::SplitViewMode::PLYComparison;
+    settings.crop_filter_for_selection = false;
+    rendering_manager_->updateSettings(settings);
+    // Dev's depth filter is a camera-space window. The default camera sees
+    // the origin at depth 8.5442; the x=1 and x=5 points lie outside this band.
+    arm_viewer_camera_depth_band(*rendering_manager_);
+    ASSERT_TRUE(rendering_manager_->isPLYComparisonActive());
+
+    const auto result = service_->selectAllFiltered();
+    ASSERT_TRUE(result.success) << result.error;
+    EXPECT_EQ(result.affected_count, 1u);
+    // A silent comparison no-op would keep every gaussian. The depth window
+    // only contains the origin point of the first node.
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0, 0}));
+    EXPECT_TRUE(scene_manager_->getScene().hasPreparedCombinedModel());
+}
+
+TEST_F(SelectionServiceInteractionsTest, ComparisonHoverKeepsOwnedPanelPositionsWithoutCombinedModel) {
+    scene_manager_->getScene().addSplat("right", make_test_splat({0.0f, 0.0f, 0.0f}));
+    auto settings = rendering_manager_->getSettings();
+    settings.split_view_mode = lfs::vis::SplitViewMode::PLYComparison;
+    rendering_manager_->updateSettings(settings);
+    const auto positions = service_->getScreenPositions();
+    ASSERT_NE(positions, nullptr);
+    ASSERT_EQ(positions->numel(), 6u);
+    const auto values = positions->cpu().to_vector();
+    EXPECT_GT(values[0], -1.0e7f);
+    EXPECT_GT(values[1], -1.0e7f);
+    EXPECT_LT(values[4], -1.0e7f);
+    EXPECT_LT(values[5], -1.0e7f);
+    EXPECT_FALSE(scene_manager_->getScene().hasPreparedCombinedModel());
 }

@@ -283,8 +283,11 @@ def is_training_active() -> bool:
 def new_project(discard_changes: bool = False, stop_training: bool = False) -> None:
     """Clear all project state and start a new project"""
 
-def project_create(path: str, discard_changes: bool = False, stop_training: bool = False) -> None:
+def project_create(path: str, discard_changes: bool = False, stop_training: bool = False, overwrite: bool = False) -> bool:
     """Create and bind a new .licht project at path"""
+
+def project_create_pending() -> bool:
+    """Whether a stop-then-create is queued and has not bound yet"""
 
 def project_embed_dataset() -> None:
     """Embed the active project's external dataset verbatim"""
@@ -397,6 +400,21 @@ def cancel_exit() -> None:
 
 def force_exit() -> None:
     """Explicitly discard unsaved changes and exit."""
+
+def load_gallery_scene(nodes: list, name: str, hidden: bool = False) -> None:
+    """
+    Load verified gallery nodes on the managed import worker, then attach a complete group. Nodes contain path, affine transform and shDegree. A failed or canceled batch adds no group.
+    """
+
+def prepare_gallery_scene(path: str, payload_format: str = 'ply') -> None:
+    """
+    Publish visible splats and appearance into a fresh native .licht file. The selected PLY, SOG, SSOG or SPZ v4 data and HDR assets are embedded; training and editor state are excluded.
+    """
+
+def prepare_gallery_project(source_path: str, destination: str, payload_format: str = 'sog', expected_commit_uuid: str = '') -> None:
+    """
+    Prepare a saved .licht project on the managed export worker without opening it in the editor. Destination must be a fresh staging directory. Poll ui.get_export_state() for progress, errors and commit_uuid.
+    """
 
 def export_scene(format: int, path: str, node_names: Sequence[str], sh_degree: int, rad_flip_y: bool = False, rad_streamable: bool = True, spz_version: int = 4, include_provenance: bool = True, *, lod_levels: int = 4, lod_ratio: float = 0.5, chunk_count_k: int = 512, chunk_extent: float = 16.0, chunk_min_k: int = 8, kmeans_iterations: int = 10) -> None:
     """
@@ -665,8 +683,10 @@ def get_depth_view_mode() -> str:
 def set_depth_view_mode(mode: str) -> None:
     """Set depth-map visualization mode"""
 
-def set_orthographic(ortho: bool) -> None:
-    """Enable or disable orthographic projection"""
+def set_orthographic(ortho: bool, extent_world: float | None = None) -> None:
+    """
+    Enable or disable orthographic projection, optionally setting its vertical world extent
+    """
 
 def on_training_start(callback: Callable) -> Callable:
     """Decorator for training start handler"""

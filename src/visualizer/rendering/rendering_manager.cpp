@@ -894,6 +894,11 @@ namespace lfs::vis {
         return split_view_service_.isGTComparisonActive(settings_);
     }
 
+    bool RenderingManager::isPLYComparisonActive() const {
+        std::lock_guard<std::mutex> lock(settings_mutex_);
+        return splitViewUsesPLYComparison(settings_.split_view_mode);
+    }
+
     bool RenderingManager::depthWindowDragActiveLocked() const {
         // Preview counters track latched drags that crossed the draw threshold.
         // Frame capture uses this signal; the sync gate uses ownership instead.

@@ -14,6 +14,7 @@ set(LFS_CORE_CUDA_SOURCES
     undistort/undistort.cu
     kernels/selection_ops.cu
     selection_attribute_ops.cpp
+    kernels/splat_transform.cu
     kernels/sh_layout.cu
     sh_value_quant_kernels.cu
     tensor_debug.cu

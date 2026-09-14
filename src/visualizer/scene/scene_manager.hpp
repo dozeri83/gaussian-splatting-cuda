@@ -106,7 +106,7 @@ namespace lfs::vis {
         [[nodiscard]] std::expected<lfs::io::LoadResult, std::string> stageSplatFile(
             const std::filesystem::path& path,
             lfs::io::ProgressCallback progress = {},
-            lfs::io::CancelCallback cancel_requested = {});
+            lfs::io::CancelCallback cancel_requested = {}, bool preserve_raw = false);
         [[nodiscard]] std::string attachLoadedSplatFile(const std::filesystem::path& path,
                                                         const std::string& name_hint,
                                                         bool is_visible,
@@ -115,7 +115,9 @@ namespace lfs::vis {
         [[nodiscard]] std::string attachLoadedSplatNode(const std::filesystem::path& path,
                                                         const std::string& name_hint,
                                                         bool is_visible,
-                                                        lfs::io::LoadResult load_result);
+                                                        lfs::io::LoadResult load_result,
+                                                        bool preserve_raw = false,
+                                                        core::NodeId parent = core::NULL_NODE);
         std::string addSplatFile(const std::filesystem::path& path, const std::string& name = "", bool is_visible = true);
         std::string addGeneratedSplatNode(std::unique_ptr<core::SplatData> model,
                                           const std::string& source_name,
@@ -217,8 +219,10 @@ namespace lfs::vis {
         const lfs::core::SplatData* getModelForRendering() const;
 
         // Build complete render state from scene graph
-        // This is the single source of truth for all rendering data
-        SceneRenderState buildRenderState() const;
+        // This is the single source of truth for all rendering data.
+        // metadata_only skips combined-model concatenation and per-gaussian
+        // transform/selection aggregates; the two caches are distinct.
+        SceneRenderState buildRenderState(SceneRenderStateOptions options = {}) const;
 
         // Direct info queries
         struct SceneInfo {
@@ -448,6 +452,7 @@ namespace lfs::vis {
         mutable std::uint64_t cached_render_scene_generation_local_ = 0;
         mutable const lfs::core::SplatData* cached_render_model_ = nullptr;
         mutable ContentType cached_render_content_type_ = ContentType::Empty;
+        mutable bool cached_render_metadata_only_ = false;
     };
 
 } // namespace lfs::vis

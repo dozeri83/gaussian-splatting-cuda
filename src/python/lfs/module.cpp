@@ -336,7 +336,7 @@ namespace {
         if (auto posted = lfs::vis::post_guarded_and_wait<void>(
                 viewer, context,
                 [emit = std::forward<EmitFn>(emit_fn)]() mutable
-                -> lfs::Result<void> {
+                    -> lfs::Result<void> {
                     emit();
                     return {};
                 },
@@ -990,7 +990,7 @@ NB_MODULE(lichtfeld, m) {
         "trainer_state",
         []() -> const char* {
             const auto* const tm = lfs::python::get_trainer_manager();
-            if (!tm || !tm->hasTrainer()) {
+            if (!tm || (!tm->hasTrainer() && !tm->isFinished())) {
                 const auto session = stored_training_session();
                 if (session.available) {
                     return session.completed ? "completed" : "paused";
@@ -1231,22 +1231,43 @@ NB_MODULE(lichtfeld, m) {
         "project_create",
         [](const std::string& path,
            const bool discard_changes,
-           const bool stop_training) {
+           const bool stop_training,
+           const bool overwrite) {
             nb::gil_scoped_release release;
             const auto project_path = python_utf8_path(path);
+            auto* const viewer = lfs::python::get_visualizer();
+            bool created = false;
             emit_project_cmd_marshaled(
                 "python.project_create",
-                [project_path, discard_changes, stop_training] {
+                [project_path, discard_changes, stop_training,
+                 overwrite, viewer, &created] {
                     lfs::core::events::cmd::ProjectCreate{
                         .path = project_path,
                         .discard_changes = discard_changes,
-                        .stop_training = stop_training}
+                        .stop_training = stop_training,
+                        .allow_existing_destination_replacement =
+                            overwrite}
                         .emit();
+                    created = !viewer || viewer->consumeProjectCreateSucceeded();
                 });
+            return created;
         },
         nb::arg("path"), nb::arg("discard_changes") = false,
         nb::arg("stop_training") = false,
+        nb::arg("overwrite") = false,
         "Create and bind a new .licht project at path");
+    m.def(
+        "project_create_pending",
+        []() {
+            nb::gil_scoped_release release;
+            bool pending = false;
+            emit_project_cmd_marshaled("python.project_create_pending", [&pending] {
+                const auto* const viewer = lfs::python::get_visualizer();
+                pending = viewer && viewer->projectCreatePending();
+            });
+            return pending;
+        },
+        "Whether a stop-then-create is queued and has not bound yet");
     m.def(
         "project_embed_dataset",
         []() {
@@ -1902,10 +1923,95 @@ NB_MODULE(lichtfeld, m) {
         "Explicitly discard unsaved changes and exit.");
 
     m.def(
+        "load_gallery_scene",
+        [](const nb::list& nodes, const std::string& name, const bool hidden) {
+            if (nodes.size() == 0 || nodes.size() > 4096 || name.empty() || name.size() > 200)
+                throw std::invalid_argument("Invalid gallery scene import.");
+            lfs::core::events::cmd::LoadGalleryScene command;
+            command.group_name = name;
+            command.hidden = hidden;
+            for (const auto item : nodes) {
+                const auto node = nb::cast<nb::dict>(item);
+                const auto rows = nb::cast<std::vector<std::vector<float>>>(node["transform"]);
+                if (rows.size() != 4 || std::any_of(rows.begin(), rows.end(), [](const auto& row) { return row.size() != 4; }))
+                    throw std::invalid_argument("Invalid gallery node transform.");
+                glm::mat4 matrix{1.0f};
+                for (int row = 0; row < 4; ++row)
+                    for (int column = 0; column < 4; ++column) {
+                        if (!std::isfinite(rows[row][column]))
+                            throw std::invalid_argument("Invalid gallery node transform.");
+                        matrix[column][row] = rows[row][column];
+                    }
+                if (rows[3] != std::vector<float>{0, 0, 0, 1})
+                    throw std::invalid_argument("Gallery node transform must be affine.");
+                const int degree = nb::cast<int>(node["shDegree"]);
+                if (degree < 0 || degree > 3)
+                    throw std::invalid_argument("Invalid gallery SH degree.");
+                const auto node_name = node.contains("name") ? nb::cast<std::string>(node["name"]) : std::string{};
+                if (node_name.size() > 4096 || node_name.find('\0') != std::string::npos)
+                    throw std::invalid_argument("Invalid gallery node name.");
+                command.paths.push_back(python_utf8_path(nb::cast<std::string>(node["path"])));
+                command.names.push_back(node_name);
+                command.transforms.push_back(matrix);
+                command.sh_degrees.push_back(degree);
+            }
+            nb::gil_scoped_release release;
+            emit_project_cmd_marshaled("python.load_gallery_scene", [command = std::move(command)] { command.emit(); });
+        },
+        nb::arg("nodes"), nb::arg("name"), nb::arg("hidden") = false,
+        "Load verified gallery nodes on the managed import worker, then attach a complete group. "
+        "Nodes contain path, affine transform and shDegree. A failed or canceled batch adds no group.");
+
+    m.def(
+        "prepare_gallery_scene",
+        [](const std::string& path, const std::string& payload_format) {
+            const int format = payload_format == "ply" ? 9 : payload_format == "sog" ? 10
+                                                         : payload_format == "ssog"  ? 11
+                                                         : payload_format == "spz"   ? 12
+                                                                                     : -1;
+            if (format < 0)
+                throw std::invalid_argument("Choose PLY, SOG, SSOG or SPZ compression.");
+            nb::gil_scoped_release release;
+            emit_project_cmd_marshaled("python.prepare_gallery_scene", [path, format] {
+                lfs::python::invoke_export(format, path, {}, 3, false, true, 4, false);
+            });
+        },
+        nb::arg("path"), nb::arg("payload_format") = "ply",
+        "Publish visible splats and appearance into a fresh native .licht file. "
+        "The selected PLY, SOG, SSOG or SPZ v4 data and HDR assets are embedded; training and editor state are excluded.");
+
+    m.def(
+        "prepare_gallery_project",
+        [](const std::string& source_path, const std::string& destination,
+           const std::string& payload_format, const std::string& expected_commit_uuid) {
+            using lfs::core::ExportFormat;
+            const auto format = (payload_format == "ply" || payload_format == "studio") ? ExportFormat::GALLERY_SCENE
+                                : payload_format == "sog"                               ? ExportFormat::GALLERY_SOG
+                                : payload_format == "ssog"                              ? ExportFormat::GALLERY_SSOG
+                                : payload_format == "spz"                               ? ExportFormat::GALLERY_SPZ
+                                                                                        : throw std::invalid_argument("Choose .licht, SOG, SSOG or SPZ.");
+            if (!expected_commit_uuid.empty() && !lfs::core::Uuid::from_string(expected_commit_uuid))
+                throw std::invalid_argument("Invalid expected project commit UUID.");
+            lfs::core::events::cmd::PrepareGalleryProject command{
+                .source_path = python_utf8_path(source_path),
+                .destination = python_utf8_path(destination),
+                .payload_format = format,
+                .expected_commit_uuid = expected_commit_uuid};
+            nb::gil_scoped_release release;
+            emit_project_cmd_marshaled("python.prepare_gallery_project", [command = std::move(command)] { command.emit(); });
+        },
+        nb::arg("source_path"), nb::arg("destination"), nb::arg("payload_format") = "sog",
+        nb::arg("expected_commit_uuid") = "",
+        "Prepare a saved .licht project on the managed export worker without opening it in the editor. "
+        "Destination must be a fresh staging directory. Poll ui.get_export_state() for progress, errors and commit_uuid.");
+
+    m.def(
         "export_scene",
         [](int format, const std::string& path, const std::vector<std::string>& node_names, int sh_degree,
            bool rad_flip_y, bool rad_streamable, int spz_version, bool include_provenance,
            int lod_levels, float lod_ratio, int chunk_count_k, float chunk_extent, int chunk_min_k, int kmeans_iterations) {
+            if (format >= 9 && format <= 12)
+                throw std::runtime_error("Use prepare_gallery_scene() to prepare a gallery upload.");
             lfs::python::invoke_export(format, path, node_names, sh_degree, rad_flip_y, rad_streamable,
                                        spz_version, include_provenance, lod_levels, lod_ratio, chunk_count_k, chunk_extent, chunk_min_k, kmeans_iterations);
         },
@@ -2835,7 +2941,9 @@ NB_MODULE(lichtfeld, m) {
         nb::arg("mode"), "Set depth-map visualization mode");
 
     m.def(
-        "set_orthographic", [](bool ortho) {
+        "set_orthographic", [](bool ortho, std::optional<double> extent_world) {
+            if (extent_world && (!ortho || !std::isfinite(*extent_world) || *extent_world <= 0.0))
+                throw nb::value_error("Orthographic extent must be positive and finite, with orthographic projection enabled");
             auto* rm = lfs::python::get_rendering_manager();
             if (!rm)
                 return;
@@ -2849,9 +2957,21 @@ NB_MODULE(lichtfeld, m) {
                 distance_to_pivot = glm::length(pivot - eye);
             }
 
-            rm->setOrthographic(ortho, viewport_height, distance_to_pivot);
+            if (extent_world) {
+                const float scale = static_cast<float>(viewport_height / *extent_world);
+                if (!std::isfinite(scale) || scale <= 0.0f)
+                    throw nb::value_error("Open a viewport with a representable orthographic extent");
+                auto settings = rm->getSettings();
+                settings.orthographic = true;
+                settings.ortho_scale = scale;
+                rm->updateSettings(settings, lfs::vis::DirtyFlag::ALL);
+                lfs::vis::apply_set_ortho_scale(std::nullopt);
+            } else {
+                rm->setOrthographic(ortho, viewport_height, distance_to_pivot);
+                lfs::vis::apply_set_ortho_scale(std::nullopt);
+            }
         },
-        nb::arg("ortho"), "Enable or disable orthographic projection");
+        nb::arg("ortho"), nb::arg("extent_world") = nb::none(), "Enable or disable orthographic projection, optionally setting its vertical world extent");
 
     // Hook registration functions (decorator-style)
     m.def(

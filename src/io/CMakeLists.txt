@@ -132,6 +132,8 @@ add_library(lfs_video STATIC
         video/video_reconstruction.cpp
         video/color_convert.cuh
         video/color_convert.cu
+        video/cuda_frame_handoff.hpp
+        video/cuda_frame_handoff.cpp
         video_frame_extractor.hpp
         video_frame_extractor.cpp
         hdr_tonemap.hpp
@@ -162,6 +164,7 @@ target_link_libraries(lfs_video
         spdlog::spdlog
         nlohmann_json::nlohmann_json
         CUDA::cudart
+        CUDA::cuda_driver
 )
 
 # libplacebo's static pkg-config dependency chain includes shaderc and

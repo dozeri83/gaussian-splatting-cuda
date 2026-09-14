@@ -5,6 +5,7 @@ import math
 import lichtfeld as lf
 
 from .. import toolbar as viewport_toolbar
+from ..gallery_transfer_overlay import GalleryTransferOverlay
 
 try:
     from ..ui.store import native_value as _native_store_value
@@ -76,10 +77,12 @@ def _get_import_state():
 
 class _OverlayDocumentController:
     def __init__(self):
+        self.gallery_transfers = GalleryTransferOverlay()
         self.reset()
 
     def reset(self):
         self._handle = None
+        self.gallery_transfers.reset()
         viewport_toolbar.reset_overlay_state()
 
     def update(self, doc=None):
@@ -94,6 +97,9 @@ class _OverlayDocumentController:
         dirty_sources = []
         toolbar_sources = viewport_toolbar.update_overlay(doc) or []
         dirty_sources.extend(f"toolbar.{source}" for source in toolbar_sources)
+        if self.gallery_transfers.update():
+            dirty_sources.append("gallery_transfers")
+            self._handle.dirty_all()
         return dirty_sources
 
     def _ensure_model(self, doc):
@@ -116,6 +122,7 @@ class _OverlayDocumentController:
             return False
 
         viewport_toolbar.bind_overlay_model(model)
+        self.gallery_transfers.bind_model(model)
         self._handle = model.get_handle()
         viewport_toolbar.attach_overlay_model_handle(self._handle)
         body.set_attribute("data-model", _MODEL_NAME)
@@ -370,6 +377,11 @@ def sync_document(doc=None):
     if not _hook_registered:
         return False
     return _sync_viewport_overlay_document(doc)
+
+
+def show_gallery_transfers():
+    _sync_viewport_overlay_document()
+    _document_controller.gallery_transfers.show()
 
 
 def _draw_viewport_overlay(layout):

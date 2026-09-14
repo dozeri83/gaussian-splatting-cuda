@@ -4555,6 +4555,7 @@ namespace lfs::vis::gui {
         applyDefaultStyle();
         rebuildFonts(scale);
         current_ui_scale_ = scale;
+        lfs::python::request_redraw();
 
         LOG_INFO("UI scale applied: {:.2f}", scale);
     }
@@ -5430,7 +5431,8 @@ namespace lfs::vis::gui {
                 SceneManager* const scene_manager = viewer_->getSceneManager();
                 std::optional<SceneRenderState> overlay_scene_state;
                 if (scene_manager && (settings.show_crop_box || settings.show_ellipsoid)) {
-                    overlay_scene_state = scene_manager->buildRenderState();
+                    overlay_scene_state =
+                        scene_manager->buildRenderState({.metadata_only = true});
                 }
                 const GizmoState gizmo_state = rendering_manager->getGizmoState();
                 appendVulkanSceneGuideOverlays(params,
@@ -6419,6 +6421,8 @@ namespace lfs::vis::gui {
             if (block_underlay_input)
                 menu_input = maskInputForBlockedUi(std::move(menu_input));
 
+            if (block_underlay_input && rml_menu_bar_.isOpen())
+                rml_menu_bar_.closeDropdown();
             const bool menu_was_open = rml_menu_bar_.isOpen();
             rml_menu_bar_.setUiHidden(ui_hidden_);
             rml_menu_bar_.processInput(menu_input);
@@ -6608,7 +6612,13 @@ namespace lfs::vis::gui {
         panel_input.screen_y = 0.0f;
         panel_input.screen_w = sdl_input.window_w;
         panel_input.screen_h = sdl_input.window_h;
-        PanelInputState raw_panel_input = panel_input;
+        // Top-level overlays must receive the original events. Menu capture only
+        // masks the panels underneath them, including a held menu-button release.
+        PanelInputState raw_panel_input = buildPanelInputFromSDL(sdl_input);
+        raw_panel_input.screen_x = 0.0f;
+        raw_panel_input.screen_y = 0.0f;
+        raw_panel_input.screen_w = sdl_input.window_w;
+        raw_panel_input.screen_h = sdl_input.window_h;
         if (block_underlay_input)
             panel_input = maskInputForBlockedUi(std::move(panel_input));
         if (!modal_overlay_open && global_context_menu_->isOpen())
@@ -7275,10 +7285,12 @@ namespace lfs::vis::gui {
         const auto resolve_project_asset_drag = [this, &sdl_input]() {
             constexpr std::string_view kProjectPayloadType =
                 "application/x-lichtfeld-project";
+            constexpr std::string_view kGalleryPayloadType =
+                "application/x-lichtfeld-gallery-scene";
             const auto payload = rmlui_manager_.dragPayload();
             const auto hit = hitTestPointer(sdl_input.mouse_x, sdl_input.mouse_y);
             const bool can_drop =
-                payload && payload->type == kProjectPayloadType &&
+                payload && (payload->type == kProjectPayloadType || payload->type == kGalleryPayloadType) &&
                 isPositionInViewport(sdl_input.mouse_x, sdl_input.mouse_y) &&
                 !hit.blocks_pointer && !hit.blocks_mouse_button;
 
@@ -7286,6 +7298,12 @@ namespace lfs::vis::gui {
                 const auto released = rmlui_manager_.takeReleasedDragPayload();
                 rml_viewport_overlay_.setProjectDragOverlay({});
                 if (released && can_drop) {
+                    if (released->type == kGalleryPayloadType) {
+                        const auto panel = PanelRegistry::instance().get_panel_instance("lfs.asset_manager");
+                        if (panel)
+                            panel->onViewportDrop(released->type, released->data);
+                        return;
+                    }
                     const auto path = lfs::core::utf8_to_path(released->data);
                     lfs::core::events::cmd::ProjectOpen{
                         .path = path,
@@ -7299,6 +7317,7 @@ namespace lfs::vis::gui {
 
             rml_viewport_overlay_.setProjectDragOverlay({
                 .visible = can_drop,
+                .gallery_scene = can_drop && payload->type == kGalleryPayloadType,
                 .label = can_drop ? payload->label : std::string{},
             });
         };
@@ -8547,6 +8566,7 @@ namespace lfs::vis::gui {
             } else {
                 pending_ui_scale_ = std::clamp(e.scale, 1.0f, 4.0f);
             }
+            lfs::python::request_redraw();
         });
 
         state::DiskSpaceSaveFailed::when([this](const auto& e) {

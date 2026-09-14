@@ -95,6 +95,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/native_panels.cpp
         gui/layout_state.cpp
         gui/async_task_manager.cpp
+        gui/gallery_scene_publication.cpp
         gui/bounds_gizmo.cpp
         gui/rotation_gizmo.cpp
         gui/scale_gizmo.cpp
@@ -229,7 +230,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
 # MSVC 14.44 ICEs (C1001 in msc1.cpp:1589) on the sequencer panel TUs under
 # /std:c++latest in both Debug (/Od /RTC1) and Release (/O2 /Ob2). Pin them to
 # /std:c++23 (not "latest") and add /bigobj for the heavy tensor + RmlUI + fmt instantiations.
-# The project lifecycle and GUI manager TUs exceed the COFF section limit in Debug and need /bigobj.
+# These large visualizer TUs exceed the COFF section limit in Debug and need /bigobj.
 if(MSVC)
     set_source_files_properties(
             ${CMAKE_CURRENT_SOURCE_DIR}/sequencer/rml_sequencer_panel.cpp
@@ -237,6 +238,7 @@ if(MSVC)
             PROPERTIES COMPILE_OPTIONS "/std:c++23;/bigobj"
     )
     set_source_files_properties(
+            ${CMAKE_CURRENT_SOURCE_DIR}/visualizer_impl.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/project/project_lifecycle.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/gui/gui_manager.cpp
             PROPERTIES COMPILE_OPTIONS "/bigobj"
@@ -350,7 +352,8 @@ compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/mesh_wireframe.
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/environment.frag" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/environment.frag.spv.h" kEnvironmentFragSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/depth_blit.frag" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/depth_blit.frag.spv.h" kDepthBlitFragSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/split_view.frag" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/split_view.frag.spv.h" kSplitViewFragSpv)
-compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/vksplat_compose.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/vksplat_compose.comp.spv.h" kVkSplatComposeCompSpv)
+compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/vksplat_compose.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/vksplat_compose.comp.spv.h" kVkSplatComposeCompSpv
+    "${CMAKE_SOURCE_DIR}/src/rendering/rasterizer/vulkan/shader/src/slang/display_color.inc")
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/scene_motion_reproject.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/scene_motion_reproject.comp.spv.h" kSceneMotionReprojectCompSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/scene_dlss_depth.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/scene_dlss_depth.comp.spv.h" kSceneDlssDepthCompSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/scene_temporal_resolve.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/scene_temporal_resolve.comp.spv.h" kSceneTemporalResolveCompSpv)

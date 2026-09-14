@@ -7,11 +7,13 @@
 
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
+#include "core/user_paths.hpp"
 #include "io/loader.hpp"
 #include "io/project_recovery.hpp"
 #include "project_container_internal.hpp"
 #include "project_framing.hpp"
 #include "span_streambuf.hpp"
+#include <fstream>
 
 #include <zstd.h>
 
@@ -40,6 +42,10 @@
 namespace lfs::io::project {
 
     namespace {
+
+        lfs::Error embedded_asset_error(std::string message) {
+            return detail::project_error(lfs::ErrorCode::DataLoss, std::move(message), "Embedded scene asset failed");
+        }
 
         constexpr std::uint16_t P3_CHUNK_VERSION = 1;
         constexpr std::uint64_t DOCUMENT_CLEAN_BASELINE = 0;
@@ -506,6 +512,48 @@ namespace lfs::io::project {
 
     } // namespace
 
+    lfs::Result<void> preflight_first_save_destination(
+        const std::filesystem::path& path,
+        const bool allow_existing_destination_replacement) {
+        std::error_code error;
+        const bool exists = std::filesystem::exists(path, error);
+        if (error) {
+            return fail<void>(
+                lfs::ErrorCode::PermissionDenied,
+                "The destination project could not be inspected.",
+                std::format("filesystem::exists failed: {}", error.message()),
+                "project.path");
+        }
+        if (!exists) {
+            return {};
+        }
+        if (!allow_existing_destination_replacement) {
+            return fail<void>(
+                lfs::ErrorCode::AlreadyExists,
+                "The destination project already exists.",
+                "P3 first-save assembly refuses implicit replacement",
+                "project.path");
+        }
+        auto existing = ProjectReader::open(path);
+        if (!existing) {
+            return lfs::Status::failure(std::move(existing).error());
+        }
+        const WriteCompatibility compatibility =
+            existing->write_compatibility();
+        if (!compatibility.safe) {
+            return fail<void>(
+                lfs::ErrorCode::Unsupported,
+                "This project is read-only in the current LichtFeld version.",
+                std::format(
+                    "replacement refused before writing project bytes: {}",
+                    compatibility.reasons.empty()
+                        ? std::string{"unknown writer incompatibility"}
+                        : compatibility.reasons.front()),
+                "commit.write_compatibility");
+        }
+        return {};
+    }
+
     struct LazyChunkValue::Impl {
         std::shared_ptr<ProjectReader> reader;
         std::optional<ChunkInfo> source;
@@ -602,6 +650,23 @@ namespace lfs::io::project {
             std::make_shared<const std::vector<std::byte>>(
                 std::move(bytes)),
             snapshot_uuid);
+    }
+
+    lfs::Result<LazyChunkValue> LazyChunkValue::share() const {
+        if (!impl_ || (!impl_->owned && !(impl_->reader && impl_->source))) {
+            return fail<LazyChunkValue>(
+                lfs::ErrorCode::FailedPrecondition,
+                "The lazy chapter has no byte source.",
+                "Neither clean file range nor owned storage is available",
+                "lazy_chunk.source");
+        }
+        auto clone = std::make_unique<Impl>();
+        clone->reader = impl_->reader;
+        clone->source = impl_->source;
+        clone->proof = impl_->proof;
+        clone->owned = impl_->owned;
+        clone->snapshot_uuid = impl_->snapshot_uuid;
+        return LazyChunkValue(std::move(clone));
     }
 
     std::uint64_t LazyChunkValue::size() const noexcept {
@@ -1324,6 +1389,12 @@ namespace lfs::io::project {
                     continue;
                 }
 
+                if (node.type == "splat" && binding.fourcc == "DSRC" &&
+                    (binding.source_kind == "ply" || binding.source_kind == "sog" ||
+                     binding.source_kind == "ssog" || binding.source_kind == "spz") &&
+                    binding.instance_uuid == node.uuid && !binding.reference_uuid && dataset_sources.contains(node.uuid)) {
+                    continue;
+                }
                 Fourcc fourcc{};
                 if (node.type == "splat" && binding.fourcc == "SPLT") {
                     fourcc = FOURCC_SPLT;
@@ -2567,6 +2638,83 @@ namespace lfs::io::project {
         return found == impl_->dataset_sources.end() ? nullptr : &found->second;
     }
 
+    lfs::Result<std::filesystem::path> ProjectDocument::embedded_asset_directory() const {
+        auto paths = core::UserPaths::resolve();
+        if (!paths)
+            return std::move(paths).error();
+        const auto identity = source_reader() ? source_reader()->commit().commit_uuid : project_uuid();
+        return paths->rootDir() / "cache" / "project_assets" / identity.to_string();
+    }
+
+    lfs::Result<std::filesystem::path> ProjectDocument::materialize_embedded_asset(
+        const core::Uuid& uuid, const std::string_view extension) const {
+        if (extension != "ply" && extension != "sog" && extension != "ssog" &&
+            extension != "spz" && extension != "lfsenv")
+            return embedded_asset_error("Unsupported embedded scene asset.");
+        const auto* payload = find_dataset_source(uuid);
+        if (!payload)
+            return embedded_asset_error("Embedded scene asset is missing.");
+        auto directory = embedded_asset_directory();
+        if (!directory)
+            return std::move(directory).error();
+        std::filesystem::path temporary;
+        try {
+            for (const auto& folder : {directory->parent_path().parent_path(), directory->parent_path(), *directory}) {
+                if (std::filesystem::is_symlink(folder))
+                    return embedded_asset_error("The embedded asset cache was redirected.");
+                std::filesystem::create_directory(folder);
+            }
+            std::filesystem::permissions(*directory, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
+            const auto available = std::filesystem::space(*directory).available;
+            if (payload->size() > available || available - payload->size() < 64ull * 1024 * 1024)
+                return embedded_asset_error("There is not enough disk space to open the embedded scene asset.");
+            if (const auto* reader = source_reader()) {
+                if (const auto* chunk = reader->find(FOURCC_DSRC, uuid)) {
+                    if (auto verified = reader->verify_chunk(*chunk); !verified)
+                        return std::move(verified).error();
+                }
+            }
+            const auto destination = *directory / (uuid.to_string() + "." + std::string(extension));
+            if (std::filesystem::is_symlink(destination))
+                return embedded_asset_error("The embedded asset cache was redirected.");
+            temporary = *directory / (core::generate_uuid_v4().to_string() + ".part");
+            auto output = detail::NativeFile::create_new(temporary);
+            if (!output)
+                return std::move(output).error();
+            const auto copied = payload->visit_stream([&](std::istream& input, const uint64_t size) -> lfs::Result<void> {
+                std::array<std::byte, 1024 * 1024> buffer;
+                uint64_t offset = 0;
+                while (offset < size) {
+                    const auto count = static_cast<size_t>(std::min<uint64_t>(buffer.size(), size - offset));
+                    input.read(reinterpret_cast<char*>(buffer.data()), count);
+                    if (input.gcount() != static_cast<std::streamsize>(count))
+                        return lfs::Status::failure(embedded_asset_error("Embedded asset is incomplete."));
+                    if (auto written = (*output)->write_exact(offset, std::span(buffer).first(count)); !written)
+                        return written;
+                    offset += count;
+                }
+                return (*output)->sync_all();
+            });
+            if (!copied) {
+                std::filesystem::remove(temporary);
+                return std::move(copied).error();
+            }
+            (*output).reset(); // Release the file before publication on Windows.
+            std::error_code ignored;
+            std::filesystem::remove(destination, ignored);
+            std::filesystem::rename(temporary, destination);
+            std::filesystem::permissions(destination, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                         std::filesystem::perm_options::replace);
+            return destination;
+        } catch (const std::exception& error) {
+            // LFS-CENSUS-OK(empty-catch): return the failure as a typed embedded-asset error after cleanup.
+            std::error_code ignored;
+            if (!temporary.empty())
+                std::filesystem::remove(temporary, ignored);
+            return embedded_asset_error(error.what());
+        }
+    }
+
     std::vector<lfs::core::Uuid> ProjectDocument::dataset_source_uuids() const {
         return sorted_uuids(impl_->dataset_sources);
     }
@@ -2672,6 +2820,12 @@ namespace lfs::io::project {
         }
         auto writer = std::move(*writer_result);
         CommitOptions commit = options.commit;
+        if (auto scene_nodes = impl_->scene_graph.nodes(); scene_nodes && std::ranges::any_of(*scene_nodes, [](const auto& node) {
+                                                               return node.payload && node.payload->fourcc == "DSRC";
+                                                           })) {
+            commit.extra_reader_capabilities.set(ENCODED_SCENE_ASSETS);
+            commit.extra_writer_capabilities.set(ENCODED_SCENE_ASSETS);
+        }
         if (commit.commit_uuid.is_nil()) {
             commit.commit_uuid = lfs::core::generate_uuid_v4();
         }
@@ -3404,26 +3558,22 @@ namespace lfs::io::project {
                     "base explicit commit UUID",
                     "autosave.base_commit_uuid");
             }
-        } else if (!impl_->source_path &&
-                   !options.allow_existing_destination_replacement) {
-            std::error_code error;
-            if (std::filesystem::exists(*normalized, error)) {
-                return fail<ProjectDocumentSaveReport>(
-                    lfs::ErrorCode::AlreadyExists,
-                    "The destination project already exists.",
-                    "P3 first-save assembly refuses implicit replacement",
-                    "project.path");
-            }
-            if (error) {
-                return fail<ProjectDocumentSaveReport>(
-                    lfs::ErrorCode::PermissionDenied,
-                    "The destination project could not be inspected.",
-                    std::format("filesystem::exists failed: {}", error.message()),
-                    "project.path");
+        } else if (!impl_->source_path) {
+            if (auto preflight = preflight_first_save_destination(
+                    *normalized,
+                    options.allow_existing_destination_replacement);
+                !preflight) {
+                return std::move(preflight).error();
             }
         }
 
         CommitOptions commit = options.commit;
+        if (auto scene_nodes = impl_->scene_graph.nodes(); scene_nodes && std::ranges::any_of(*scene_nodes, [](const auto& node) {
+                                                               return node.payload && node.payload->fourcc == "DSRC";
+                                                           })) {
+            commit.extra_reader_capabilities.set(ENCODED_SCENE_ASSETS);
+            commit.extra_writer_capabilities.set(ENCODED_SCENE_ASSETS);
+        }
         const bool retains_unknown_json =
             impl_->project.dom().get_json("license").has_value() ||
             has_unknown_json_root(FOURCC_PROJ, impl_->project.dom()) ||
@@ -4920,14 +5070,37 @@ namespace lfs::io::project {
                 .metrics = impl_->metrics,
             };
 
+            auto published_refs = references().records();
+            if (!published_refs)
+                return std::move(published_refs).error();
+            for (const auto& ref : *published_refs) {
+                if (find_dataset_source(ref.uuid) && ref.kind == "environment_map") {
+                    auto asset = materialize_embedded_asset(ref.uuid, "lfsenv");
+                    if (!asset)
+                        return std::move(asset).error();
+                }
+            }
             ScenePayloadResolver resolver;
             resolver.splat =
                 [&staged_splats,
                  &staged_checkpoint_splats,
-                 external_payloads](
+                 external_payloads, this, splat_allocator](
                     const PayloadBinding& binding)
                 -> lfs::Result<std::unique_ptr<
                     lfs::core::SplatData>> {
+                if (binding.fourcc == "DSRC") {
+                    auto path = materialize_embedded_asset(binding.instance_uuid, binding.source_kind);
+                    if (!path)
+                        return std::move(path).error();
+                    auto loader = io::Loader::create();
+                    auto loaded = loader->load(*path, {.splat_tensor_allocator = splat_allocator});
+                    if (!loaded)
+                        return embedded_asset_error(loaded.error().message);
+                    auto* splat = std::get_if<std::shared_ptr<core::SplatData>>(&loaded->data);
+                    if (!splat || !*splat)
+                        return embedded_asset_error("Embedded asset is not splat data.");
+                    return std::make_unique<core::SplatData>(std::move(**splat));
+                }
                 if (binding.fourcc == "SPLT") {
                     const auto found = staged_splats.find(
                         binding.instance_uuid);

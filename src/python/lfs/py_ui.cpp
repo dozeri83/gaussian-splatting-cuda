@@ -3872,7 +3872,8 @@ namespace lfs::python {
                                             path_to_utf8(
                                                 event.path),
                                         event.keep_asset_manager_open,
-                                        lfs::core::path_to_utf8(event.create_path));
+                                        lfs::core::path_to_utf8(event.create_path),
+                                        event.allow_existing_destination_replacement);
                                 } catch (
                                     const std::
                                         exception& error) {
@@ -3947,7 +3948,8 @@ namespace lfs::python {
                                                 event.path),
                                         event.discard_changes,
                                         event.keep_asset_manager_open,
-                                        lfs::core::path_to_utf8(event.create_path));
+                                        lfs::core::path_to_utf8(event.create_path),
+                                        event.allow_existing_destination_replacement);
                                 } catch (
                                     const std::
                                         exception& error) {
@@ -4760,6 +4762,9 @@ namespace lfs::python {
                 state["stage"] = export_state.stage;
                 state["outcome"] = export_state.outcome;
                 state["format"] = export_state.format;
+                state["path"] = export_state.path;
+                state["error"] = export_state.error;
+                state["commit_uuid"] = export_state.commit_uuid;
                 return state;
             },
             "Get current export progress state");
@@ -4789,6 +4794,11 @@ namespace lfs::python {
 
         m.def("dismiss_import", &dismiss_import,
               "Dismiss the import completion overlay");
+        m.def("cancel_gallery_import", [] { return invoke_on_viewer([] {
+                                                auto* gui = get_gui_manager();
+                                                return gui && gui->asyncTasks().requestGalleryImportCancel();
+                                            },
+                                                                    false); }, "Request gallery import cancellation without waiting for its worker");
 
         m.def(
             "get_video_export_state",
@@ -4828,6 +4838,11 @@ namespace lfs::python {
 
         m.def("has_keyframes", &has_keyframes,
               "Check if sequencer has any keyframes");
+
+        m.def("get_camera_path", []() { return nb::module_::import_("json").attr("loads")(get_camera_path_data()); }, "Get the native camera path with clip duration, loop mode and playback speed");
+        m.def("set_camera_path", [](nb::dict value) {
+            const auto json = nb::cast<std::string>(nb::module_::import_("json").attr("dumps")(value, nb::arg("allow_nan") = false));
+            return set_camera_path_data(json); }, nb::arg("value"), "Restore a native camera path including loop mode and playback speed");
 
         m.def("save_camera_path", &save_camera_path,
               nb::arg("path"),

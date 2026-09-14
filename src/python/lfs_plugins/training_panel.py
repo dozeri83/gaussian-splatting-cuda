@@ -1292,6 +1292,7 @@ class TrainingPanel(Panel):
                 not RuntimeState.has_trainer.value
                 and session.get("available")
                 and not session.get("hydrated")
+                and state in ("idle", "ready", "", None)
             ):
                 state = "completed" if session.get("completed") else "paused"
             if state == "stopping" and lf.trainer_saving_model():

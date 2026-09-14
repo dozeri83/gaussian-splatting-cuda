@@ -230,6 +230,14 @@ namespace lfs::vis::project {
         [[nodiscard]] std::filesystem::path
         projectRootFor(
             const ProjectDocument& document) {
+            if (auto refs = document.references().records(); refs) {
+                for (const auto& ref : *refs) {
+                    if (document.find_dataset_source(ref.uuid)) {
+                        if (auto directory = document.embedded_asset_directory(); directory)
+                            return *directory;
+                    }
+                }
+            }
             if (const auto source =
                     document.source_path();
                 source && !source->empty()) {
@@ -3147,7 +3155,8 @@ namespace lfs::vis::project {
     ProjectLifecycle::
         waitOutBackgroundAutosaveForExplicitSave() {
         if (!viewer_.jobs().anyRunning(
-                JobType::ProjectWrite)) {
+                JobType::ProjectWrite) &&
+            !viewer_.jobs().anyRunning(JobType::DatasetEmbed)) {
             return {};
         }
         if (project_write_purpose_ !=
@@ -3155,16 +3164,17 @@ namespace lfs::vis::project {
             project_write_purpose_ !=
                 ProjectWritePurpose::TrainingAutosave &&
             project_write_purpose_ !=
-                ProjectWritePurpose::GeometryCapture) {
+                ProjectWritePurpose::GeometryCapture &&
+            project_write_purpose_ != ProjectWritePurpose::DatasetEmbed) {
             return fail<void>(
                 lfs::ErrorCode::FailedPrecondition,
                 "A project write is already in progress.",
                 "Manual save, autosave, and compaction share one exclusive job slot",
                 "project.job");
         }
-        // Autosave occupies the exclusive ProjectWrite
-        // slot. Join and settle it so a user Save / Save
-        // As never loses the slot to a background write.
+        // Join and settle background writes before capturing a Save / Save As
+        // context. Dataset embedding advances the master generation too;
+        // waiting only after snapshot capture leaves stale clean proofs.
         const bool geometry_capture =
             project_write_purpose_ ==
             ProjectWritePurpose::GeometryCapture;
@@ -5866,6 +5876,18 @@ namespace lfs::vis::project {
             const auto existing =
                 bindings.find(node->uuid);
             if (existing != bindings.end()) {
+                // Keep the original encoding for view-only saves. Geometry edits
+                // must capture the current resident splats instead of reusing the
+                // uploaded DSRC bytes and silently losing those edits on reopen.
+                if (node->type == lfs::core::NodeType::SPLAT && existing->second.fourcc == "DSRC" &&
+                    node->payload_hydration == lfs::core::PayloadHydrationState::Loaded &&
+                    (payload_dirty_.load(std::memory_order_acquire) || node->payload_diverged)) {
+                    existing->second = PayloadBinding{
+                        .fourcc = "SPLT",
+                        .instance_uuid = node->uuid,
+                        .reference_uuid = std::nullopt,
+                        .source_kind = "generated"};
+                }
                 continue;
             }
             if (node->uuid == training_uuid) {
@@ -7420,10 +7442,9 @@ namespace lfs::vis::project {
         const auto shell_staged_at =
             std::chrono::steady_clock::now();
 
-        // A stale import completion must not outlive
-        // a project switch.
+        // Invalidate gallery imports before swapping scenes; their workers drain asynchronously.
         if (auto* const gui = viewer_.getGuiManager()) {
-            gui->asyncTasks().cancelImport();
+            gui->asyncTasks().cancelImport(false);
         }
 
         stopHydrationThreads(false);
@@ -8249,8 +8270,36 @@ namespace lfs::vis::project {
     }
 
     lfs::Result<void>
+    ProjectLifecycle::preflightCreateDestination(
+        const std::filesystem::path& path,
+        const bool allow_existing_destination_replacement) {
+        auto normalized = normalizedProjectPath(path);
+        if (!normalized) {
+            return lfs::Status::failure(
+                std::move(normalized).error());
+        }
+        if (isScratchPath(*normalized)) {
+            return fail<void>(
+                lfs::ErrorCode::InvalidArgument,
+                "A project cannot be created in scratch storage.",
+                "the requested destination is reserved for crash recovery",
+                "project.path");
+        }
+        if (auto preflight =
+                lfs::io::project::preflight_first_save_destination(
+                    *normalized,
+                    allow_existing_destination_replacement);
+            !preflight) {
+            return lfs::Status::failure(
+                std::move(preflight).error());
+        }
+        return {};
+    }
+
+    lfs::Result<void>
     ProjectLifecycle::bindUntitledSessionToMaster(
-        const std::filesystem::path& destination) {
+        const std::filesystem::path& destination,
+        const bool allow_existing_destination_replacement) {
         if (auto waited =
                 waitOutBackgroundAutosaveForExplicitSave();
             !waited) {
@@ -8276,7 +8325,8 @@ namespace lfs::vis::project {
         options.index_compression =
             lfs::io::project::IndexCompression::Zstd;
         options.disk_reserve_bytes = 64ull * 1024 * 1024;
-        options.allow_existing_destination_replacement = false;
+        options.allow_existing_destination_replacement =
+            allow_existing_destination_replacement;
         options.leave_unbound = false;
         auto started = startDocumentWrite(
             ProjectWritePurpose::SaveAs,
@@ -8304,18 +8354,17 @@ namespace lfs::vis::project {
     lfs::Result<void>
     ProjectLifecycle::createProjectAt(
         const std::filesystem::path& path,
-        const ProjectSwitchDisposition disposition) {
+        const ProjectSwitchDisposition disposition,
+        const bool allow_existing_destination_replacement) {
+        if (auto preflight = preflightCreateDestination(
+                path, allow_existing_destination_replacement);
+            !preflight) {
+            return preflight;
+        }
         auto normalized = normalizedProjectPath(path);
         if (!normalized) {
             return lfs::Status::failure(
                 std::move(normalized).error());
-        }
-        if (isScratchPath(*normalized)) {
-            return fail<void>(
-                lfs::ErrorCode::InvalidArgument,
-                "A project cannot be created in scratch storage.",
-                "the requested destination is reserved for crash recovery",
-                "project.path");
         }
         if (auto created = newProject(disposition); !created) {
             return created;
@@ -8330,7 +8379,8 @@ namespace lfs::vis::project {
                 create_error.message(),
                 "project.path");
         }
-        return bindUntitledSessionToMaster(*normalized);
+        return bindUntitledSessionToMaster(
+            *normalized, allow_existing_destination_replacement);
     }
 
     bool ProjectLifecycle::hasSourcePath() const {

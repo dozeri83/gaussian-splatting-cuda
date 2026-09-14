@@ -34,6 +34,7 @@
 #include <fstream>
 #include <glm/gtc/type_ptr.hpp>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -944,6 +945,31 @@ namespace {
             centralized.georeference->world_origin[0],
             static_cast<double>(
                 static_cast<float>(expected)));
+    }
+
+    TEST(SceneChapterAdapterTest, EncodedSplatBindingsCaptureAndRejectWrongOwners) {
+        Scene scene;
+        const auto id = scene.addSplat("Encoded", make_splat(2));
+        const auto uuid = scene.getNodeUuid(id);
+        for (const auto* format : {"ply", "sog", "ssog", "spz"}) {
+            ScenePayloadBindings bindings{{uuid, PayloadBinding{
+                                                     .fourcc = "DSRC",
+                                                     .instance_uuid = uuid,
+                                                     .reference_uuid = std::nullopt,
+                                                     .source_kind = format}}};
+            auto captured = capture_scene_graph(scene, bindings);
+            ASSERT_TRUE(captured) << lfs::format_for_developer(captured.error());
+            auto nodes = captured->nodes();
+            ASSERT_TRUE(nodes);
+            ASSERT_EQ(nodes->size(), 1u);
+            EXPECT_EQ(nodes->front().payload->fourcc, "DSRC");
+            EXPECT_EQ(nodes->front().payload->source_kind, format);
+            bindings.at(uuid).instance_uuid = fixed_uuid(9876);
+            EXPECT_FALSE(capture_scene_graph(scene, bindings));
+            bindings.at(uuid).instance_uuid = uuid;
+            bindings.at(uuid).reference_uuid = fixed_uuid(9876);
+            EXPECT_FALSE(capture_scene_graph(scene, bindings));
+        }
     }
 
     TEST(SceneChapterAdapterTest,
@@ -2709,6 +2735,56 @@ namespace {
         auto reader = ProjectReader::open(destination);
         ASSERT_TRUE(reader);
         EXPECT_EQ(reader->superblock().project_uuid, fixed_uuid(971));
+    }
+
+    TEST(ProjectDocumentTest,
+         PreflightFirstSaveDestinationLeavesExistingFileUntouched) {
+        TemporaryDirectory temporary;
+        const auto destination = temporary.path / "destination.licht";
+        auto existing = make_empty_document(fixed_uuid(9720), 100);
+        ASSERT_TRUE(existing->save(destination, save_options(19720, 1200)));
+
+        auto refused = preflight_first_save_destination(destination, false);
+        ASSERT_FALSE(refused);
+        EXPECT_EQ(refused.error().code(), lfs::ErrorCode::AlreadyExists);
+        auto reader = ProjectReader::open(destination);
+        ASSERT_TRUE(reader);
+        EXPECT_EQ(reader->superblock().project_uuid, fixed_uuid(9720));
+
+        auto allowed = preflight_first_save_destination(destination, true);
+        ASSERT_TRUE(allowed) << lfs::format_for_developer(allowed.error());
+        auto after_allow = ProjectReader::open(destination);
+        ASSERT_TRUE(after_allow);
+        EXPECT_EQ(
+            after_allow->superblock().project_uuid, fixed_uuid(9720));
+
+        const auto missing = temporary.path / "missing.licht";
+        auto missing_ok = preflight_first_save_destination(missing, false);
+        ASSERT_TRUE(missing_ok)
+            << lfs::format_for_developer(missing_ok.error());
+        EXPECT_FALSE(std::filesystem::exists(missing));
+    }
+
+    TEST(ProjectDocumentTest,
+         AuthorizedFirstSaveLeavesUnreadableDestinationBytes) {
+        TemporaryDirectory temporary;
+        const auto destination = temporary.path / "garbage.licht";
+        {
+            std::ofstream stream(destination, std::ios::binary);
+            ASSERT_TRUE(stream);
+            stream << "not-a-project";
+        }
+        auto document = make_empty_document(fixed_uuid(9721), 100);
+        auto options = save_options(19721, 1300);
+        options.allow_existing_destination_replacement = true;
+        auto refused = document->save(destination, options);
+        ASSERT_FALSE(refused);
+        std::ifstream stream(destination, std::ios::binary);
+        ASSERT_TRUE(stream);
+        const std::string remaining(
+            (std::istreambuf_iterator<char>(stream)),
+            std::istreambuf_iterator<char>());
+        EXPECT_EQ(remaining, "not-a-project");
     }
 
     TEST(ProjectDocumentTest,

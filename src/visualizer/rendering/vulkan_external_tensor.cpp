@@ -487,7 +487,7 @@ namespace lfs::vis {
         };
     }
 
-    lfs::core::SplatTensorAllocator makeViewerSplatTensorAllocator() {
+    lfs::core::SplatTensorAllocator makeViewerSplatTensorAllocator(const bool preserve_float_shN) {
         if (lfs::core::default_gpu_backend() == lfs::core::GpuBackend::Vulkan) {
             return [](lfs::core::TensorShape shape,
                       const size_t capacity,
@@ -507,12 +507,12 @@ namespace lfs::vis {
             return {};
         }
 
-        return [context](lfs::core::TensorShape shape,
-                         const size_t capacity,
-                         const lfs::core::DataType dtype,
-                         const std::string_view name) -> lfs::core::Tensor {
+        return [context, preserve_float_shN](lfs::core::TensorShape shape,
+                                             const size_t capacity,
+                                             const lfs::core::DataType dtype,
+                                             const std::string_view name) -> lfs::core::Tensor {
             const std::string debug_name{name};
-            if (keepFloatShNInPooledCuda(debug_name, dtype)) {
+            if (!preserve_float_shN && keepFloatShNInPooledCuda(debug_name, dtype)) {
                 auto pooled = lfs::core::Tensor::zeros_direct(
                     std::move(shape), capacity, lfs::core::Device::GPU, dtype);
                 pooled.set_name(debug_name);
