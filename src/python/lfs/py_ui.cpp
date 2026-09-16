@@ -47,6 +47,7 @@
 #include "rml_python_panel_adapter.hpp"
 #include "visualizer/app_store.hpp"
 #include "visualizer/core/editor_context.hpp"
+#include "visualizer/core/services.hpp"
 #include "visualizer/gui/gui_manager.hpp"
 #include "visualizer/gui/panel_registry.hpp"
 #include "visualizer/gui/sequencer_ui_state.hpp"
@@ -54,6 +55,7 @@
 #include "visualizer/operation/undo_history.hpp"
 #include "visualizer/operator/operator_context.hpp"
 #include "visualizer/operator/operator_registry.hpp"
+#include "visualizer/operator/ops/align_ops.hpp"
 #include "visualizer/post_work_utils.hpp"
 #include "visualizer/rendering/rendering_manager.hpp"
 #include "visualizer/scene/scene_manager.hpp"
@@ -2735,6 +2737,8 @@ namespace lfs::python {
                         ci.is_submenu_item = nb::cast<bool>(d["is_submenu_item"]);
                     if (d.contains("is_active"))
                         ci.is_active = nb::cast<bool>(d["is_active"]);
+                    if (d.contains("icon"))
+                        ci.icon = nb::cast<std::string>(d["icon"]);
                     vec.push_back(std::move(ci));
                 }
 
@@ -3347,6 +3351,16 @@ namespace lfs::python {
             },
             nb::arg("start_dir") = "",
             "Open a file dialog to select a LichtFeld project (.licht). Returns empty string if cancelled.");
+
+        m.def(
+            "save_project_file_dialog",
+            [](const std::string& default_name, const std::string& start_dir) -> std::string {
+                const auto result = lfs::vis::gui::SaveProjectFileDialog(
+                    default_name, lfs::core::utf8_to_path(start_dir));
+                return result.empty() ? "" : lfs::core::path_to_utf8(result);
+            },
+            nb::arg("default_name") = "project.licht", nb::arg("start_dir") = "",
+            "Choose a destination for a new LichtFeld project. Returns empty string if cancelled.");
 
         m.def(
             "open_ply_file_dialog",
@@ -4408,6 +4422,97 @@ namespace lfs::python {
             "Apply the active crop tool primitive through the node-backed crop command path");
 
         m.def(
+            "can_apply_align",
+            []() -> bool {
+                const auto* scene = lfs::vis::services().sceneOrNull();
+                return scene &&
+                       lfs::vis::op::pointsAreNonDegenerate(lfs::vis::services().getAlignPickedPoints()) &&
+                       lfs::vis::op::resolveAlignSnapTargetWorld(*scene).has_value();
+            },
+            "True when the align tool has 3 non-degenerate points ready to apply");
+
+        m.def(
+            "apply_align",
+            []() -> bool {
+                if (lfs::vis::op::operators().activeModalId() !=
+                    lfs::vis::op::to_string(lfs::vis::op::BuiltinOp::AlignPickPoint)) {
+                    return false;
+                }
+                lfs::vis::services().requestAlignUiAction(lfs::vis::Services::AlignUiAction::Apply);
+                lfs::vis::op::ModalEvent evt{};
+                evt.type = lfs::vis::op::ModalEvent::Type::NONE;
+                lfs::vis::op::operators().dispatchModalEvent(evt);
+                return true;
+            },
+            "Request the running align modal to apply the current triangle");
+
+        m.def(
+            "clear_align_points",
+            []() {
+                if (lfs::vis::op::operators().activeModalId() !=
+                    lfs::vis::op::to_string(lfs::vis::op::BuiltinOp::AlignPickPoint)) {
+                    return;
+                }
+                lfs::vis::services().requestAlignUiAction(lfs::vis::Services::AlignUiAction::Clear);
+                lfs::vis::op::ModalEvent evt{};
+                evt.type = lfs::vis::op::ModalEvent::Type::NONE;
+                lfs::vis::op::operators().dispatchModalEvent(evt);
+            },
+            "Request the running align modal to clear all picked points");
+
+        m.def("get_align_preview", [] { return lfs::vis::services().getAlignPreviewEnabled(); }, "Whether the alignment result is being previewed");
+        m.def("toggle_align_preview", [] {
+            if (lfs::vis::op::operators().activeModalId() !=
+                lfs::vis::op::to_string(lfs::vis::op::BuiltinOp::AlignPickPoint)) {
+                return;
+            }
+            lfs::vis::services().requestAlignUiAction(lfs::vis::Services::AlignUiAction::TogglePreview);
+            lfs::vis::op::ModalEvent event{};
+            lfs::vis::op::operators().dispatchModalEvent(event); }, "Switch between the original scene and the alignment preview");
+
+        m.def(
+            "get_align_axis_snap",
+            []() -> bool { return lfs::vis::services().getAlignAxisSnapEnabled(); },
+            "Whether align plane-normal axis snap is enabled");
+
+        m.def(
+            "set_align_axis_snap",
+            [](const bool enabled) {
+                lfs::vis::services().setAlignAxisSnapEnabled(enabled);
+                if (lfs::vis::services().getAlignPreviewEnabled()) {
+                    lfs::vis::services().requestAlignUiAction(lfs::vis::Services::AlignUiAction::RefreshPreview);
+                    lfs::vis::op::ModalEvent event{};
+                    lfs::vis::op::operators().dispatchModalEvent(event);
+                }
+                if (auto* const rm = lfs::vis::services().renderingOrNull()) {
+                    rm->markDirty(lfs::vis::DirtyFlag::OVERLAY);
+                }
+            },
+            nb::arg("enabled"),
+            "Enable or disable align plane-normal axis snap (session lifetime)");
+
+        m.def(
+            "get_align_edge_to_axis",
+            []() -> bool { return lfs::vis::services().getAlignEdgeToAxisEnabled(); },
+            "Whether align edge-to-+X in-plane yaw is enabled");
+
+        m.def(
+            "set_align_edge_to_axis",
+            [](const bool enabled) {
+                lfs::vis::services().setAlignEdgeToAxisEnabled(enabled);
+                if (lfs::vis::services().getAlignPreviewEnabled()) {
+                    lfs::vis::services().requestAlignUiAction(lfs::vis::Services::AlignUiAction::RefreshPreview);
+                    lfs::vis::op::ModalEvent event{};
+                    lfs::vis::op::operators().dispatchModalEvent(event);
+                }
+                if (auto* const rm = lfs::vis::services().renderingOrNull()) {
+                    rm->markDirty(lfs::vis::DirtyFlag::OVERLAY);
+                }
+            },
+            nb::arg("enabled"),
+            "Enable or disable align edge-to-+X in-plane yaw (session lifetime)");
+
+        m.def(
             "fit_crop_tool",
             [](bool use_percentile) {
                 if (auto* const gui = lfs::python::get_gui_manager()) {
@@ -5392,6 +5497,8 @@ namespace lfs::python {
                 }
                 if (!result)
                     return std::string(result.error().user_message());
+                if (auto panel = vis::gui::PanelRegistry::instance().get_panel_instance("lfs.asset_manager"))
+                    panel->on_content_changed();
                 return {};
             },
             nb::arg("path"),
@@ -5402,6 +5509,8 @@ namespace lfs::python {
             [] {
                 nb::gil_scoped_release release;
                 vis::clearProjectLocationPreference();
+                if (auto panel = vis::gui::PanelRegistry::instance().get_panel_instance("lfs.asset_manager"))
+                    panel->on_content_changed();
             },
             "Clear the project location preference so the default is used.");
 
@@ -5560,6 +5669,8 @@ namespace lfs::python {
                 }
             },
             nb::arg("lang_code"), "Set language by code (e.g., 'en', 'de')");
+
+        m.def("resource_directory", []() { return lfs::core::path_to_utf8(lfs::core::getResourceBaseDir()); }, "Directory containing the bundled UI resources");
 
         m.def(
             "get_current_language",

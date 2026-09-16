@@ -538,3 +538,9 @@
 #selection-block .viewport-selection-depth-panel-chip {
     background-color: @{alpha(text,0.125)};
 }
+
+.toolbar-hcenter .align-toolbar {
+    decorator: none;
+    background-color: @{alpha(toolbar.background,1.0)};
+    color: @{text};
+}

@@ -30,6 +30,14 @@ namespace lfs::vis::gui {
         float width = 0.0f;
     };
 
+    struct LeftDockLayout {
+        float panel_x = 0.0f;
+        float panel_width = 0.0f;
+        float toolbar_x = 0.0f;
+        float edge_min_x = 0.0f;
+        float edge_max_x = 0.0f;
+    };
+
     enum class CursorRequest : uint8_t { None,
                                          ResizeEW,
                                          ResizeNS };
@@ -145,6 +153,8 @@ namespace lfs::vis::gui {
                                              const ScreenState& screen) const;
         DockHorizontalLayout computeBottomDockHorizontalLayout(
             bool show_main_panel, bool ui_hidden, const ScreenState& screen) const;
+        LeftDockLayout computeLeftDockLayout(
+            bool show_main_panel, bool ui_hidden, const ScreenState& screen) const;
 
         bool isResizingPanel() const {
             return python_console_resizing_ || python_console_hovering_edge_ ||
@@ -174,8 +184,8 @@ namespace lfs::vis::gui {
         [[nodiscard]] static LeftDockResizeRect leftDockResizeRect(float work_x, float work_y,
                                                                    float work_h, float dpi,
                                                                    float dock_width) {
-            const float edge_grab_w = std::max(SPLITTER_H * dpi, 8.0f * dpi);
-            const float panel_right_x = work_x + ICON_BAR_WIDTH * dpi + dock_width;
+            const float edge_grab_w = std::min(std::max(SPLITTER_H * dpi, 8.0f * dpi), TOOLBAR_INSET * dpi);
+            const float panel_right_x = work_x + dock_width;
             return LeftDockResizeRect{
                 .x0 = panel_right_x - edge_grab_w,
                 .x1 = panel_right_x + edge_grab_w,
@@ -291,7 +301,7 @@ namespace lfs::vis::gui {
         static constexpr float LEFT_DOCK_MIN_WIDTH = 180.0f;
         static constexpr float LEFT_DOCK_MIN_VISIBLE_WIDTH = 220.0f;
         static constexpr float LEFT_DOCK_DEFAULT_WIDTH = 320.0f;
-        static constexpr float ICON_BAR_WIDTH = 40.0f;
+        static constexpr float TOOLBAR_INSET = 8.0f;
     };
 
 } // namespace lfs::vis::gui

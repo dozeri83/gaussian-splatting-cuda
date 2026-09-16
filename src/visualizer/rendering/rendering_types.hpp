@@ -264,6 +264,15 @@ namespace lfs::vis {
                                            splitViewDividerPixel(total_width, current_split_position))) <= margin;
     }
 
+    // Normalized texture coordinates address pixel centers at (pixel + 0.5) / extent.
+    // Using extent - 1 here stretches clipped comparison panels by a different amount
+    // whenever their cached widths change, so a divider refresh appears to reframe them.
+    [[nodiscard]] inline float splitViewPixelCenterUv(
+        const int pixel, const int rect_origin, const int rect_extent) {
+        return (static_cast<float>(pixel - rect_origin) + 0.5f) /
+               static_cast<float>(std::max(rect_extent, 1));
+    }
+
     enum class SelectionPreviewMode {
         Centers,
         Rectangle,

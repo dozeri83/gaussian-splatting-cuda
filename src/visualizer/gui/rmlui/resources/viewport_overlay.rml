@@ -5,11 +5,12 @@
 <body id="overlay-body">
     <div id="left-frame-border" class="viewport-frame-border"></div>
     <div id="left-dock-resize-indicator" class="left-dock-resize-indicator hidden"></div>
+    <div id="viewport-content">
     <div id="split-divider-overlay" class="viewport-split-divider hidden"></div>
     <div id="project-drop-overlay" class="project-drop-overlay hidden">
         <div class="project-drop-card">
-            <div id="project-drop-title" class="project-drop-title">@tr:asset_manager.drag.open_project</div>
-            <div id="gallery-drop-title" class="project-drop-title hidden">@tr:asset_manager.gallery.action.pull_open</div>
+            <div id="project-drop-title" class="project-drop-title">@tr:projects.drag.open_project</div>
+            <div id="gallery-drop-title" class="project-drop-title hidden">@tr:projects.gallery.action.pull_open</div>
             <div id="project-drop-label" class="project-drop-label"></div>
         </div>
     </div>
@@ -129,7 +130,7 @@
             </div>
         </div>
 
-        <div class="toolbar-hcenter toolbar-layer-primary">
+        <div class="toolbar-hcenter toolbar-layer-primary" data-class-align-active="show_align_toolbar">
             <div id="primary-transform-toolbar" class="toolbar-container hidden"
                  data-class-hidden="!show_transform_toolbar">
                 <div class="icon-btn"
@@ -158,6 +159,23 @@
                      data-class-disabled="!button.enabled"
                      data-event-click="toolbar_action(button.action, button.value)">
                     <img data-attr-src="button.icon_src" />
+                </div>
+            </div>
+            <div id="primary-align-toolbar" class="toolbar-container align-toolbar hidden"
+                 data-class-hidden="!show_align_toolbar">
+                <div class="icon-btn"
+                     data-for="button : align_action_buttons"
+                     data-attr-id="button.button_id"
+                     data-class-selected="button.selected"
+                     data-class-has-label="button.label != ''"
+                     data-attr-data-action="button.action_id"
+                     data-attr-data-shortcut="button.shortcut_text"
+                     data-attr-title="button.tooltip_text"
+                     data-attrif-disabled="!button.enabled"
+                     data-class-disabled="!button.enabled"
+                     data-event-click="toolbar_action(button.action, button.value)">
+                    <img data-attr-src="button.icon_src" />
+                    <span class="align-button-label" data-if="button.label != ''">{{button.label}}</span>
                 </div>
             </div>
             <div id="primary-crop-toolbar" class="toolbar-container hidden"
@@ -386,7 +404,7 @@
             </div>
         </div>
 
-        <div class="toolbar-hcenter toolbar-layer-primary">
+        <div class="toolbar-hcenter toolbar-layer-primary" data-class-align-active="show_align_toolbar">
             <div id="secondary-transform-toolbar" class="toolbar-container hidden"
                  data-class-hidden="!show_transform_toolbar">
                 <div class="icon-btn"
@@ -415,6 +433,23 @@
                      data-class-disabled="!button.enabled"
                      data-event-click="toolbar_action(button.action, button.value)">
                     <img data-attr-src="button.icon_src" />
+                </div>
+            </div>
+            <div id="secondary-align-toolbar" class="toolbar-container align-toolbar hidden"
+                 data-class-hidden="!show_align_toolbar">
+                <div class="icon-btn"
+                     data-for="button : align_action_buttons"
+                     data-attr-id="button.button_id"
+                     data-class-selected="button.selected"
+                     data-class-has-label="button.label != ''"
+                     data-attr-data-action="button.action_id"
+                     data-attr-data-shortcut="button.shortcut_text"
+                     data-attr-title="button.tooltip_text"
+                     data-attrif-disabled="!button.enabled"
+                     data-class-disabled="!button.enabled"
+                     data-event-click="toolbar_action(button.action, button.value)">
+                    <img data-attr-src="button.icon_src" />
+                    <span class="align-button-label" data-if="button.label != ''">{{button.label}}</span>
                 </div>
             </div>
             <div id="secondary-crop-toolbar" class="toolbar-container hidden"
@@ -1338,5 +1373,6 @@
         <span class="viewport-transfer-detail" data-class-status-error="gallery_transfer_message_error" data-if="gallery_transfer_message != ''">{{gallery_transfer_message}}</span>
     </div>
 
+    </div>
 </body>
 </rml>
