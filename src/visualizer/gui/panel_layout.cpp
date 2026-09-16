@@ -1127,7 +1127,7 @@ namespace lfs::vis::gui {
         const float edge_x = screen.work_pos.x + panel_w;
         const float toolbar_inset = TOOLBAR_INSET * dpi;
         const auto resize_rect = leftDockResizeRect(screen.work_pos.x, screen.work_pos.y,
-                                                   screen.work_size.y, dpi, panel_w);
+                                                    screen.work_size.y, dpi, panel_w);
         return {
             .panel_x = screen.work_pos.x,
             .panel_width = panel_w,
