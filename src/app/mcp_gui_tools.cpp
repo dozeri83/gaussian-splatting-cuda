@@ -4845,7 +4845,7 @@ namespace lfs::app {
                     result["total_chars"] = static_cast<int64_t>(code.size());
                     result["modified"] = console.isModified();
                     if (!console.getScriptPath().empty())
-                        result["path"] = console.getScriptPath().string();
+                        result["path"] = core::path_to_utf8(console.getScriptPath());
                     return result;
                 });
             });
@@ -5274,10 +5274,10 @@ namespace lfs::app {
                         core::events::cmd::SequencerLoadPlySequence{.directory = directory, .fps = fps}.emit();
                     },
                 .scrub_to_time =
-                    [viewer_impl](const float time) {
+                    [viewer_impl](const float time, const bool update_camera) {
                         auto* const gui_manager = viewer_impl ? viewer_impl->getGuiManager() : nullptr;
-                        if (gui_manager)
-                            gui_manager->sequencer().seek(time);
+                        return gui_manager &&
+                               gui_manager->sequencerUI().scrubToTime(time, update_camera);
                     },
                 .ply_sequence_status =
                     [viewer_impl]() -> std::string {
@@ -5557,7 +5557,7 @@ namespace lfs::app {
                         {"output_total_chars", static_cast<int64_t>(console.getOutputText().size())},
                     };
                     if (!console.getScriptPath().empty())
-                        payload["path"] = console.getScriptPath().string();
+                        payload["path"] = core::path_to_utf8(console.getScriptPath());
 
                     return single_json_resource(uri, std::move(payload));
                 });

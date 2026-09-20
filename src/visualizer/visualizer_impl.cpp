@@ -1534,7 +1534,7 @@ namespace lfs::vis {
                     if (auto info = projectGetInfo();
                         info && info->path) {
                         default_name =
-                            info->path->filename().string();
+                            lfs::core::path_to_utf8(info->path->filename());
                         default_directory =
                             info->path->parent_path();
                     }
@@ -4236,6 +4236,11 @@ namespace lfs::vis {
                 "project.lifecycle");
         }
         return project_lifecycle_->info();
+    }
+
+    ProjectDisplayInfo VisualizerImpl::projectGetDisplayInfo() {
+        return project_lifecycle_ ? project_lifecycle_->displayInfo()
+                                  : ProjectDisplayInfo{};
     }
 
     lfs::Result<std::optional<lfs::io::project::ProjectLicense>>

@@ -6,6 +6,7 @@
 #include "core/event_bridge/localization_manager.hpp"
 #include "core/events.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "core/services.hpp"
 #include "gui/panel_registry.hpp"
 #include "gui/rmlui/rml_document_utils.hpp"
@@ -23,6 +24,7 @@
 #include "rendering/rendering_types.hpp"
 #include "theme/theme.hpp"
 #include "visualizer/app_store.hpp"
+#include "visualizer/visualizer.hpp"
 #include "window/window_manager.hpp"
 
 #include <RmlUi/Core.h>
@@ -345,16 +347,7 @@ namespace lfs::vis::gui {
         return bar_height_ * dp;
     }
 
-    void RmlMenuBar::init(RmlUIManager* mgr) {
-        assert(mgr);
-        rml_manager_ = mgr;
-
-        rml_context_ = rml_manager_->createContext("menu_bar", 800, 30);
-        if (!rml_context_) {
-            LOG_ERROR("RmlMenuBar: failed to create RML context");
-            return;
-        }
-
+    void RmlMenuBar::bindModel() {
         auto ctor = rml_context_->CreateDataModel("menu_bar");
         assert(ctor);
 
@@ -440,7 +433,23 @@ namespace lfs::vis::gui {
         ctor.Bind("gallery_progress_width", &gallery_progress_width_);
         ctor.Bind("gallery_has_progress", &gallery_has_progress_);
         ctor.Bind("gallery_progress_indeterminate", &gallery_progress_indeterminate_);
+        ctor.Bind("project_title", &project_title_);
+        ctor.Bind("project_tooltip", &project_tooltip_);
+        ctor.Bind("project_dirty", &project_dirty_);
         menu_model_ = ctor.GetModelHandle();
+    }
+
+    void RmlMenuBar::init(RmlUIManager* mgr) {
+        assert(mgr);
+        rml_manager_ = mgr;
+
+        rml_context_ = rml_manager_->createContext("menu_bar", 800, 30);
+        if (!rml_context_) {
+            LOG_ERROR("RmlMenuBar: failed to create RML context");
+            return;
+        }
+
+        bindModel();
 
         try {
             const auto rml_path = lfs::vis::getAssetPath("rmlui/menubar.rml");
@@ -460,6 +469,8 @@ namespace lfs::vis::gui {
         dropdown_container_ = document_->GetElementById("dropdown-container");
         dropdown_popup_ = document_->GetElementById("dropdown-popup");
         brand_logo_ = document_->GetElementById("brand-logo");
+        project_title_container_ = document_->GetElementById("project-title");
+        project_title_el_ = document_->GetElementById("project-title-content");
         menu_toolbar_ = document_->GetElementById("menu-toolbar");
         menu_window_controls_ = document_->GetElementById("menu-window-controls");
         menu_window_split_view_ = document_->GetElementById("menu-window-split-view");
@@ -490,12 +501,17 @@ namespace lfs::vis::gui {
         dropdown_popup_ = nullptr;
         dropdown_overlay_ = nullptr;
         brand_logo_ = nullptr;
+        project_title_container_ = nullptr;
+        project_title_el_ = nullptr;
         menu_toolbar_ = nullptr;
         menu_window_controls_ = nullptr;
         menu_window_split_view_ = nullptr;
         menu_window_toggle_ui_ = nullptr;
         menu_window_maximize_ = nullptr;
         body_el_ = nullptr;
+        project_title_has_room_ = false;
+        applied_project_title_left_ = -1.0f;
+        applied_project_title_width_ = -1.0f;
         last_window_split_view_ = false;
         last_ui_hidden_ = false;
         last_window_maximized_ = false;
@@ -535,12 +551,17 @@ namespace lfs::vis::gui {
         dropdown_popup_ = nullptr;
         dropdown_overlay_ = nullptr;
         brand_logo_ = nullptr;
+        project_title_container_ = nullptr;
+        project_title_el_ = nullptr;
         menu_toolbar_ = nullptr;
         menu_window_controls_ = nullptr;
         menu_window_split_view_ = nullptr;
         menu_window_toggle_ui_ = nullptr;
         menu_window_maximize_ = nullptr;
         body_el_ = nullptr;
+        project_title_has_room_ = false;
+        applied_project_title_left_ = -1.0f;
+        applied_project_title_width_ = -1.0f;
         tooltip_.setHover({}, nullptr);
         clearTitlebarDragRegion();
         base_rcss_.clear();
@@ -573,6 +594,8 @@ namespace lfs::vis::gui {
         dropdown_container_ = document_->GetElementById("dropdown-container");
         dropdown_popup_ = document_->GetElementById("dropdown-popup");
         brand_logo_ = document_->GetElementById("brand-logo");
+        project_title_container_ = document_->GetElementById("project-title");
+        project_title_el_ = document_->GetElementById("project-title-content");
         menu_toolbar_ = document_->GetElementById("menu-toolbar");
         menu_window_controls_ = document_->GetElementById("menu-window-controls");
         menu_window_split_view_ = document_->GetElementById("menu-window-split-view");
@@ -580,6 +603,8 @@ namespace lfs::vis::gui {
         menu_window_maximize_ = document_->GetElementById("menu-window-maximize");
         body_el_ = document_->GetElementById("body");
         applied_toolbar_right_ = -1.0f;
+        applied_project_title_left_ = -1.0f;
+        applied_project_title_width_ = -1.0f;
         toolbar_fits_ = true;
         last_window_split_view_ = false;
         last_ui_hidden_ = false;
@@ -607,6 +632,35 @@ namespace lfs::vis::gui {
         }
 
         rebuildLabels();
+    }
+
+    void RmlMenuBar::updateProjectDisplay(const ProjectDisplayInfo& project_display) {
+        std::string project_title = project_display.title.value_or(std::string{});
+        if (project_title.empty() && project_display.path) {
+            project_title = lfs::core::path_to_utf8(project_display.path->stem());
+        }
+        if (project_title.empty()) {
+            project_title = "Untitled";
+        }
+        updateProjectDisplay(
+            std::move(project_title),
+            project_display.path
+                ? lfs::core::path_to_utf8(project_display.path->lexically_normal())
+                : std::string{},
+            project_display.dirty);
+    }
+
+    void RmlMenuBar::updateProjectDisplay(std::string title, std::string tooltip, const bool dirty) {
+        if (project_title_ == title && project_tooltip_ == tooltip && project_dirty_ == dirty)
+            return;
+
+        project_title_ = std::move(title);
+        project_tooltip_ = std::move(tooltip);
+        project_dirty_ = dirty;
+        menu_model_.DirtyVariable("project_title");
+        menu_model_.DirtyVariable("project_tooltip");
+        menu_model_.DirtyVariable("project_dirty");
+        render_needed_ = true;
     }
 
     void RmlMenuBar::rebuildLabels() {
@@ -700,6 +754,8 @@ namespace lfs::vis::gui {
         last_toolbar_hovered_ = hovered_toolbar_btn != nullptr;
         if (hovered_toolbar_btn)
             tooltip_.setHover(resolveRmlTooltip(hovered_toolbar_btn), hovered_toolbar_btn);
+        else if (!is_open && hovered_label < 0 && projectTitleAtPoint(mx, my))
+            tooltip_.setHover(project_tooltip_, project_title_el_);
         else
             tooltip_.setHover({}, nullptr);
 
@@ -1215,6 +1271,69 @@ namespace lfs::vis::gui {
         return find_button(menu_window_controls_);
     }
 
+    bool RmlMenuBar::projectTitleAtPoint(const float x, const float y) const {
+        if (!project_title_el_ || !project_title_has_room_ ||
+            project_title_.empty() || project_tooltip_.empty()) {
+            return false;
+        }
+        const auto offset = project_title_el_->GetAbsoluteOffset(Rml::BoxArea::Border);
+        const auto size = project_title_el_->GetBox().GetSize(Rml::BoxArea::Border);
+        return x >= offset.x && x < offset.x + size.x &&
+               y >= offset.y && y < offset.y + size.y;
+    }
+
+    void RmlMenuBar::updateProjectTitleLayout(const int screen_w, const float dp_ratio) {
+        if (!project_title_container_ || !project_title_el_)
+            return;
+
+        const float padding = 12.0f * dp_ratio;
+        const float menu_right = menu_items_
+                                     ? menu_items_->GetAbsoluteOffset(Rml::BoxArea::Border).x +
+                                           menu_items_->GetOffsetWidth() + padding
+                                     : padding;
+        float controls_left = static_cast<float>(screen_w) - padding;
+        if (menu_window_controls_)
+            controls_left = menu_window_controls_->GetAbsoluteOffset(Rml::BoxArea::Border).x - padding;
+        if (toolbar_fits_ && menu_toolbar_) {
+            // SetProperty("right") takes effect at the following Rml layout
+            // update. Use the value selected in this frame so the title never
+            // spends one resize frame underneath the viewport toolbar.
+            const float toolbar_width = std::max(
+                menu_toolbar_->GetOffsetWidth(),
+                menu_toolbar_->GetScrollWidth());
+            const float toolbar_left = applied_toolbar_right_ >= 0.0f
+                                           ? static_cast<float>(screen_w) -
+                                                 applied_toolbar_right_ - toolbar_width
+                                           : menu_toolbar_->GetAbsoluteOffset(
+                                                              Rml::BoxArea::Border)
+                                                 .x;
+            controls_left = std::min(controls_left,
+                                     toolbar_left - padding);
+        }
+
+        const float width = std::max(0.0f, controls_left - menu_right);
+        const bool has_room = !project_title_.empty() && width >= 96.0f * dp_ratio;
+        if (has_room != project_title_has_room_) {
+            project_title_container_->SetClass("no-room", !has_room);
+            project_title_has_room_ = has_room;
+            render_needed_ = true;
+        }
+        if (!has_room) {
+            return;
+        }
+
+        if (std::abs(menu_right - applied_project_title_left_) > 0.5f) {
+            project_title_container_->SetProperty("left", std::format("{:.1f}px", menu_right));
+            applied_project_title_left_ = menu_right;
+            render_needed_ = true;
+        }
+        if (std::abs(width - applied_project_title_width_) > 0.5f) {
+            project_title_container_->SetProperty("width", std::format("{:.1f}px", width));
+            applied_project_title_width_ = width;
+            render_needed_ = true;
+        }
+    }
+
     void RmlMenuBar::clearTitlebarDragRegion() {
         if (auto* wm = lfs::vis::services().windowOrNull())
             wm->clearTitlebarDragRegion();
@@ -1465,6 +1584,7 @@ namespace lfs::vis::gui {
                 render_needed_ = true;
             }
         }
+        updateProjectTitleLayout(screen_w, dp_ratio);
 
         int ctx_w = screen_w;
         // A closed menu bar only occupies the bar strip, but a dropdown or a

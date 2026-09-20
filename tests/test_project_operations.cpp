@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 
 namespace {
@@ -45,6 +46,32 @@ namespace {
         return path;
     }
 
+    void flip_byte(const fs::path& path, const std::uint64_t offset) {
+        std::fstream stream(path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(stream);
+        stream.seekg(static_cast<std::streamoff>(offset));
+        char byte = 0;
+        stream.read(&byte, 1);
+        ASSERT_EQ(stream.gcount(), 1);
+        stream.seekp(static_cast<std::streamoff>(offset));
+        byte ^= static_cast<char>(0x5a);
+        stream.write(&byte, 1);
+        ASSERT_TRUE(stream);
+    }
+
+    void write_u64(const fs::path& path, const std::uint64_t offset,
+                   const std::uint64_t value) {
+        std::array<std::byte, 8> bytes{};
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            bytes[index] = static_cast<std::byte>((value >> (index * 8)) & 0xff);
+        }
+        std::fstream stream(path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(stream);
+        stream.seekp(static_cast<std::streamoff>(offset));
+        stream.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        ASSERT_TRUE(stream);
+    }
+
     TEST(ProjectOperations, RestoreOlderSaveRekeysAndRefusesCollision) {
         TemporaryDirectory temporary;
         const auto source = make_document(temporary.path / "source.licht");
@@ -64,6 +91,142 @@ namespace {
         const auto collision = restore_save(source, 1, destination);
         ASSERT_FALSE(collision);
         EXPECT_EQ(collision.error().code(), lfs::ErrorCode::AlreadyExists);
+    }
+
+    TEST(ProjectOperations, RestoreSaveResurrectsDeletedCheckpoint) {
+        TemporaryDirectory temporary;
+        const auto source = make_document(temporary.path / "deleted-checkpoint.licht");
+        const auto checkpoint_id = fixed_uuid(3500);
+        const auto payload = checkpoint_payload(2200);
+        {
+            auto document = require_result(ProjectDocument::open(source));
+            require_status(document.set_checkpoint(checkpoint_id, require_result(LazyChunkValue::from_owned(payload, checkpoint_id))));
+            static_cast<void>(require_result(save_document(document, source)));
+        }
+        {
+            auto document = require_result(ProjectDocument::open(source));
+            ASSERT_TRUE(document.remove_checkpoint(checkpoint_id));
+            static_cast<void>(require_result(save_document(document, source)));
+        }
+        const auto before = require_result(inspect_project_card(source));
+        ASSERT_EQ(before.generation, 3u);
+        auto deleted = require_result(ProjectReader::open(source));
+        ASSERT_NE(deleted.find(FOURCC_CKPT, checkpoint_id), nullptr);
+        ASSERT_EQ(deleted.find(FOURCC_CKPT, checkpoint_id)->row_kind, RowKind::Tombstone);
+        const auto restored = require_result(restore_save(source, 2, source));
+        EXPECT_EQ(restored.project_uuid, before.project_uuid);
+        EXPECT_EQ(restored.generation, 4u);
+        auto reader = require_result(ProjectReader::open(source));
+        const auto* checkpoint = reader.find(FOURCC_CKPT, checkpoint_id);
+        ASSERT_NE(checkpoint, nullptr);
+        EXPECT_EQ(require_result(reader.read_chunk(*checkpoint)), payload);
+
+        // Historical tombstones may be replaced, but never a resolution made
+        // during the current append, whether it copied or deleted the key.
+        for (const bool erase_first : {false, true}) {
+            auto writer = require_result(ProjectWriter::append(source));
+            require_status(writer.plan_commit());
+            require_status(writer.preflight(payload.size()));
+            if (erase_first) {
+                require_status(writer.erase(checkpoint->key));
+            } else {
+                require_status(writer.copy_chunk_verbatim(reader, *checkpoint));
+            }
+            const auto duplicate = writer.copy_chunk_verbatim(reader, *checkpoint);
+            ASSERT_FALSE(duplicate);
+            EXPECT_EQ(duplicate.error().code(), lfs::ErrorCode::AlreadyExists);
+        }
+    }
+
+    TEST(ProjectOperations, RestoreSaveWithRetainedThumbnailChunks) {
+        TemporaryDirectory temporary;
+        const auto source = make_document(temporary.path / "thumbnail-history.licht");
+        const auto selected_preview = std::vector<std::byte>{
+            std::byte{'p'}, std::byte{'n'}, std::byte{'g'}};
+        const auto retained_thumbnail = std::vector<std::byte>{
+            std::byte{'o'}, std::byte{'l'}, std::byte{'d'}};
+        const auto newer_preview = std::vector<std::byte>{
+            std::byte{'n'}, std::byte{'e'}, std::byte{'w'}};
+        {
+            auto reader = require_result(ProjectReader::open(source));
+            auto writer = require_result(ProjectWriter::append(source));
+            require_status(writer.plan_commit());
+            std::uint64_t planned_bytes = selected_preview.size() + retained_thumbnail.size();
+            for (const auto& row : reader.chunks()) {
+                if (row.is_live())
+                    planned_bytes += row.stored_bytes;
+            }
+            require_status(writer.preflight(planned_bytes));
+            for (const auto& row : reader.chunks()) {
+                if (row.is_live())
+                    require_status(writer.copy_chunk_verbatim(reader, row));
+            }
+            require_status(writer.write_chunk(
+                ChunkKey{FOURCC_THMB, fixed_uuid(1001)}, retained_thumbnail));
+            require_status(writer.set_preview(selected_preview));
+            require_status(writer.commit());
+        }
+        static_cast<void>(require_result(set_project_preview(source, newer_preview)));
+
+        auto historical_reader = require_result(ProjectReader::open_generation(source, 2));
+        ASSERT_TRUE(historical_reader.preview().has_value());
+        EXPECT_EQ(require_result(historical_reader.read_preview()), selected_preview);
+
+        const auto restored_path = temporary.path / "restored-thumbnail-history.licht";
+        static_cast<void>(require_result(restore_save(source, 2, restored_path)));
+        auto restored_reader = require_result(ProjectReader::open(restored_path));
+        EXPECT_EQ(require_result(restored_reader.read_preview()), selected_preview);
+        EXPECT_EQ(std::ranges::count_if(restored_reader.chunks(), [](const auto& row) {
+                      return row.is_live() && row.key.fourcc == FOURCC_THMB;
+                  }),
+                  2);
+
+        const auto damaged = temporary.path / "damaged-thumbnail-history.licht";
+        fs::copy_file(source, damaged);
+        flip_byte(damaged, HEAD_SLOT_OFFSETS[0] + 200);
+        flip_byte(damaged, HEAD_SLOT_OFFSETS[1] + 200);
+        const auto repaired_path = temporary.path / "repaired-thumbnail-history.licht";
+        static_cast<void>(require_result(repair_project(damaged, repaired_path)));
+        auto repaired = require_result(ProjectReader::open(repaired_path));
+        EXPECT_EQ(require_result(repaired.read_preview()), newer_preview);
+        EXPECT_EQ(std::ranges::count_if(
+                      repaired.chunks(), [](const ChunkInfo& row) {
+                          return row.is_live() && row.key.fourcc == FOURCC_THMB;
+                      }),
+                  2);
+
+        static_cast<void>(require_result(restore_save(source, 2, source)));
+        auto source_reader = require_result(ProjectReader::open(source));
+        EXPECT_EQ(require_result(source_reader.read_preview()), selected_preview);
+        EXPECT_EQ(std::ranges::count_if(source_reader.chunks(), [](const auto& row) {
+                      return row.is_live() && row.key.fourcc == FOURCC_THMB;
+                  }),
+                  2);
+
+        const auto ambiguous_destination = temporary.path / "ambiguous-preview.licht";
+        const auto ambiguous = restore_save(source, 2, ambiguous_destination);
+        ASSERT_FALSE(ambiguous);
+        EXPECT_EQ(ambiguous.error().code(), lfs::ErrorCode::FailedPrecondition);
+        EXPECT_EQ(ambiguous.error().user_message(),
+                  "The selected save's preview is ambiguous.");
+        EXPECT_FALSE(fs::exists(ambiguous_destination));
+
+        const auto ambiguous_repair_source =
+            temporary.path / "ambiguous-repair-thumbnail-history.licht";
+        fs::copy_file(source, ambiguous_repair_source);
+        for (const auto offset : HEAD_SLOT_OFFSETS) {
+            write_u64(ambiguous_repair_source, offset + 112, 1);
+            flip_byte(ambiguous_repair_source, offset + 200);
+        }
+        const auto ambiguous_repair_destination =
+            temporary.path / "ambiguous-repair-result.licht";
+        const auto ambiguous_repair =
+            repair_project(ambiguous_repair_source, ambiguous_repair_destination);
+        ASSERT_FALSE(ambiguous_repair);
+        EXPECT_EQ(ambiguous_repair.error().code(), lfs::ErrorCode::FailedPrecondition);
+        EXPECT_EQ(ambiguous_repair.error().user_message(),
+                  "The recovered project preview is ambiguous.");
+        EXPECT_FALSE(fs::exists(ambiguous_repair_destination));
     }
 
     TEST(ProjectOperations, RebindCheckpointKeepsRecoveryCopy) {

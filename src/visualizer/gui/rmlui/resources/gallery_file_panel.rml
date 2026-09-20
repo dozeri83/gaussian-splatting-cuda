@@ -8,7 +8,6 @@
       <input id="gallery-file-title" type="text" maxlength="120" data-value="title" data-attr-title="title"/>
       <label for="gallery-file-description">{{g_review_description}}</label>
       <textarea id="gallery-file-description" rows="3" maxlength="5000" data-value="description" data-attr-title="description"/>
-      <div class="setting-row"><span>{{g_review_visibility}}</span><select data-value="visibility"><option value="private">{{g_review_private}}</option><option value="public">{{g_review_public}}</option></select></div>
       <div class="gallery-file-fields" data-if="show_format">
         <div class="setting-row"><span>{{g_review_upload_as}}</span><select data-value="upload_format"><option value="studio">{{g_format_studio}}</option><option value="sog">{{g_format_sog}}</option><option value="ssog">{{g_format_ssog}}</option><option value="spz">{{g_format_spz}}</option></select></div>
         <span class="text-muted">{{format_hint}}</span>
@@ -26,7 +25,7 @@
     <div class="gallery-conflict" data-if="is_conflict">
       <span class="text-muted">@tr:projects.gallery.conflict.choose_parts</span>
       <div class="gallery-choice-row" data-for="part : choices">
-        <div class="gallery-choice-description"><span class="gallery-choice-title" data-attr-title="part.label">{{part.label}}</span><span class="text-muted gallery-choice-difference" data-attr-title="part.values">{{part.difference}}</span></div>
+        <div class="gallery-choice-description"><span class="gallery-choice-title" data-attr-title="part.label">{{part.label}}</span><span class="text-muted gallery-choice-difference" data-attr-title="part.difference">{{part.difference}}</span></div>
         <div class="gallery-segmented">
           <button class="btn btn--secondary" data-class-is-active="part.choice == 'mine'" data-event-click="choose(part.id, 'mine')" title="@tr:projects.gallery.conflict.mine">@tr:projects.gallery.conflict.mine</button>
           <button class="btn btn--secondary" data-class-is-active="part.choice == 'gallery'" data-event-click="choose(part.id, 'gallery')" title="@tr:projects.gallery.conflict.portal">@tr:projects.gallery.conflict.portal</button>
@@ -49,6 +48,7 @@
     <span class="status-error" data-if="has_error">{{error}}</span>
     <div class="gallery-file-actions">
       <button class="btn btn--secondary" data-event-click="cancel" data-attr-title="cancel_label">{{cancel_label}}</button>
+      <button class="btn btn--secondary" data-if="show_local_apply" data-attrif-disabled="!can_submit" data-event-click="apply_local" title="@tr:projects.gallery.conflict.apply_local">@tr:projects.gallery.conflict.apply_local</button>
       <button class="btn btn--primary" data-if="!is_replacement" data-attrif-disabled="!can_submit" data-event-click="submit" data-attr-title="submit_label">{{submit_label}}</button>
     </div>
   </div>

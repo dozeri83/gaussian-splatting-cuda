@@ -16,7 +16,7 @@ from lfs_plugins import gallery_sync, portal_gallery
 
 def test_idle_subscription_and_elapsed_time_never_start_network_work(gallery, monkeypatch):
     controller, state, actions = gallery
-    controller.service.refresh = lambda: actions.append('refresh')
+    controller.service.refresh = lambda **_kwargs: actions.append('refresh')
     controller.service.resume = lambda _: actions.append('resume')
     monkeypatch.setattr(controller, '_advance_phases', lambda: None)
     seen = []
@@ -48,7 +48,7 @@ def test_transfer_poll_stops_and_delivers_terminal_state(gallery, monkeypatch):
 
 def test_failed_explicit_refresh_is_not_retried(gallery, monkeypatch):
     controller, state, calls = gallery
-    controller.service.refresh = lambda: calls.append('refresh')
+    controller.service.refresh = lambda **_kwargs: calls.append('refresh')
     monkeypatch.setattr(controller, '_schedule_poll', lambda: None)
     controller.refresh()
     state['refresh_ok'] = False
@@ -60,7 +60,7 @@ def test_failed_explicit_refresh_is_not_retried(gallery, monkeypatch):
 
 def test_own_transfer_completion_refreshes_once(gallery, monkeypatch):
     controller, state, calls = gallery
-    controller.service.refresh = lambda: calls.append('refresh')
+    controller.service.refresh = lambda **_kwargs: calls.append('refresh')
     monkeypatch.setattr(controller, '_schedule_poll', lambda: None)
     state['completion'] = {'id': 'done', 'kind': 'download'}
     controller._poll()
@@ -72,7 +72,7 @@ def test_own_transfer_completion_refreshes_once(gallery, monkeypatch):
 def test_scope_open_and_refresh_button_load_listing(panel_module):
     manager, _, _ = _gallery_fixture(panel_module)
     calls = []
-    manager._gallery_controller = SimpleNamespace(refresh=lambda: calls.append('refresh'))
+    manager._gallery_controller = SimpleNamespace(refresh=lambda **_kwargs: calls.append('refresh'))
     from lfs_plugins.asset_gallery_ui import SCOPE_PUBLISHED
     manager._select_folder_id(SCOPE_PUBLISHED)
     manager._gallery_command('refresh')
@@ -165,7 +165,7 @@ def test_outage_stops_update_batch_until_another_user_action(gallery):
     state['jobs'] = [{'id': 'upload', 'project': 'project', 'status': 'paused', 'message': 'Paused (connection lost)'}]
     controller._advance_update_all()
     assert not controller._update_queue
-    assert controller._batch_approval is None
+    assert not hasattr(controller, "_batch_approval")
 
 
 def test_domainless_link_is_rejected_as_a_whole():
@@ -244,7 +244,7 @@ def test_pull_and_open_finishes_and_releases_idle_poll(gallery, monkeypatch, tmp
         finally:
             leases.append('released')
     controller.service.local_use = local_use
-    controller.service.refresh = lambda: calls.append('refresh')
+    controller.service.refresh = lambda **_kwargs: calls.append('refresh')
     controller.pull_asset({'id': 'remote', 'remote_only': True}, remote, open_after=True)
     controller._poll()
     assert not opened
@@ -308,7 +308,7 @@ def test_closed_update_uses_saved_file_proof_without_live_capture(gallery, monke
     monkeypatch.setattr(gallery_project_facts, 'saved_content_stamp', lambda path: saved)
     monkeypatch.setattr(controller, '_schedule_poll', lambda: None)
     controller.service.edit = lambda *args, **kwargs: calls.append(('patch', args, kwargs))
-    details = {'title': 'Changed title', 'description': '', 'visibility': 'private'}
+    details = {'title': 'Changed title', 'description': ''}
     controller.publish_asset(asset, details, 'sog', update=True)
     assert calls[0][0] == ('patch' if patch else 'replace') and len(calls) == 1
     if patch:

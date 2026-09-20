@@ -40,8 +40,9 @@ def estimate_upload_size(publication, upload_format):
 
 def open_gallery_file_panel(**review):
     panel = lf.ui.get_panel_object("lfs.gallery_file")
-    if panel:
-        panel.show(**review)
+    if not panel:
+        raise ValueError("The Gallery review could not be opened. Please try again.")
+    panel.show(**review)
 
 
 @panel_class("gallery_file")
@@ -59,13 +60,21 @@ class GalleryFilePanel(Panel):
     def poll(self, _context):
         return self._review is not None
 
+    def apply_chrome(self, _payload):
+        # Opening a project restores saved panel visibility. The review belongs
+        # to the ongoing Gallery operation, so a saved layout must not hide it
+        # while it still blocks input to the Project Manager.
+        lf.ui.set_panel_enabled(self.id, self._review is not None)
+
     def show(self, *, controller, asset, scene, action, fields, includes="", quota="",
              warning="", publish_new=False, open_after=False, on_done=None,
              mode="publish", groups=(), on_submit=None, apply_only=False,
              expected_project_path=None):
         identity = controller.service.identity()
-        key = (identity, asset["id"], action, publish_new, open_after, expected_project_path)
+        key = (identity, asset["id"], action, publish_new, open_after, expected_project_path, mode, apply_only)
         if self._review and self._review["key"] == key:
+            lf.ui.set_panel_enabled(self.id, True)
+            self._dirty()
             return
         self._finish(False)
         self._review = dict(controller=controller, asset=deepcopy(asset), scene=deepcopy(scene),
@@ -115,8 +124,6 @@ class GalleryFilePanel(Panel):
             return
         value = str(value)
         if name == "upload_format" and value not in ("studio", "sog", "ssog", "spz"):
-            return
-        if name == "visibility" and value not in ("private", "public"):
             return
         self._fields[name] = value
         self._error = ""
@@ -186,13 +193,14 @@ class GalleryFilePanel(Panel):
         model = ctx.create_data_model("gallery_file")
         if model is None:
             return
-        for name in ("title", "description", "visibility", "upload_format", "pull_folder", "pull_name", "use_cover"):
+        for name in ("title", "description", "upload_format", "pull_folder", "pull_name", "use_cover"):
             model.bind(name, lambda n=name: self._fields.get(n, False if n == "use_cover" else ""), lambda v, n=name: self._set(n, v))
         values = {
             "panel_label": self._panel_label,
             "file_name": lambda: (self._review or {}).get("asset", {}).get("name", ""),
             "is_pull": self._is_pull,
             "is_publish": lambda: not self._is_pull() and (self._review or {}).get("mode") == "publish",
+            "show_local_apply": lambda: (self._review or {}).get("mode") == "conflict" and not self._review.get("apply_only"),
             "is_conflict": lambda: (self._review or {}).get("mode") == "conflict",
             "is_replacement": lambda: (self._review or {}).get("mode") == "replacement",
             "show_format": lambda: not self._is_pull() and (self._review or {}).get("mode") == "publish",
@@ -218,17 +226,20 @@ class GalleryFilePanel(Panel):
         model.bind_event("choose", lambda _h, _e, args: self._choose(args))
         model.bind_event("replacement", lambda _h, _e, args: self._replacement(args))
         model.bind_func("cancel_label", lambda: tr("replacement.later") if (self._review or {}).get("mode") == "replacement" else tr("action.cancel"))
-        for key in ("review.title", "review.description", "review.visibility", "review.upload_as", "review.private", "review.public",
+        for key in ("review.title", "review.description", "review.upload_as",
                     "format.studio", "format.sog", "format.ssog", "format.spz", "info.folder", "info.filename", "action.cancel"):
             model.bind_func("g_" + key.replace(".", "_"), lambda k=key: tr(k))
+        model.bind_event("apply_local", lambda _h, _e, _args: self._submit(local_only=True))
         model.bind_event("submit", lambda _h, _e, _args: self._submit())
         model.bind_event("cancel", lambda _h, _e, _args: self._close(False))
         self._handle = model.get_handle()
 
-    def _submit(self):
+    def _submit(self, *, local_only=False):
         if not self._can_submit() or self._review.get("mode") == "replacement":
             return
         review = self._review
+        if local_only and review.get("mode") != "conflict":
+            return
         controller = review["controller"]
         if controller.service.identity() != review["identity"]:
             self._close(False)
@@ -256,9 +267,13 @@ class GalleryFilePanel(Panel):
                                       open_after=review["open_after"])
             elif review.get("mode") == "conflict":
                 controller._decision_pending = False
-                review["on_submit"]({row["id"]: row["choice"] for row in review["groups"]})
+                decisions = {row["id"]: row["choice"] for row in review["groups"]}
+                if local_only:
+                    review["on_submit"](decisions, local_only=True)
+                else:
+                    review["on_submit"](decisions)
             else:
-                details = {k: self._fields[k].strip() for k in ("title", "description", "visibility")}
+                details = {k: self._fields[k].strip() for k in ("title", "description")}
                 details["useEmbeddedPreview"] = bool(self._fields.get("use_cover", False))
                 controller.upload_format = self._fields["upload_format"]
                 controller.publish_asset(review["asset"], details, self._fields["upload_format"],
@@ -326,7 +341,13 @@ class GalleryFilePanel(Panel):
                 self._close(False)
                 event.stop_propagation()
             elif key == KI_RETURN and event.target().tag_name != "textarea":
-                self._submit()
+                action = event.target().get_attribute("data-event-click", "")
+                if action == "apply_local":
+                    self._submit(local_only=True)
+                elif action == "cancel":
+                    self._close(False)
+                else:
+                    self._submit()
                 event.stop_propagation()
 
         doc.add_event_listener("keydown", keydown)

@@ -12,11 +12,16 @@ GALLERY_CARD_GAP = 10.0
 GALLERY_CARD_PREFERRED_WIDTH = 208.0
 GALLERY_HORIZONTAL_CHROME = 48.0
 
-BREAKPOINT_COMPACT_MAX = 420.0
-BREAKPOINT_NARROW_MAX = 640.0
-BREAKPOINT_MEDIUM_MAX = 900.0
+# Gallery now owns a fixed icon slot instead of a measured prose column. These
+# boundaries retain at least 360 dp for the results beside a 320 dp Inspector.
+# Wide mode starts once the navigator can join it while leaving roughly 480 dp
+# for the adaptive list; secondary columns may hide, but core actions remain.
+BREAKPOINT_COMPACT_MAX = 360.0
+BREAKPOINT_NARROW_MAX = 680.0
+BREAKPOINT_MEDIUM_MAX = 1000.0
 GRID_GAP = 12.0
 GRID_HORIZONTAL_PADDING = 24.0
+LIST_ACTION_COLUMN_WIDTH = 32.0
 THUMBNAIL_MIN = 112.0
 THUMBNAIL_MAX = 320.0
 INSPECTOR_COLUMN_MIN = 320.0
@@ -84,10 +89,10 @@ def breakpoint_metrics(width):
             "navigator_default": 0.0,
             "navigator_min": 0.0,
             "navigator_max": 0.0,
-            "inspector_placement": "overlay",
-            "inspector_default": 200.0,
-            "inspector_min": 120.0,
-            "inspector_max": 320.0,
+            "inspector_placement": "bottom",
+            "inspector_default": 1000.0,
+            "inspector_min": 180.0,
+            "inspector_max": 1000.0,
         },
         "narrow": {
             "toolbar_rows": 2,
@@ -95,21 +100,21 @@ def breakpoint_metrics(width):
             "navigator_default": 0.0,
             "navigator_min": 0.0,
             "navigator_max": 0.0,
-            "inspector_placement": "strip",
-            "inspector_default": 32.0,
-            "inspector_min": 32.0,
-            "inspector_max": 32.0,
+            "inspector_placement": "bottom",
+            "inspector_default": 1000.0,
+            "inspector_min": 180.0,
+            "inspector_max": 1000.0,
         },
         "medium": {
             "toolbar_rows": 1,
-            "navigator_mode": "column",
-            "navigator_default": 160.0,
-            "navigator_min": 120.0,
-            "navigator_max": 240.0,
-            "inspector_placement": "band",
-            "inspector_default": 200.0,
-            "inspector_min": 120.0,
-            "inspector_max": 450.0,
+            "navigator_mode": "dropdown",
+            "navigator_default": 0.0,
+            "navigator_min": 0.0,
+            "navigator_max": 0.0,
+            "inspector_placement": "column",
+            "inspector_default": INSPECTOR_COLUMN_MIN,
+            "inspector_min": INSPECTOR_COLUMN_MIN,
+            "inspector_max": 420.0,
         },
         "wide": {
             "toolbar_rows": 1,
@@ -175,22 +180,23 @@ def list_column_widths(width, overrides=None, measured=None):
     metrics = measured or {key: len(sample) * 6.0 + 16.0 for key, sample in (
         ("gallery", "Not published    "), ("size", "1023.9 MB"),
         ("modified", "2000-12-30 23:59"), ("folder", "Projects"))}
-    compact = width < 480
     widths = {key: max(float(metrics[key]), float((overrides or {}).get(key, 0)))
               for key in ("gallery", "size", "modified", "folder")}
-    if compact:
-        widths["gallery"] = 32.0
+    # Gallery is a status affordance, not a prose column. Its icon always owns
+    # the same compact slot; the complete state remains available as a tooltip.
+    widths["gallery"] = 32.0
     for key, threshold in (("size", 360), ("modified", 560), ("folder", 700)):
         if width < threshold:
             widths[key] = 0.0
-    # 24 dp shell inset, 16 dp row inset, thumbnail 32 dp, and its 8 dp gap.
-    available = max(0.0, float(width) - 24.0 - 16.0 - 32.0 - 8.0)
+    # Reserve shell/row insets, the thumbnail and gap, and the row action column.
+    available = max(
+        0.0,
+        float(width) - 24.0 - 16.0 - 32.0 - 8.0 - LIST_ACTION_COLUMN_WIDTH,
+    )
     name_minimum = min(max(80.0, float((overrides or {}).get("name", 80.0))), max(80.0, available - 32.0))
     for key in ("folder", "modified", "size"):
         if sum(widths.values()) + name_minimum > available:
             widths[key] = 0.0
-    if sum(widths.values()) + name_minimum > available:
-        widths["gallery"] = 32.0
     widths["name"] = max(0.0, available - sum(widths.values()))
     # A Name drag consumes spare space only. Measured columns never shrink.
     return {key: math.floor(widths.get(key, 0.0) * 10.0) / 10.0

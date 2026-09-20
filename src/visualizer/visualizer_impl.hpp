@@ -142,6 +142,7 @@ namespace lfs::vis {
         projectHasPath() override;
         lfs::Result<ProjectInfo>
         projectGetInfo() override;
+        ProjectDisplayInfo projectGetDisplayInfo() override;
         lfs::Result<std::optional<lfs::io::project::ProjectLicense>>
         projectGetLicense() override;
         lfs::Result<void> projectSetLicense(

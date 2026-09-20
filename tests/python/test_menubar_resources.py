@@ -278,6 +278,20 @@ def test_menu_bar_uses_retained_bounds_for_submenu_hover():
     assert "std::vector<MenuToolbarButtonView> camera_buttons_" in menu_bar_header
 
 
+def test_project_title_native_wiring_contract():
+    # CPU Rml tests in test_menu_bar_title.cpp cover geometry, hit testing, text,
+    # dirty bindings and tooltip escaping. These two wiring checks only ensure
+    # the GUI feeds that surface and SDL's drag exclusion list omits the title;
+    # they cannot prove OS window movement or rendered pixels.
+    gui = (PROJECT_ROOT / "src/visualizer/gui/gui_manager.cpp").read_text(encoding="utf-8")
+    menu = (PROJECT_ROOT / "src/visualizer/gui/rml_menu_bar.cpp").read_text(encoding="utf-8")
+    assert "rml_menu_bar_.updateProjectDisplay(project_display)" in gui
+    drag = menu.split("void RmlMenuBar::updateTitlebarDragRegion", 1)[1].split(
+        "void RmlMenuBar::", 1
+    )[0]
+    assert "append_element(excluded_rects, project_title_el_)" not in drag
+
+
 def test_theme_auto_visibility_and_variant_button_width_are_capability_driven():
     preferences_panel = (
         PROJECT_ROOT / "src" / "python" / "lfs_plugins" / "preferences_panel.py"
@@ -527,11 +541,19 @@ def test_asset_manager_palette_is_fully_theme_driven():
         ".asset-refresh-button img,\n.asset-folder-menu img,\n.asset-card-menu img": (
             "@{alpha(text,0.90)}",
         ),
+        ".asset-quick-look": ("@{modal.backdrop}",),
+        ".asset-quick-look-card": ("@{surface}",),
+        ".asset-resize-handle:hover,\n.asset-resize-handle:active,\n.asset-resize-handle:focus": (
+            "@{alpha(primary,0.45)}",
+        ),
+        ".asset-list-column-handle:hover": (
+            "@{primary}",
+            "@{alpha(primary,0.18)}",
+        ),
+        ".contents-remove img": ("@{text}",),
         "#asset-sidebar": ("@{alpha(background,0.32)}", "@{border}"),
         ".asset-card": ("@{surface_bright}", "@{border}"),
         ".asset-list-row": ("@{surface_bright}", "@{border}", "@{text}"),
-        "#asset-info-panel": ("@{alpha(background,0.32)}", "@{border}"),
-        ".asset-info-warning": ("@{alpha(error,0.10)}", "@{error}"),
     }
     for selector, expected_tokens in required_theme_rules.items():
         body = theme_rcss.split(f"{selector} {{", 1)[1].split("\n}", 1)[0]

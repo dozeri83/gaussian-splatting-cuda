@@ -1128,8 +1128,6 @@ class PreferencesPanel(Panel):
     def _set_gallery_preference(self, key, value):
         from .gallery_preferences import set_preference
         try:
-            if key == "askBeforePublic":
-                value = self._coerce_bool(value)
             set_preference(key, value)
             self._gallery_preferences_error = ""
         except (ValueError, OSError):

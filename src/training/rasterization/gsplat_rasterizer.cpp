@@ -13,6 +13,7 @@
 #include "core/splat_exportable_storage.hpp"
 #include "core/tensor/backend/cuda/runtime/cuda_stream_context.hpp"
 #include "gsplat/Ops.h"
+#include "training/kernels/densification_kernels.hpp"
 #include "training/kernels/grad_alpha.hpp"
 #include <algorithm>
 #include <array>
@@ -563,6 +564,8 @@ namespace lfs::training {
             ctx.isect_ids_ptr = result.isect_ids;
             ctx.flatten_ids_ptr = result.flatten_ids;
             ctx.n_isects = result.n_isects;
+            ctx.batches = std::move(result.batches);
+            ctx.tiles_per_gauss_ptr = tiles_per_gauss_ptr;
             ctx.n_sort = result.n_sort;
 
             // Save input tensors for backward (these are references, not copies)
@@ -617,6 +620,13 @@ namespace lfs::training {
             ctx.render_tile_height = tile_height;
 
             return std::pair{render_output, ctx};
+        } catch (const lfs::Exception& exception) {
+            arena.end_frame(frame_id, core::getCurrentCUDAStream());
+            auto error = exception.error();
+            lfs::SmallFields fields;
+            fields.add("camera", viewpoint_camera.image_name());
+            throw lfs::Exception(std::move(error).with_context(
+                "gsplat_rasterize_forward", LFS_SOURCE_SITE_CURRENT(), std::move(fields)));
         } catch (...) {
             // Isect buffers belong to the TLS VMM cache; only unwind the arena.
             // End on the same stream begin_frame used (same guard → same value),
@@ -811,8 +821,8 @@ namespace lfs::training {
                 ctx.last_ids_ptr,
                 ctx.tile_offsets_ptr,
                 ctx.flatten_ids_ptr,
-                ctx.n_sort > 0 ? static_cast<uint32_t>(ctx.n_sort)
-                               : static_cast<uint32_t>(ctx.n_isects),
+                // Batched contexts have no retained list; backward replays each leaf.
+                static_cast<uint32_t>(ctx.n_sort),
                 ctx.colors_ptr,
                 ctx.dirs_ptr,
                 ctx.radii_ptr,
@@ -830,7 +840,7 @@ namespace lfs::training {
                 pixel_error_map_ptr,
                 edge_weight_map_ptr,
                 edge_score_out_ptr,
-                stream);
+                stream, ctx.batches, ctx.tiles_per_gauss_ptr);
 
             // ============ Accumulate gradients into optimizer using CUDA kernels ============
             // This avoids any tensor operations that might allocate from memory pool
@@ -900,6 +910,18 @@ namespace lfs::training {
                     v_means_ptr,
                     N,
                     stream);
+            }
+
+            // Projection is shared by all tile batches. Publish only after the
+            // complete backward succeeds, while its full-frame radii are alive.
+            // Inference and strategies that do not request this metric do no work.
+            auto& shares = gaussian_model._max_screen_share;
+            if (optimizer.collect_projected_screen_share() &&
+                shares.is_valid() && shares.numel() == N && N > 0) {
+                shares.sync_to_stream(stream);
+                kernels::launch_accumulate_projected_screen_share(
+                    ctx.radii_ptr, ctx.means2d_ptr, shares.ptr<float>(), N, W, H, stream);
+                shares.set_stream(stream);
             }
 
             // Isect/flatten ids stay in the TLS VMM cache for the next forward.

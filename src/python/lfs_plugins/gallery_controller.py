@@ -47,6 +47,7 @@ class GalleryController:
         self._transfer_ui_epoch = 0
         self._refresh_pending = False
         self._refresh_requested = False
+        self._refresh_force_requested = False
         self._share_copy_pending = None
         self.checked_at = 0.0
         self.offline = False
@@ -65,7 +66,6 @@ class GalleryController:
         self._update_queue = []
         self._batch_rows = []
         self._batch_retries = {}
-        self._batch_approval = None
         self._batch_current = None
         self._preparation_failure = None
         from .ui import RuntimeState
@@ -105,7 +105,6 @@ class GalleryController:
         state = self.service.snapshot()
         identity = self.service.identity()
         entries = []
-        public = {}
         for asset in assets:
             link = state["links"].get(asset["id"])
             scene = next((s for s in state["scenes"] if link and s["id"] == link["sceneId"]), None)
@@ -114,20 +113,11 @@ class GalleryController:
                 continue
             entries.append({"asset": copy.deepcopy(asset), "scene": copy.deepcopy(scene),
                             "identity": identity, "format": self.upload_format})
-            if scene.get("visibility") == "public":
-                public[scene["id"]] = domain_tokens(scene)
-        def start():
-            if self.service.identity() != identity:
-                return
-            self._batch_approval = (identity, public)
-            self._update_queue = entries
-            self._advance_update_all()
-            self._schedule_poll()
-        if public and self.preferences()["askBeforePublic"]:
-            self.confirm_action("confirm.update_all", "\n".join(e["scene"].get("title", "") for e in entries
-                if e["scene"]["id"] in public), start)
-        else:
-            start()
+        if self.service.identity() != identity:
+            return
+        self._update_queue = entries
+        self._advance_update_all()
+        self._schedule_poll()
 
     def _advance_update_all(self):
         if self._panel_busy() or self._open_continuation:
@@ -147,12 +137,10 @@ class GalleryController:
             if self._last_canceled:
                 self._update_queue = []
         if not self._update_queue:
-            self._batch_approval = None
             return
         entry = self._update_queue.pop(0)
         if entry["identity"] != self.service.identity():
             self._update_queue = []
-            self._batch_approval = None
             self._batch_rows = []
             return
         asset, scene = entry["asset"], entry["scene"]
@@ -164,7 +152,7 @@ class GalleryController:
             entry["job_ids"] = {j["id"] for j in state["jobs"]}
             entry["completion_id"] = (state.get("completion") or {}).get("id")
             self._batch_current = (entry, self._message)
-            self.publish_asset(asset, {k: scene.get(k, "") for k in ("title", "description", "visibility")},
+            self.publish_asset(asset, {k: scene.get(k, "") for k in ("title", "description")},
                                entry["format"], update=True)
         except Exception as exc:
             self._batch_current = None
@@ -197,7 +185,7 @@ class GalleryController:
                         raise ValueError(tr("error.busy"))
                     # Retry enters the normal confirmation/validation path again.
                     self.publish_asset(entry["asset"], {k: entry["scene"].get(k, "") for k in
-                        ("title", "description", "visibility")}, entry["format"], update=True)
+                        ("title", "description")}, entry["format"], update=True)
                     self._batch_current = (entry, self._message)
                 self._batch_rows = [row for row in self._batch_rows if row["id"] != job_id]
                 self._batch_retries.pop(job_id, None)
@@ -206,7 +194,6 @@ class GalleryController:
         if name == "pause":
             self._last_canceled = True
             self._update_queue = []
-            self._batch_approval = None
             self._action_pause()
         elif name == "cancel":
             if any(j["id"] == job_id and j.get("project") == self._operation_project
@@ -320,7 +307,7 @@ class GalleryController:
             self._export_pending = (export, metadata, project_id, time.monotonic())
             self._schedule_poll()
 
-        self._public_confirmation(scene, start, details=metadata)
+        start()
         self._schedule_poll()
 
     def replace_published_asset(self, asset, scene, upload_format):
@@ -345,27 +332,6 @@ class GalleryController:
                        baseRevisions={name: scene[name + "Revision"] for name in ("content", "metadata")})
         handoff = self.service.remember_replacement(handoff)
         self._publish_closed_asset(asset, scene, upload_format, update=False, publish_as_new=False, handoff=handoff)
-
-    def _public_confirmation(self, scene, action, *, details=None):
-        """One public-visibility policy for PATCH and upload commands."""
-        details = details or {}
-        scene = scene or {}
-        was_public = scene.get("visibility") == "public"
-        visibility = details.get("visibility", scene.get("visibility", "private"))
-        if self.preferences()["askBeforePublic"] and (visibility == "public" or was_public) and not self._batch_public_approved(scene, details):
-            key = "confirm.public_update" if was_public else "confirm.public"
-            title = details.get("title", scene.get("title", ""))
-            self._confirm = (tr(key, title=title), action, tr("action.update" if was_public else "action.submit"))
-            self._show_confirmation()
-        else:
-            action()
-
-    def _batch_public_approved(self, scene, details):
-        approval = getattr(self, "_batch_approval", None)
-        return bool(approval and approval[0] == self.service.identity()
-                    and approval[1].get(scene.get("id")) == domain_tokens(scene)
-                    and scene.get("visibility") == "public"
-                    and details.get("visibility", "public") == "public")
 
     def resolve_asset(self, asset, details, *, apply_only=False):
         """Review all differing parts together, before accepting any write guard."""
@@ -397,17 +363,17 @@ class GalleryController:
         reviewed_stamp = file_stamp(asset["path"]) if Path(asset["path"]).is_file() else None
         reviewed_dirty = lf.project_is_dirty()
 
-        def apply(decisions):
+        def apply(decisions, *, local_only=False):
+            publish = not (apply_only or local_only)
             if self.service.identity() != identity or self._project_identity() != project:
                 raise ValueError(tr("error.project_changed"))
             if (reviewed_stamp is not None and file_stamp(asset["path"]) != reviewed_stamp
                     or lf.project_is_dirty() != reviewed_dirty or capture_view(lf) != local_view):
                 raise ValueError(tr("error.project_changed"))
             metadata = copy.deepcopy(local)
-            for group, keys in (("text", ("title", "description")), ("visibility", ("visibility",))):
-                if decisions.get(group) == "gallery":
-                    for key in keys:
-                        metadata[key] = remote.get(key, "")
+            if decisions.get("text") == "gallery":
+                for key in ("title", "description"):
+                    metadata[key] = remote.get(key, "")
             view = copy.deepcopy(remote_view if decisions.get("view") == "gallery" else local_view)
             track = copy.deepcopy(remote_view.get("cameraPath") if decisions.get("track") == "gallery" else local_view.get("cameraPath"))
             if decisions.get("track") == "both":
@@ -420,11 +386,19 @@ class GalleryController:
 
             def start():
                 if decisions.get("content") == "gallery":
-                    self.pull_asset(asset, scene)
-                    self._pull_overrides = (scene["id"], metadata, identity, not apply_only)
+                    local_environment_path = None
+                    if decisions.get("view") != "gallery":
+                        local_environment_path = str(lf.get_render_settings().environment_map_path) if view.get("environment") else ""
+                    self._pull_overrides = (scene["id"], metadata, identity, publish, local_environment_path)
+                    try:
+                        self.pull_asset(asset, scene)
+                    except Exception:
+                        self._pull_overrides = None
+                        raise
                 else:
                     self._begin_settings_apply(asset, scene, metadata,
-                        publish=not apply_only, replace_content="content" in decisions and not apply_only,
+                        publish=publish, replace_content="content" in decisions and publish,
+                        preserve_local_content="content" in decisions,
                         use_gallery_environment=decisions.get("view") == "gallery" and bool(view.get("environment")))
                 self._schedule_poll()
             self._resolve_pending_uploads(asset["id"], scene["id"], identity, start)
@@ -434,10 +408,15 @@ class GalleryController:
         def closed(_submitted):
             self._decision_pending = False
             self._schedule_poll()
-        open_gallery_file_panel(controller=self, asset=asset, scene=scene, action="conflict", fields={},
-            mode="conflict", groups=groups, on_submit=apply, on_done=closed, apply_only=apply_only)
+        try:
+            open_gallery_file_panel(controller=self, asset=asset, scene=scene, action="conflict", fields={},
+                mode="conflict", groups=groups, on_submit=apply, on_done=closed, apply_only=apply_only)
+            self._decision_pending = True
+        except Exception:
+            self._decision_pending = False
+            raise
 
-    def _begin_settings_apply(self, asset, scene, metadata, *, publish=False, replace_content=False, use_gallery_environment=False):
+    def _begin_settings_apply(self, asset, scene, metadata, *, publish=False, replace_content=False, use_gallery_environment=False, preserve_local_content=False):
         project = self._project_identity()
         identity = self.service.identity()
         if project[0] != asset["id"] or lf.is_training_active():
@@ -447,7 +426,8 @@ class GalleryController:
             job, backup = self.service.prepare_settings_update(scene, project[0], project[1], stamp)
             self._settings_pending = dict(project=project, identity=identity, stamp=stamp,
                 scene=copy.deepcopy(scene), metadata=copy.deepcopy(metadata), job=job, backup=backup,
-                phase="backup", publish=publish, replace_content=replace_content, use_gallery_environment=use_gallery_environment)
+                phase="backup", publish=publish, replace_content=replace_content, use_gallery_environment=use_gallery_environment,
+                preserve_local_content=preserve_local_content)
             self._operation_project, self._operation_title = project[0], metadata["title"]
             self._schedule_poll()
         if lf.project_is_dirty():
@@ -487,7 +467,8 @@ class GalleryController:
                 stamp = file_stamp(pending["project"][1])
                 self.service.finish_settings_update(pending["job"],
                     str(lf.io.inspect_project(pending["project"][1]).commit_uuid), stamp,
-                    pending["metadata"], acknowledge=not pending["publish"])
+                    pending["metadata"], acknowledge=not pending["publish"],
+                    preserve_local_content=pending.get("preserve_local_content", False))
                 pending.update(phase="linking", applied_stamp=stamp)
             self._save_current_project(saved, expected_project=pending["project"])
             return
@@ -513,6 +494,9 @@ class GalleryController:
         pending, self._settings_pending = self._settings_pending, None
         if pending and self.service.identity() == pending["identity"] and not self.service.busy:
             self.service.fail_local_update(pending["job"], friendly_error(error))
+            # The remote item may have changed while the review was open.
+            # Queue a fresh check after recording the failed apply.
+            self.refresh(force=True)
 
     def _resolve_pending_uploads(self, project_id, scene_id, identity, continuation):
         """Retire only the failed replacement explicitly superseded by Resolve."""
@@ -814,21 +798,29 @@ class GalleryController:
             return "preparing"
         return "idle"
 
-    def refresh(self):
+    def refresh(self, *, force=False):
         self._check_identity()
-        if self._refresh_pending and self.service.busy:
-            return
         if not self.service.snapshot().get("signed_in"):
             self._refresh_requested = False
+            self._refresh_force_requested = False
             self._message = ""
             self._refresh_model()
             return
         self._refresh_requested = True
+        self._refresh_force_requested = self._refresh_force_requested or force
+        if self._refresh_pending and self.service.busy:
+            self._schedule_poll()
+            return
         if not self.service.busy:
             self._refresh_requested = False
             self._message = ""
             self._refresh_pending = True
-            self.service.refresh()
+            force = self._refresh_force_requested
+            self._refresh_force_requested = False
+            if force:
+                self.service.refresh(force=True)
+            else:
+                self.service.refresh()
         self._schedule_poll()
 
     def _schedule_poll(self):
@@ -875,7 +867,7 @@ class GalleryController:
             self._message = friendly_error(exc)
             self._failure_notice = self._message
         if self._refresh_requested and not self.service.busy:
-            self.refresh()
+            self.refresh(force=self._refresh_force_requested)
         if self._refresh_pending and not self.service.busy:
             self._refresh_pending = False
             state = self.service.snapshot()
@@ -1024,7 +1016,6 @@ class GalleryController:
         self._update_queue = []
         self._batch_rows = []
         self._batch_retries = {}
-        self._batch_approval = None
         self._batch_current = None
         self._pull_requests.clear()
         self._cancel_requests.clear()
@@ -1133,9 +1124,9 @@ class GalleryController:
     @staticmethod
     def _details(details):
         title = details["title"].strip()
-        if not title or len(title) > 120 or len(details["description"]) > 5000 or details["visibility"] not in ("private", "public"):
+        if not title or len(title) > 120 or len(details["description"]) > 5000:
             raise ValueError(tr("error.details"))
-        result = {"title": title, "description": details["description"], "visibility": details["visibility"]}
+        result = {"title": title, "description": details["description"]}
         if "useEmbeddedPreview" in details:
             result["useEmbeddedPreview"] = bool(details["useEmbeddedPreview"])
         return result
@@ -1195,10 +1186,8 @@ class GalleryController:
         environment_source = str(lf.get_render_settings().environment_map_path) if metadata["viewerSettings"].get("environment") else None
         if scene:
             metadata.update(replaceSceneId=scene["id"], baseRevisions={name: scene[name + "Revision"] for name in ("content", "metadata")})
-        self._public_confirmation(scene,
-            lambda: self._publish(metadata, expected_project=project, environment_source=environment_source,
-                                 upload_format=upload_format, update=update),
-            details=metadata)
+        self._publish(metadata, expected_project=project, environment_source=environment_source,
+                      upload_format=upload_format, update=update)
 
     def _publish(self, metadata, *, expected_project=None, environment_source=None, upload_format="studio", update=False):
         identity = self.service.identity()
@@ -1240,7 +1229,7 @@ class GalleryController:
         if (update and content_stamp and ":" in content_stamp and ":" in baseline
                 and comparable(content_stamp) == comparable(baseline)
                 and metadata.get("replaceSceneId") == linked.get("sceneId")):
-            details = {k: v for k, v in metadata.items() if k in ("title", "description", "visibility", "viewerSettings")}
+            details = {k: v for k, v in metadata.items() if k in ("title", "description", "viewerSettings")}
             self.service.edit(linked["sceneId"], {name + "Revision": token for name, token in metadata["baseRevisions"].items()}, details,
                 commit_uuid=str(lf.io.inspect_project(path).commit_uuid), content_stamp=content_stamp, project_id=project_id)
             return True
@@ -1605,13 +1594,14 @@ class GalleryController:
         if index.update_asset(project.id, viewing_copy=True) is None:
             raise ValueError(index.last_error or tr("error.storage"))
 
-    def _link_saved_download(self, job_id, path, expected_project_id):
+    def _link_saved_download(self, job_id, path, expected_project_id, *, local_fields=None):
         inspected = lf.io.inspect_project(path)
         if str(inspected.project_uuid) != expected_project_id:
             raise ValueError("The project identity changed before linking. Refresh Projects and try again.")
         commit = str(getattr(inspected, "commit_uuid", ""))
         args = (job_id, str(inspected.project_uuid))
-        return self.service.link_download(*args, commit, project_path=path)
+        options = {"local_fields": local_fields} if local_fields is not None else {}
+        return self.service.link_download(*args, commit, project_path=path, **options)
 
     def _action_update_local(self, job_id):
         job = next(j for j in self._state["jobs"] if j["id"] == job_id)
@@ -1637,7 +1627,9 @@ class GalleryController:
     def _begin_local_update(self, job, project):
         if self._pull_overrides and self._pull_overrides[0] == job.get("result", {}).get("id"):
             job = copy.deepcopy(job)
-            job["result"]["viewerSettings"] = copy.deepcopy(self._pull_overrides[1]["viewerSettings"])
+            job["_local_fields"] = copy.deepcopy(self._pull_overrides[1])
+            if self._pull_overrides[4] is not None:
+                job["_local_environment_path"] = self._pull_overrides[4]
         if self._project_identity() != project:
             raise ValueError("The current project changed. Review it before updating.")
         if lf.is_training_active() or lf.ui.get_import_state().get("active"):
@@ -1694,7 +1686,7 @@ class GalleryController:
                 self._undo_pull = {"path": project[1], "backup": current_job["localUpdate"]["backupPath"],
                     "stamp": file_stamp(project[1]), "identity": self._identity}
             if self._pull_overrides:
-                scene_id, metadata, identity, publish = self._pull_overrides
+                scene_id, metadata, identity, publish = self._pull_overrides[:4]
                 self._pull_overrides = None
                 if identity == self._identity and publish:
                     self.service.edit(scene_id, domain_tokens(current_job["result"]), metadata, project_id=project[0])
@@ -1781,7 +1773,8 @@ class GalleryController:
             return
         update["phase"] = "linking"
         try:
-            update["link_operation"] = self._link_saved_download(job["id"], update["project"][1], update["project"][0])
+            update["link_operation"] = self._link_saved_download(job["id"], update["project"][1], update["project"][0],
+                **({"local_fields": job["_local_fields"]} if "_local_fields" in job else {}))
         except Exception as exc:
             log_failure("link_saved_download", exc, job_id=job["id"])
             raise ValueError("The project was updated and its recovery copy was kept, but the gallery link could not be saved. Refresh your gallery before continuing.") from exc
@@ -1789,7 +1782,10 @@ class GalleryController:
 
     def _apply_local_update(self, scene, incoming, job, update):
         # A saved recovery copy exists, and no edits have occurred since it was made.
-        restore_view(lf, job["result"].get("viewerSettings", {}), environment_path=self.service.environment_path(job))
+        environment_path = (job["_local_environment_path"] if "_local_environment_path" in job
+                            else self.service.environment_path(job))
+        metadata = job.get("_local_fields", job["result"])
+        restore_view(lf, metadata.get("viewerSettings", {}), environment_path=environment_path)
         # Native remove_node(keep_children=True) keeps child-local transforms.
         # Reparent retained children explicitly first to preserve their world pose.
         removed_ids = set(update["old_nodes"])
@@ -1806,7 +1802,7 @@ class GalleryController:
             if node is not None:
                 scene.remove_node(node.name, keep_children=True)
         lf.set_node_visibility(incoming.name, True)
-        title = job["result"]["title"]
+        title = metadata["title"]
         if scene.get_node(title) is not None:
             title += " (gallery " + incoming.uuid[:8] + ")"
         scene.rename_node(incoming.name, title)
@@ -1844,7 +1840,6 @@ def conflict_groups(asset, link, local, remote, *, apply_only=False):
     local_view, remote_view = local.get("viewerSettings", {}), remote.get("viewerSettings", {})
     parts = [
         ("text", {k: local.get(k, "") for k in ("title", "description")}, {k: remote.get(k, "") for k in ("title", "description")}, {k: baseline.get(k, "") for k in ("title", "description")}),
-        ("visibility", local.get("visibility"), remote.get("visibility"), baseline.get("visibility")),
         ("view", {k: v for k, v in local_view.items() if k != "cameraPath"}, {k: v for k, v in remote_view.items() if k != "cameraPath"}, {k: v for k, v in baseline.get("viewerSettings", {}).items() if k != "cameraPath"}),
         ("track", local_view.get("cameraPath"), remote_view.get("cameraPath"), baseline.get("viewerSettings", {}).get("cameraPath")),
     ]
@@ -1871,7 +1866,7 @@ def conflict_groups(asset, link, local, remote, *, apply_only=False):
         elif identifier == "track":
             difference = tr("conflict.track_counts", mine=len((mine or {}).get("keyframes", [])),
                             gallery=len((gallery or {}).get("keyframes", [])))
-        rows.append(dict(id=identifier, label=tr({"text": "conflict.text", "visibility": "conflict.visibility", "view": "conflict.view", "track": "conflict.track"}[identifier]),
+        rows.append(dict(id=identifier, label=tr({"text": "conflict.text", "view": "conflict.view", "track": "conflict.track"}[identifier]),
             mine_value=mine_value, gallery_value=gallery_value,
             difference=difference, values=values,
             choice="gallery" if apply_only or mine == base else "mine",
@@ -1902,8 +1897,10 @@ def asset_sync_state(project=None, link=None, scene=None, jobs=(), *, checked=Fa
         relationship = "local_missing"
     freshness = "unknown"
     if link and link.get("commitUuid") and project.get("commit_uuid") and scene and all(link.get(key) and scene.get(key) for key in ("contentRevision", "metadataRevision")):
+        # Links written by older builds still include visibility in their saved fields.
         local = (project["commit_uuid"] != link["commitUuid"] or
-                 "localFields" in link and link["localFields"] != link.get("sharedFields", {}))
+                 "localFields" in link and {k: v for k, v in link["localFields"].items() if k != "visibility"} !=
+                 {k: v for k, v in link.get("sharedFields", {}).items() if k != "visibility"})
         remote = any(scene[key] != link[key] for key in ("contentRevision", "metadataRevision"))
         freshness = "diverged" if local and remote else "local" if local else "remote" if remote else "equal"
     scene_id = (link or scene or {}).get("sceneId", (scene or {}).get("id"))

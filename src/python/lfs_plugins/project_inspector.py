@@ -146,6 +146,14 @@ class InspectionFactsPipeline:
                             self._deliver(asset_id, "card", card, None, cancel)
                 if cancel.is_set():
                     return
+                cached = self._cache.get(asset_id)
+                if cached is None or cached.card is None:
+                    continue
+                # Cards classify missing, damaged and newer-version files
+                # without throwing. Structural details require an open project.
+                open_state = value(cached.card, "open_state", "OPEN")
+                if str(value(open_state, "name", open_state)).rsplit(".", 1)[-1] != "OPEN":
+                    continue
                 is_selected = asset_id == selected_id
                 last = self._details_last_started.get(asset_id, 0.0)
                 due = is_selected or time.monotonic() - last >= 0.5
@@ -530,7 +538,10 @@ def contents_rows(entry: Any, details: Any, plan: Any = None, *,
             pending_saves.add(str(removed.get("id", "")))
             r.update(pending=True, undo=True, removal_id=removed["id"],
                      detail=tr("projects.contents.removed"))
-    checkpoints = list(value(details, "retained_checkpoints", []) or [])
+    # Compaction rewrites physical chunk order; display order follows iteration.
+    checkpoints = sorted(value(details, "retained_checkpoints", []) or [],
+                         key=lambda cp: (int(value(cp, "iteration", 0)),
+                                         str(value(cp, "instance_uuid", ""))))
     sizes = {str(value(cp, "instance_uuid", "")): int(value(cp, "bytes", 0)) for cp in value(plan, "retained_checkpoints", []) or []}
     strategy = str(value(params, "active_strategy", "") or "")
     for cp in checkpoints:

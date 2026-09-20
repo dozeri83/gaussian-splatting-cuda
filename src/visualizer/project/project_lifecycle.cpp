@@ -4409,9 +4409,12 @@ namespace lfs::vis::project {
         if (!trainer || !document_) {
             return false;
         }
+        // A paused training loop points at the next iteration, while its
+        // checkpoint contains the last completed iteration. Compare using
+        // the same iteration that the snapshot writer records.
         if (cached_bound_checkpoint_iteration_) {
             return *cached_bound_checkpoint_iteration_ !=
-                   trainer->get_current_iteration();
+                   trainer->project_snapshot_iteration();
         }
         const auto bound = document_->bound_checkpoint_uuid();
         if (!bound || !*bound) {
@@ -4430,7 +4433,7 @@ namespace lfs::vis::project {
         cached_bound_checkpoint_iteration_ =
             stored_iteration;
         return *stored_iteration !=
-               trainer->get_current_iteration();
+               trainer->project_snapshot_iteration();
     }
 
     bool ProjectLifecycle::canFlushFinishedTrainerSnapshot()
@@ -8401,7 +8404,7 @@ namespace lfs::vis::project {
                !isScratchBoundSession();
     }
 
-    bool ProjectLifecycle::hasDirtyProject() {
+    std::optional<bool> ProjectLifecycle::dirtyProjectPreflight() const {
         if (close_save_state_.load(
                 std::memory_order_acquire) ==
             CloseSaveState::Saving) {
@@ -8413,6 +8416,13 @@ namespace lfs::vis::project {
         }
         if (!document_) {
             return false;
+        }
+        return std::nullopt;
+    }
+
+    bool ProjectLifecycle::hasDirtyProject() {
+        if (const auto dirty = dirtyProjectPreflight()) {
+            return *dirty;
         }
         // Never let a silent training snapshot adoption
         // satisfy the exit gate as NotDirty.
@@ -8436,12 +8446,22 @@ namespace lfs::vis::project {
             last_unadoptable_training_snapshot_warning_
                 .clear();
         }
+        return hasDirtyProjectAfterPreflight();
+    }
+
+    bool ProjectLifecycle::hasDirtyProjectAfterPreflight() const {
+        // Training requires camera nodes; scene teardown clears the trainer before
+        // removing nodes. A blank untitled session has no nodes, so the active
+        // training and blank-session returns are mutually exclusive. Keep the
+        // save/exit ordering here for both callers.
         if (viewer_.getTrainer() &&
             viewer_.getTrainerManager() &&
             viewer_.getTrainerManager()
                 ->isTrainingActive() &&
             !viewer_.getTrainerManager()
-                 ->isPausedAtCheckpointBaseline()) {
+                 ->isPausedAtCheckpointBaseline() &&
+            (!viewer_.getTrainerManager()->isPaused() ||
+             isTrainingCheckpointStale())) {
             return true;
         }
         if (isBlankUntitledSession()) {
@@ -8465,6 +8485,13 @@ namespace lfs::vis::project {
             return true;
         }
         return hasHardDirtyChapters(*document_);
+    }
+
+    bool ProjectLifecycle::hasDirtyProjectForDisplay() const {
+        if (const auto dirty = dirtyProjectPreflight()) {
+            return *dirty;
+        }
+        return hasDirtyProjectAfterPreflight();
     }
 
     bool ProjectLifecycle::containsEmbeddedSecrets()
@@ -8874,7 +8901,9 @@ namespace lfs::vis::project {
         const bool training_forces_dirty =
             training_active &&
             !trainer_manager
-                 ->isPausedAtCheckpointBaseline();
+                 ->isPausedAtCheckpointBaseline() &&
+            (!trainer_manager->isPaused() ||
+             isTrainingCheckpointStale());
         const bool parameter_dirty = [&] {
             const auto* parameter_manager =
                 viewer_.getParameterManager();
@@ -9044,6 +9073,44 @@ namespace lfs::vis::project {
             });
         }
         cached_project_info_ = result;
+        return result;
+    }
+
+    ProjectDisplayInfo ProjectLifecycle::displayInfo() {
+        ProjectDisplayInfo result;
+        if (!document_) {
+            cached_project_display_info_.reset();
+            cached_project_display_document_ = nullptr;
+            return result;
+        }
+
+        // This read surface must never adopt a completed training snapshot or
+        // otherwise mutate lifecycle state merely because the chrome redraws.
+        result.dirty = hasDirtyProjectForDisplay();
+        std::unique_lock document_lock(document_access_mutex_, std::try_to_lock);
+        if (!document_lock.owns_lock()) {
+            if (cached_project_display_info_ &&
+                cached_project_display_document_ == document_.get()) {
+                auto cached = *cached_project_display_info_;
+                cached.dirty = result.dirty;
+                return cached;
+            }
+            return result;
+        }
+        if (!isScratchBoundSession()) {
+            result.path = recovered_master_path_
+                              ? recovered_master_path_
+                              : document_->source_path();
+        }
+        const auto title = document_->project().dom().get_json("title");
+        if (title && title->is_string()) {
+            auto value = title->get<std::string>();
+            if (!value.empty()) {
+                result.title = std::move(value);
+            }
+        }
+        cached_project_display_info_ = result;
+        cached_project_display_document_ = document_.get();
         return result;
     }
 
