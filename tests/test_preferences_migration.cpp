@@ -273,3 +273,69 @@ TEST(PreferencesMigration, MalformedTensorPreferencesKeepSafeDefaults) {
     EXPECT_FALSE(state.options.force_no_atomic_float);
     EXPECT_FALSE(state.options.viewer_vulkan_inputs);
 }
+
+TEST(PreferencesMigration, ProjectManagerPreferencesUseCanonicalStoreAndResetInIsolation) {
+    const auto home = makeHome("lfs_preferences_project_manager");
+    const ScopedLfsHome scoped_home(home);
+    const auto paths = lfs::core::UserPaths::resolve();
+    ASSERT_TRUE(paths);
+    ASSERT_TRUE(paths->ensureDirectories());
+    writePreferences(*paths, {{"theme", "light"}});
+
+    auto& preferences = lfs::vis::UserPreferences::instance();
+    EXPECT_EQ(preferences.projectManagerDefaultView(), "remember");
+    EXPECT_TRUE(preferences.openProjectManagerAtStartup());
+    EXPECT_TRUE(preferences.rememberProjectManagerState());
+    EXPECT_EQ(json::parse(preferences.projectManagerState()), json::object());
+
+    preferences.setProjectManagerDefaultView("gallery");
+    preferences.setOpenProjectManagerAtStartup(false);
+    preferences.setRememberProjectManagerState(false);
+    preferences.setProjectManagerState(R"({"view_mode":"list","navigator_width":312.5})");
+
+    EXPECT_EQ(preferences.projectManagerDefaultView(), "gallery");
+    EXPECT_FALSE(preferences.openProjectManagerAtStartup());
+    EXPECT_FALSE(preferences.rememberProjectManagerState());
+    EXPECT_EQ(json::parse(preferences.projectManagerState()).at("view_mode"), "list");
+    const auto persisted = readPreferences(*paths);
+    ASSERT_TRUE(persisted.at("project_manager").is_object());
+    EXPECT_EQ(persisted.at("project_manager").at("default_view"), "gallery");
+    EXPECT_EQ(persisted.at("project_manager").at("open_at_startup"), false);
+    EXPECT_EQ(persisted.at("project_manager").at("remember_state"), false);
+    EXPECT_EQ(persisted.at("theme"), "light");
+
+    preferences.resetProjectManagerPreferences();
+
+    const auto reset = readPreferences(*paths);
+    EXPECT_FALSE(reset.contains("project_manager"));
+    EXPECT_EQ(reset.at("theme"), "light");
+    EXPECT_EQ(preferences.projectManagerDefaultView(), "remember");
+    EXPECT_TRUE(preferences.openProjectManagerAtStartup());
+    EXPECT_TRUE(preferences.rememberProjectManagerState());
+}
+
+TEST(PreferencesMigration, InvalidProjectManagerPreferencesFallBackWithoutContamination) {
+    const auto home = makeHome("lfs_preferences_project_manager_invalid");
+    const ScopedLfsHome scoped_home(home);
+    const auto paths = lfs::core::UserPaths::resolve();
+    ASSERT_TRUE(paths);
+    ASSERT_TRUE(paths->ensureDirectories());
+    writePreferences(*paths, {
+                                 {"theme", "dark"},
+                                 {"project_manager", {
+                                                         {"default_view", "tiles"},
+                                                         {"open_at_startup", "yes"},
+                                                         {"remember_state", "yes"},
+                                                         {"state", json::array({1, 2, 3})},
+                                                     }},
+                             });
+
+    auto& preferences = lfs::vis::UserPreferences::instance();
+    EXPECT_EQ(preferences.projectManagerDefaultView(), "remember");
+    EXPECT_TRUE(preferences.openProjectManagerAtStartup());
+    EXPECT_TRUE(preferences.rememberProjectManagerState());
+    EXPECT_EQ(json::parse(preferences.projectManagerState()), json::object());
+    EXPECT_THROW(preferences.setProjectManagerDefaultView("tiles"), std::invalid_argument);
+    EXPECT_THROW(preferences.setProjectManagerState("[]"), std::invalid_argument);
+    EXPECT_EQ(readPreferences(*paths).at("theme"), "dark");
+}

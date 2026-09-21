@@ -207,12 +207,13 @@ def format_recent_project_entry(path: str, tr) -> tuple[str, str]:
 
 class NewProjectOperator(Operator):
     label = "menu.file.new_project"
-    description = "Create a new project"
+    description = "Start a blank, unsaved project"
 
     def execute(self, context) -> set:
-        from .import_panels import open_new_project_panel
-
-        open_new_project_panel("")
+        confirm_discard_work_then(
+            lf.ui.tr("menu.file.new_project"),
+            lambda stop_training: _new_project(True, stop_training),
+        )
         return {"FINISHED"}
 
 
@@ -243,6 +244,16 @@ class SaveProjectAsOperator(Operator):
 
     def execute(self, context) -> set:
         lf.project_save_as("")
+        return {"FINISHED"}
+
+
+class CleanProjectOperator(Operator):
+    label = "project_cleanup.title"
+    description = "Remove older saves and checkpoints while keeping the current project"
+
+    def execute(self, context) -> set:
+        from .project_cleanup import open_project_cleanup
+        open_project_cleanup()
         return {"FINISHED"}
 
 
@@ -581,8 +592,6 @@ def _publish_current_project_to_gallery(*, refresh_once: bool = True) -> None:
         if link:
             scene = next((row for row in state.get("scenes", [])
                           if row.get("id") == link.get("sceneId")), None)
-            if scene is None:
-                raise ValueError(gallery_tr("error.refresh"))
         linked_fields = ((link or {}).get("localFields") or (link or {}).get("sharedFields")
                          or scene or {})
         project_name = str(getattr(card, "title", None) or project_path.stem)
@@ -742,6 +751,7 @@ class FileMenu:
                 enabled=_can_compact_project(),
             ),
             menu_operator(EmbedDatasetOperator, enabled=bool(getattr(lf, "project_can_embed_dataset", lambda: False)())),
+            menu_operator(CleanProjectOperator, enabled=_can_compact_project()),
             menu_operator(
                 CompactProjectOperator,
                 enabled=_can_compact_project(),
@@ -782,6 +792,7 @@ _operator_classes = [
     SaveProjectOperator,
     SaveProjectAsOperator,
     EmbedDatasetOperator,
+    CleanProjectOperator,
     CompactProjectOperator,
     ImportDatasetOperator,
     ImportPlyOperator,

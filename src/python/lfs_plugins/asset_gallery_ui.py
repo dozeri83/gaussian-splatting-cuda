@@ -264,6 +264,8 @@ class GalleryAssetMixin:
             label = tr("state.viewing_copy") + " · " + label
         if facts["reason"] and facts["state"] == "error":
             label = tr("state.with_reason", state=label, reason=facts["reason"])
+        elif not facts["reason"] and facts.get("change_summary") and facts["state"] in ("remote", "diverged"):
+            label = tr("state.with_reason", state=label, reason=facts["change_summary"])
         if facts["health_icon"]:
             label = getattr(self, "_project_status_label", lambda _asset: label)(asset)
         job = next((j for j in self._gallery_state.get("jobs", ()) if j["id"] == facts["jobId"]), {})
@@ -281,8 +283,9 @@ class GalleryAssetMixin:
                         total=self._format_size(job["total"])) if facts["active"] and job.get("total") else ""
         gallery_action = primary.get("id", "")
         action_label = primary.get("label", "")
+        change_reason = facts["reason"] or facts.get("change_detail") or facts.get("change_summary") or ""
         return {"gallery_state": facts["state"], "gallery_label": label,
-                "gallery_reason": facts["reason"], "gallery_has_reason": bool(facts["reason"]),
+                "gallery_reason": change_reason, "gallery_has_reason": bool(change_reason),
                 "gallery_detail": detail, "gallery_bytes": byte_label,
                 "gallery_has_bytes": bool(byte_label),
                 "gallery_stored": stored,
@@ -290,7 +293,7 @@ class GalleryAssetMixin:
                 "gallery_can_pause": can_pause, "gallery_can_cancel": can_cancel,
                 "gallery_action_persistent": can_cancel or gallery_action in ("retry", "resume"),
                 "gallery_has_controls": can_cancel or bool(gallery_action),
-                "gallery_tooltip": "\n".join(filter(None, (label, facts["reason"], byte_label, detail, primary.get("reason")))),
+                "gallery_tooltip": "\n".join(filter(None, (label, facts.get("change_detail") or facts["reason"], byte_label, detail, primary.get("reason")))),
                 "health_badge": bool(facts["health_icon"]),
                 "health_tone": "asset-health-" + facts["health_tone"],
                 "gallery_ring": facts["active"],
@@ -375,15 +378,15 @@ class GalleryAssetMixin:
             "gallery_update_all_visible": lambda: self._selected_folder_id in GALLERY_SCOPES and bool(self._gallery_update_candidates()),
             "gallery_update_all_label": lambda: tr("action.update_all", count=len(self._gallery_update_candidates())),
             "gallery_update_all_enabled": lambda: bool(self._gallery_update_candidates()) and not self._gallery_state.get("busy") and self._gallery_state.get("phase", "idle") == "idle",
-            "gallery_empty": lambda: self._selected_folder_id == SCOPE_PUBLISHED and self._gallery_state.get("connected", False) and not self._gallery_state.get("scenes"),
-            "gallery_local_empty": lambda: self._selected_folder_id not in GALLERY_SCOPES and not self._asset_index_assets(),
+            "gallery_empty": lambda: not self._backend_load_active and self._selected_folder_id == SCOPE_PUBLISHED and self._gallery_state.get("connected", False) and not self._gallery_state.get("scenes"),
+            "gallery_local_empty": lambda: not self._backend_load_active and self._selected_folder_id not in GALLERY_SCOPES and not self._asset_index_assets(),
             "gallery_empty_pull": lambda: bool(self._gallery_state.get("scenes")) and not self._asset_index_assets(),
             "gallery_published_count": lambda: len(self._gallery_rows()),
             "gallery_attention_count": lambda: len(self._gallery_rows(True)),
-            "gallery_selected_reason": lambda: ((self._gallery_badge(self._get_selected_asset()).get("gallery_action_reason") or self._gallery_facts(self._get_selected_asset()).get("reason")) if self._get_selected_asset() else ""),
+            "gallery_selected_reason": lambda: ((self._gallery_badge(self._get_selected_asset()).get("gallery_action_reason") or self._gallery_badge(self._get_selected_asset()).get("gallery_reason")) if self._get_selected_asset() else ""),
             "gallery_has_selected_reason": lambda: bool(self._get_selected_asset() and (
                 self._gallery_badge(self._get_selected_asset()).get("gallery_action_reason")
-                or self._gallery_facts(self._get_selected_asset()).get("reason"))),
+                or self._gallery_badge(self._get_selected_asset()).get("gallery_reason"))),
             "gallery_selected_state": lambda: self._gallery_badge(self._get_selected_asset())["gallery_label"] if self._get_selected_asset() else "",
             "gallery_can_copy": lambda: self._gallery_verb_enabled(self._get_selected_asset() or {}, "copy"),
             "gallery_remote": lambda: bool((self._get_selected_asset() or {}).get("remote_only")),
@@ -742,30 +745,6 @@ class GalleryAssetMixin:
         fields = link.get("localFields") or link.get("sharedFields") or scene
         return {"title": fields.get("title", display_name(asset)),
                 "description": fields.get("description", "")}
-
-    def _gallery_thumbnail_callback(self, asset):
-        import copy
-        controller = self._controller()
-        identity, scene = controller.service.identity(), copy.deepcopy(self._gallery_scene(asset))
-        def finished():
-            try:
-                if controller.service.identity() != identity:
-                    raise ValueError(tr("error.account_changed"))
-                if not scene or asset["id"] not in self._gallery_state.get("links", {}):
-                    raise ValueError(tr("error.link"))
-                if str(lf.io.inspect_project(asset["path"]).project_uuid) != asset["id"]:
-                    raise ValueError(tr("error.project_changed"))
-                self._library_command("verify_asset", asset["id"])
-                png = lf.io.read_preview(asset["path"])
-                controller.service.set_cover(asset["id"], scene, png)
-                controller._after_service = controller.refresh
-                controller._schedule_poll()
-            except Exception as exc:
-                log_failure("update_gallery_thumbnail", exc, path=asset["path"])
-                from .gallery_messages import localize_message
-                self._gallery_notice = localize_message(str(exc))
-                self._request_model_update()
-        return finished
 
     def _open_replacement_review(self, asset):
         from .gallery_file_panel import open_gallery_file_panel

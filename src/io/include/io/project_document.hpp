@@ -104,6 +104,10 @@ namespace lfs::io::project {
         // A titled-project Save As uses a new catalog identity. Leave null
         // for ordinary saves, recovery publication, and first save.
         lfs::core::Uuid save_as_project_uuid = {};
+        std::optional<WriterLockLease> save_as_source_lock_lease;
+        std::vector<lfs::core::Uuid> save_as_excluded_checkpoints;
+        std::function<void(float, const std::string&)> save_as_progress;
+        std::function<bool()> save_as_cancel;
         IndexCompression index_compression = IndexCompression::Zstd;
         std::uint64_t disk_reserve_bytes = 64ull * 1024 * 1024;
         // First-save replacement requires explicit caller authorization
@@ -381,7 +385,12 @@ namespace lfs::io::project {
         save_autosave(
             const std::filesystem::path& sidecar_path,
             const ProjectDocumentAutosaveOptions& options);
-
+        // Append THMB onto the current source generation without encoding
+        // dirty chapters or payloads. Clean proofs are rebound to the new
+        // head so a later save can carry the thumbnail forward.
+        [[nodiscard]] lfs::Result<ProjectDocumentSaveReport>
+        save_preview(std::span<const std::byte> png_bytes,
+                     const ProjectDocumentSaveOptions& options = {});
         // Phase-A interactive shell. Heavy geometry and selection masks stay
         // deferred, while nodes and selection-group metadata are coherent.
         [[nodiscard]] lfs::Result<std::unique_ptr<lfs::core::Scene>>

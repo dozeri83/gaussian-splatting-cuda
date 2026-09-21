@@ -162,8 +162,8 @@ namespace lfs::vis::gui {
                    left_dock_resizing_ || left_dock_hovering_edge_;
         }
 
-        // Window-space resize strip from renderLeftDock()'s geometry. Half extends
-        // into the viewport; direct hit-testing works before a GUI frame updates
+        // Window-space resize strip from renderLeftDock()'s geometry lies outside
+        // the dock; direct hit-testing works before a GUI frame updates
         // the isResizingPanel() hover latch.
         [[nodiscard]] bool isPositionOverLeftDockResizeEdge(float x, float y,
                                                             float work_x, float work_y,
@@ -187,7 +187,9 @@ namespace lfs::vis::gui {
             const float edge_grab_w = std::min(std::max(SPLITTER_H * dpi, 8.0f * dpi), TOOLBAR_INSET * dpi);
             const float panel_right_x = work_x + dock_width;
             return LeftDockResizeRect{
-                .x0 = panel_right_x - edge_grab_w,
+                // Keep the shared hit area outside the dock so scrollbar drags
+                // never start a resize, including native Wayland hit testing.
+                .x0 = panel_right_x,
                 .x1 = panel_right_x + edge_grab_w,
                 .y0 = work_y,
                 .y1 = work_y + work_h,

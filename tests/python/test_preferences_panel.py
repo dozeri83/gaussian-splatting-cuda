@@ -67,6 +67,11 @@ def preferences_panel_module(monkeypatch):
         navigation_speed=8.0,
         project_location="",
         embed_dataset_by_default=False,
+        project_manager_preferences={
+            "defaultView": "remember",
+            "openAtStartup": True,
+            "rememberState": True,
+        },
     )
 
     tensor_defaults = dict(backend="cuda", vulkan_device="", vulkan_validation=0,
@@ -357,6 +362,25 @@ def preferences_panel_module(monkeypatch):
     sys.modules.pop("lfs_plugins.keymap_bindings", None)
     sys.modules.pop("lfs_plugins", None)
     module = import_module("lfs_plugins.preferences_panel")
+    monkeypatch.setattr(
+        module,
+        "read_project_manager_preferences",
+        lambda: dict(state.project_manager_preferences),
+    )
+    monkeypatch.setattr(
+        module,
+        "set_project_manager_preference",
+        lambda key, value: state.project_manager_preferences.__setitem__(key, value),
+    )
+    monkeypatch.setattr(
+        module,
+        "reset_project_manager_preferences",
+        lambda: setattr(
+            state,
+            "project_manager_preferences",
+            {"defaultView": "remember", "openAtStartup": True, "rememberState": True},
+        ),
+    )
     return module, state
 
 
@@ -368,6 +392,29 @@ def test_language_selection_does_not_reload_active_language(preferences_panel_mo
     panel._set_language_index("1")
 
     assert state.set_language_calls == []
+
+
+def test_project_manager_preferences_round_trip_and_reset(preferences_panel_module):
+    module, state = preferences_panel_module
+    panel = module.PreferencesPanel()
+
+    panel._set_project_manager_default_view("gallery")
+    panel._set_project_manager_open_at_startup(False)
+    panel._set_project_manager_remember_state(False)
+
+    assert state.project_manager_preferences == {
+        "defaultView": "gallery",
+        "openAtStartup": False,
+        "rememberState": False,
+    }
+
+    panel._reset_section("general")
+
+    assert state.project_manager_preferences == {
+        "defaultView": "remember",
+        "openAtStartup": True,
+        "rememberState": True,
+    }
 
 
 def test_viewport_chrome_selection_uses_global_style_preference(preferences_panel_module):
@@ -460,6 +507,20 @@ def test_general_preferences_expose_project_location_controls():
     assert 'data-value="project_location"' in rml
     assert 'data-event-click="browse_project_location"' in rml
     assert 'data-event-click="use_default_project_location"' in rml
+
+
+def test_project_manager_uses_a_standard_section_and_uniform_control_width():
+    project_root = Path(__file__).parent.parent.parent
+    resources = project_root / "src" / "visualizer" / "gui" / "rmlui" / "resources"
+    rml = (resources / "preferences.rml").read_text(encoding="utf-8")
+    rcss = (resources / "preferences.rcss").read_text(encoding="utf-8")
+
+    assert 'data-event-click="toggle_section(\'project_manager\')"' in rml
+    assert 'data-if="project_manager_expanded"' in rml
+    assert "preferences-subheading" not in rml
+    select_rule = rcss.split(".preferences-select {", 1)[1].split("}", 1)[0]
+    assert "box-sizing: border-box;" in select_rule
+    assert "width: 200dp;" in select_rule
 
 
 def test_scene_reconstruction_uses_backend_specific_presets(preferences_panel_module):

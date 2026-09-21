@@ -449,7 +449,7 @@ def test_published_bug_report_state_does_not_alias_defaults(fake_runtime):
     assert fresh["completeness_problems"] == []
 
 
-def test_submit_uses_authenticated_service_and_refreshes_exactly_once(
+def test_submit_refreshes_once_and_waits_for_resubmission(
     tmp_path,
     monkeypatch,
     fake_runtime,
@@ -469,6 +469,14 @@ def test_submit_uses_authenticated_service_and_refreshes_exactly_once(
     payload = bug_report.build_payload(valid_form(), consent_to_logs=False)
     state = bug_report.submit_report(payload, service=service)
 
+    # The account client refreshes credentials but never silently replays a POST.
+    assert state["success"] is False
+    assert [urllib.parse.urlsplit(request.full_url).path for request in stub.requests] == [
+        bug_report.BUG_REPORT_PATH,
+        portal_account.REFRESH_PATH,
+    ]
+
+    state = bug_report.submit_report(payload, service=service)
     assert state["success"] is True
     paths = [urllib.parse.urlsplit(request.full_url).path for request in stub.requests]
     assert paths == [

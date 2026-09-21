@@ -307,6 +307,9 @@ def project_set_license(identifier: str, notice: str = '') -> None:
 def project_clear_license() -> None:
     """Clear the license metadata for the active project"""
 
+def project_set_preview(png_bytes: bytes, wait: bool = False, path: str = '', project_uuid: str = '') -> bool:
+    """Write a thumbnail onto the active project without saving unsaved edits"""
+
 def project_poll_write() -> dict:
     """Return the active .licht project write state"""
 
@@ -315,6 +318,13 @@ def project_open(path: str = '', discard_changes: bool = False, stop_training: b
 
 def project_compact() -> None:
     """Compact the active .licht project in the background"""
+
+def project_cancel_cleanup() -> None: ...
+
+def project_clean(destination: str = '', expected_commit: str = '') -> bool:
+    """
+    Clean the active saved project in the background, preserving its current resume point
+    """
 
 def project_is_dirty() -> bool:
     """Return whether the active project has unsaved chapters"""

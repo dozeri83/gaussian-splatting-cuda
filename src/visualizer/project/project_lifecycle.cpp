@@ -4,6 +4,7 @@
  */
 
 #include "project_lifecycle.hpp"
+#include "io/project_operations.hpp"
 
 #include "core/assert.hpp"
 #include "core/checkpoint_format.hpp"
@@ -2456,6 +2457,7 @@ namespace lfs::vis::project {
                 discard_master = *document_->source_path();
             }
         }
+        clearPendingExplicitPreview();
         document_.reset();
         cleanupRecoverySession();
         // The user explicitly discarded unsaved changes at exit; delete
@@ -3234,19 +3236,59 @@ namespace lfs::vis::project {
         return true;
     }
 
+    bool ProjectLifecycle::queueExplicitSaveIfNonWaitableProjectWriteInFlight(
+        const bool regenerate_preview) {
+        if (!viewer_.jobs().anyRunning(JobType::ProjectWrite) &&
+            !viewer_.jobs().anyRunning(JobType::DatasetEmbed)) {
+            return false;
+        }
+        if (project_write_purpose_ == ProjectWritePurpose::Autosave ||
+            project_write_purpose_ ==
+                ProjectWritePurpose::TrainingAutosave ||
+            project_write_purpose_ ==
+                ProjectWritePurpose::GeometryCapture ||
+            project_write_purpose_ == ProjectWritePurpose::DatasetEmbed) {
+            return false;
+        }
+        if (!pending_explicit_save_regenerate_preview_) {
+            pending_explicit_save_regenerate_preview_ = regenerate_preview;
+            LOG_INFO(
+                "Project save queued until the in-flight project write finishes");
+        } else if (regenerate_preview) {
+            pending_explicit_save_regenerate_preview_ = true;
+        }
+        return true;
+    }
+
+    void ProjectLifecycle::processPendingThumbnailWrite() {
+        if (pending_preview_png_.empty() ||
+            viewer_.jobs().anyRunning(JobType::ProjectWrite) ||
+            close_save_state_.load(std::memory_order_acquire) ==
+                CloseSaveState::Saving) {
+            return;
+        }
+        if (auto started = startThumbnailWrite(); !started) {
+            LOG_ERROR(
+                "Queued thumbnail write failed: {}",
+                developerError(started.error()));
+            publishProjectToast(
+                started.error(), gui::error_op::kSave);
+            last_project_write_error_ = developerError(started.error());
+            last_project_write_error_code_ = started.error().code();
+            clearPendingExplicitPreview();
+        }
+    }
+
     void ProjectLifecycle::processPendingExplicitSave() {
         if (!pending_explicit_save_regenerate_preview_ ||
             viewer_.jobs().anyRunning(JobType::ProjectWrite)) {
             return;
         }
-        auto* const trainer = viewer_.getTrainer();
-        if (!trainer) {
-            pending_explicit_save_regenerate_preview_.reset();
-            return;
-        }
-        trainer->join_finished_project_writer();
-        if (trainer->get_project_snapshot_metrics().writer_in_flight) {
-            return;
+        if (auto* const trainer = viewer_.getTrainer()) {
+            trainer->join_finished_project_writer();
+            if (trainer->get_project_snapshot_metrics().writer_in_flight) {
+                return;
+            }
         }
 
         const bool regenerate_preview = *pending_explicit_save_regenerate_preview_;
@@ -3254,6 +3296,97 @@ namespace lfs::vis::project {
         if (auto saved = save(regenerate_preview); !saved) {
             LOG_ERROR("Queued project save failed: {}", developerError(saved.error()));
         }
+    }
+
+    lfs::Result<std::vector<std::byte>>
+    ProjectLifecycle::explicitSavePreviewPng(
+        const bool regenerate_preview) {
+        if (!pending_preview_png_.empty()) {
+            in_flight_preview_generation_ = pending_preview_generation_;
+            return pending_preview_png_;
+        }
+        in_flight_preview_generation_ = 0;
+        if (regenerate_preview && !projectHasPreview(document_.get())) {
+            return capturePreviewPng();
+        }
+        return std::vector<std::byte>{};
+    }
+
+    void ProjectLifecycle::clearPendingExplicitPreview() {
+        pending_preview_png_.clear();
+        pending_preview_path_.clear();
+        pending_preview_project_uuid_.clear();
+        pending_preview_generation_ = 0;
+        in_flight_preview_generation_ = 0;
+    }
+
+    lfs::Result<void> ProjectLifecycle::thumbnailWriteAllowed() const {
+        if (isTrainingWriteWindowOpen()) {
+            return fail<void>(lfs::ErrorCode::FailedPrecondition,
+                              "Stop training before updating the project thumbnail.",
+                              "Thumbnail writes cannot overlap the training snapshot writer",
+                              "project.training_snapshot");
+        }
+        if (auto* trainer = viewer_.getTrainer();
+            trainer && trainer->get_project_snapshot_metrics().writer_in_flight) {
+            return fail<void>(lfs::ErrorCode::FailedPrecondition,
+                              "Wait for the training save before updating the project thumbnail.",
+                              "The training snapshot writer still owns the project",
+                              "project.training_snapshot");
+        }
+        return {};
+    }
+
+    lfs::Result<void>
+    ProjectLifecycle::startThumbnailWrite() {
+        if (pending_preview_png_.empty()) {
+            return {};
+        }
+        if (viewer_.jobs().anyRunning(JobType::ProjectWrite) ||
+            viewer_.jobs().anyRunning(JobType::DatasetEmbed)) {
+            return {};
+        }
+        if (!document_ ||
+            !document_->source_path() ||
+            isScratchBoundSession()) {
+            return fail<void>(
+                lfs::ErrorCode::FailedPrecondition,
+                "This project has no path; use Save As.",
+                "A thumbnail-only write requires a bound project path",
+                "project.path");
+        }
+        if (auto allowed = thumbnailWriteAllowed(); !allowed) {
+            return allowed;
+        }
+        if (auto adopted = adoptSettledTrainerPublishOntoCurrentMaster(); !adopted) {
+            return adopted;
+        }
+        if (document_->source_path()->lexically_normal() != pending_preview_path_ ||
+            document_->project_uuid().to_string() != pending_preview_project_uuid_) {
+            return fail<void>(lfs::ErrorCode::FailedPrecondition,
+                              "The captured thumbnail no longer belongs to this project.",
+                              "The project identity changed while the thumbnail was queued",
+                              "project.uuid");
+        }
+        in_flight_preview_generation_ = pending_preview_generation_;
+        ProjectDocumentSaveOptions options;
+        options.commit.kind =
+            lfs::io::project::CommitKind::Explicit;
+        options.regenerate_dataset_preview = false;
+        options.preview_png = pending_preview_png_;
+        if (recovery_session_ && recovered_master_path_ &&
+            document_->source_path()->lexically_normal() ==
+                recovered_master_path_->lexically_normal()) {
+            options.writer_lock_lease =
+                recovery_session_->writer_lock();
+        }
+        auto started = startDocumentWrite(
+            ProjectWritePurpose::Thumbnail, document_,
+            *document_->source_path(), options);
+        if (!started) {
+            in_flight_preview_generation_ = 0;
+        }
+        return started;
     }
 
     lfs::Result<void>
@@ -3480,8 +3613,10 @@ namespace lfs::vis::project {
         }
         auto handle = jobs.init(
             JobType::ProjectWrite,
-            autosave ? "Preparing autosave"
-                     : "Preparing project save");
+            purpose == ProjectWritePurpose::Thumbnail
+                ? "Preparing project thumbnail"
+            : autosave ? "Preparing autosave"
+                       : "Preparing project save");
         if (!handle) {
             return fail<void>(
                 lfs::ErrorCode::FailedPrecondition,
@@ -3514,6 +3649,7 @@ namespace lfs::vis::project {
             project_write_thread_ =
                 std::jthread(
                     [this, handle = *handle,
+                     write_purpose = purpose,
                      document =
                          std::move(document),
                      destination =
@@ -3533,7 +3669,11 @@ namespace lfs::vis::project {
                         registry.work(handle);
                         registry.report(
                             handle, 0.05F,
-                            autosave
+                            write_purpose ==
+                                    ProjectWritePurpose::
+                                        Thumbnail
+                                ? "Writing project thumbnail"
+                            : autosave
                                 ? "Writing autosave sidecar"
                                 : "Writing project");
                         const std::lock_guard
@@ -3543,7 +3683,12 @@ namespace lfs::vis::project {
                             lfs::io::project::
                                 ProjectDocumentSaveReport>
                             saved =
-                                autosave
+                                write_purpose ==
+                                        ProjectWritePurpose::
+                                            Thumbnail
+                                    ? document->save_preview(
+                                          owned_preview, options)
+                                : autosave
                                     ? document
                                           ->save_autosave(
                                               destination,
@@ -3582,7 +3727,8 @@ namespace lfs::vis::project {
                             stop.stop_requested(),
                             std::move(error),
                             error_code,
-                            std::move(typed_error));
+                            std::move(typed_error),
+                            saved.has_value());
                         queueProjectWriteSettlement(
                             handle);
                     });
@@ -4188,6 +4334,13 @@ namespace lfs::vis::project {
 
     lfs::Result<void>
     ProjectLifecycle::prepareTrainingStartProject() {
+        if (!pending_preview_png_.empty() ||
+            project_write_purpose_ == ProjectWritePurpose::Thumbnail) {
+            return fail<void>(lfs::ErrorCode::FailedPrecondition,
+                              "Wait for the thumbnail update before starting training.",
+                              "A thumbnail write owns the project publication slot",
+                              "project.job");
+        }
         auto* trainer = viewer_.getTrainer();
         if (!trainer) {
             return fail<void>(
@@ -4479,21 +4632,17 @@ namespace lfs::vis::project {
             return lfs::Status::failure(
                 std::move(context).error());
         }
-        std::vector<std::byte> preview;
-        if (regenerate_preview && !projectHasPreview(document_.get())) {
-            auto captured = capturePreviewPng();
-            if (!captured) {
-                return lfs::Status::failure(
-                    std::move(captured).error());
-            }
-            preview = std::move(*captured);
+        auto preview = explicitSavePreviewPng(regenerate_preview);
+        if (!preview) {
+            return lfs::Status::failure(
+                std::move(preview).error());
         }
         const auto destination =
             recovered_master_path_.value_or(
                 *document_->source_path());
         const auto request_id =
             trainer->request_project_save(
-                destination, std::move(preview),
+                destination, std::move(*preview),
                 std::move(*context));
         auto* const manager = viewer_.getTrainerManager();
         if (manager && !manager->hasLiveTrainingThread() &&
@@ -4744,7 +4893,13 @@ namespace lfs::vis::project {
 
     lfs::Result<void>
     ProjectLifecycle::startCompaction(
-        const bool automatic) {
+        const bool automatic, const bool clean,
+        const std::filesystem::path& destination, const lfs::core::Uuid& expected_commit) {
+        if (clean && viewer_.getTrainerManager() && viewer_.getTrainerManager()->isTrainingActive()) {
+            return fail<void>(lfs::ErrorCode::FailedPrecondition,
+                              "Stop training before cleaning the project.",
+                              "cleanup must retain a stable training resume point", "clean.training");
+        }
         if (!document_ ||
             !document_->source_path() ||
             isScratchBoundSession()) {
@@ -4761,12 +4916,17 @@ namespace lfs::vis::project {
                 "Compaction cannot make the recovery base unreachable",
                 "project.recovery");
         }
-        if (hydration_.load(std::memory_order_acquire) !=
-            Hydration::Complete) {
+        // Empty after first save is already bound; Complete is opened-from-disk.
+        const auto hydration = hydration_.load(
+            std::memory_order_acquire);
+        if (hydration != Hydration::Empty &&
+            hydration != Hydration::Complete) {
             return fail<void>(
                 lfs::ErrorCode::FailedPrecondition,
-                "Wait for project opening to finish before compacting.",
-                "Compaction requires a fully hydrated project",
+                hydration == Hydration::Failed
+                    ? "The project did not finish opening."
+                    : "Wait for project opening to finish before compacting.",
+                "Compaction requires a fully opened project",
                 "project.hydration");
         }
         if (viewer_.jobs().anyRunning(
@@ -4817,6 +4977,7 @@ namespace lfs::vis::project {
         }
         const auto path =
             *document_->source_path();
+        cleanup_in_progress_ = clean;
         project_write_job_ = *handle;
         project_write_purpose_ =
             ProjectWritePurpose::Compaction;
@@ -4830,13 +4991,19 @@ namespace lfs::vis::project {
             project_write_thread_ =
                 std::jthread(
                     [this, handle = *handle,
-                     path](
+                     path, clean, destination, expected_commit](
                         const std::stop_token stop) {
                         auto& jobs =
                             viewer_.jobs();
                         jobs.work(handle);
-                        auto compacted =
-                            lfs::io::project::
+                        auto compacted = [&]() -> lfs::Result<void> {
+                            if (clean) {
+                                auto result = lfs::io::project::clean_project_file(path, destination, expected_commit, [&jobs, handle](float value, const std::string& stage) { jobs.report(handle, value, stage); }, [&jobs, handle, &stop] { return stop.stop_requested() || jobs.cancelRequested(handle); });
+                                if (!result)
+                                    return lfs::Result<void>::failure(std::move(result).error());
+                                return {};
+                            }
+                            return lfs::io::project::
                                 ProjectWriter::compact(
                                     path,
                                     lfs::io::project::
@@ -4881,6 +5048,7 @@ namespace lfs::vis::project {
                                                         "Building and verifying compact project");
                                                 },
                                         });
+                        }();
                         const auto compact_error_code =
                             compacted
                                 ? std::optional<lfs::ErrorCode>{}
@@ -4899,7 +5067,8 @@ namespace lfs::vis::project {
                                       compacted
                                           .error()),
                             compact_error_code,
-                            compact_typed_error);
+                            compact_typed_error,
+                            clean && compacted.has_value());
                         queueProjectWriteSettlement(
                             handle);
                     });
@@ -4924,6 +5093,16 @@ namespace lfs::vis::project {
         return startCompaction(false);
     }
 
+    void ProjectLifecycle::cancelCleanup() {
+        if (cleanup_in_progress_ && project_write_job_ && project_write_purpose_ == ProjectWritePurpose::Compaction)
+            viewer_.jobs().requestCancel(*project_write_job_, "Canceling cleanup");
+    }
+
+    lfs::Result<void> ProjectLifecycle::clean(
+        const std::filesystem::path& destination, const lfs::core::Uuid& expected_commit) {
+        return startCompaction(false, true, destination, expected_commit);
+    }
+
     void ProjectLifecycle::joinPendingWrite() {
         // Blocks until the in-flight project write settles.
         if (project_write_thread_.joinable()) {
@@ -4934,6 +5113,22 @@ namespace lfs::vis::project {
         // regular frame before falling back to direct settlement for shutdown.
         viewer_.pumpPostedWorkForProjectWrite();
         settleProjectWrite();
+        if (!application_close_pending_) {
+            processPendingThumbnailWrite();
+        }
+        if (project_write_thread_.joinable()) {
+            project_write_thread_.join();
+            viewer_.pumpPostedWorkForProjectWrite();
+            settleProjectWrite();
+        }
+        if (!application_close_pending_) {
+            processPendingExplicitSave();
+        }
+        if (project_write_thread_.joinable()) {
+            project_write_thread_.join();
+            viewer_.pumpPostedWorkForProjectWrite();
+            settleProjectWrite();
+        }
     }
 
     void ProjectLifecycle::queueProjectWriteSettlement(
@@ -5181,6 +5376,7 @@ namespace lfs::vis::project {
             }
         }
 
+        const bool was_thumbnail = project_write_purpose_ == ProjectWritePurpose::Thumbnail;
         const bool was_autosave =
             project_write_purpose_ ==
                 ProjectWritePurpose::Autosave ||
@@ -5384,6 +5580,13 @@ namespace lfs::vis::project {
         project_write_destination_.clear();
         project_write_autosave_sequence_ = 0;
         project_write_automatic_ = false;
+        if ((error.empty() || was_thumbnail) &&
+            in_flight_preview_generation_ != 0 &&
+            in_flight_preview_generation_ ==
+                pending_preview_generation_) {
+            pending_preview_png_.clear();
+        }
+        in_flight_preview_generation_ = 0;
         cached_project_info_.reset();
         if (!(was_autosave && !error.empty())) {
             refreshStorageStats();
@@ -5398,6 +5601,7 @@ namespace lfs::vis::project {
     void ProjectLifecycle::updateMaintenance() {
         applyStartupRecoveryScan();
         settleProjectWrite();
+        processPendingThumbnailWrite();
         processPendingExplicitSave();
         if (!viewer_.jobs().anyRunning(
                 JobType::ProjectWrite)) {
@@ -5436,7 +5640,10 @@ namespace lfs::vis::project {
         }
         const bool training_write_window =
             isTrainingWriteWindowOpen();
+        const auto* const gui = viewer_.getGuiManager();
+        const bool modal_open = gui && gui->modalOverlay() && gui->isModalWindowOpen();
         if (!training_write_window &&
+            !modal_open &&
             !isScratchBoundSession() &&
             compaction_suggested_ &&
             settings_.compaction_idle_seconds !=
@@ -6776,6 +6983,10 @@ namespace lfs::vis::project {
         if (queueExplicitSaveIfTrainerWriterInFlight(regenerate_preview)) {
             return {};
         }
+        if (queueExplicitSaveIfNonWaitableProjectWriteInFlight(
+                regenerate_preview)) {
+            return {};
+        }
         if (auto waited =
                 waitOutBackgroundAutosaveForExplicitSave();
             !waited) {
@@ -6819,14 +7030,10 @@ namespace lfs::vis::project {
             return lfs::Status::failure(
                 std::move(synchronized).error());
         }
-        std::vector<std::byte> preview;
-        if (regenerate_preview && !projectHasPreview(document_.get())) {
-            auto captured = capturePreviewPng();
-            if (!captured) {
-                return lfs::Status::failure(
-                    std::move(captured).error());
-            }
-            preview = std::move(*captured);
+        auto preview = explicitSavePreviewPng(regenerate_preview);
+        if (!preview) {
+            return lfs::Status::failure(
+                std::move(preview).error());
         }
         const auto destination =
             recovered_master_path_
@@ -6866,7 +7073,7 @@ namespace lfs::vis::project {
                         IndexCompression::Zstd,
                 .disk_reserve_bytes =
                     64ull * 1024 * 1024,
-                .preview_png = preview,
+                .preview_png = *preview,
                 .writer_lock_lease =
                     recovery_session_
                         ? std::optional{
@@ -6965,22 +7172,16 @@ namespace lfs::vis::project {
                 allow_existing_destination_replacement;
             context->save_as_project_uuid =
                 save_as_project_uuid;
-            std::vector<std::byte> preview;
-            if (regenerate_preview &&
-                !projectHasPreview(document_.get())) {
-                auto captured =
-                    capturePreviewPng();
-                if (!captured) {
-                    return lfs::Status::failure(
-                        std::move(captured).error());
-                }
-                preview = std::move(*captured);
+            auto preview = explicitSavePreviewPng(regenerate_preview);
+            if (!preview) {
+                return lfs::Status::failure(
+                    std::move(preview).error());
             }
             const auto request_id =
                 trainer
                     ->request_project_save(
                         *normalized,
-                        std::move(preview),
+                        std::move(*preview),
                         std::move(*context));
             if (!viewer_.getTrainerManager()
                      ->hasLiveTrainingThread() &&
@@ -7004,14 +7205,10 @@ namespace lfs::vis::project {
             return lfs::Status::failure(
                 std::move(synchronized).error());
         }
-        std::vector<std::byte> preview;
-        if (regenerate_preview && !projectHasPreview(document_.get())) {
-            auto captured = capturePreviewPng();
-            if (!captured) {
-                return lfs::Status::failure(
-                    std::move(captured).error());
-            }
-            preview = std::move(*captured);
+        auto preview = explicitSavePreviewPng(regenerate_preview);
+        if (!preview) {
+            return lfs::Status::failure(
+                std::move(preview).error());
         }
         auto started = startDocumentWrite(
             ProjectWritePurpose::SaveAs,
@@ -7047,7 +7244,7 @@ namespace lfs::vis::project {
                     64ull * 1024 * 1024,
                 .allow_existing_destination_replacement =
                     allow_existing_destination_replacement,
-                .preview_png = preview,
+                .preview_png = *preview,
                 .writer_lock_lease =
                     recovery_session_ &&
                             recovered_master_path_ &&
@@ -7494,6 +7691,7 @@ namespace lfs::vis::project {
         cached_project_info_.reset();
         cached_bound_checkpoint_iteration_.reset();
         clearStoredTrainingSession();
+        clearPendingExplicitPreview();
         document_ = candidate;
         last_captured_selection_serial_.reset();
         captured_splat_serials_.clear();
@@ -8195,6 +8393,7 @@ namespace lfs::vis::project {
         cached_project_info_.reset();
         cached_bound_checkpoint_iteration_.reset();
         clearStoredTrainingSession();
+        clearPendingExplicitPreview();
         document_ =
             std::make_shared<ProjectDocument>(
                 std::move(*created));
@@ -8280,6 +8479,84 @@ namespace lfs::vis::project {
         const std::lock_guard document_lock(document_access_mutex_);
         cached_project_info_.reset();
         return document_->clear_license();
+    }
+
+    lfs::Result<void> ProjectLifecycle::setPreview(
+        const std::span<const std::byte> png_bytes,
+        const std::filesystem::path& expected_path,
+        std::string expected_project_uuid) {
+        if (png_bytes.empty()) {
+            return fail<void>(
+                lfs::ErrorCode::InvalidArgument,
+                "The project preview is empty.",
+                "An explicit thumbnail write requires preview bytes",
+                "THMB");
+        }
+        if (auto allowed = thumbnailWriteAllowed(); !allowed) {
+            return allowed;
+        }
+        auto active = info();
+        if (!active) {
+            return lfs::Result<void>::failure(std::move(active).error());
+        }
+        if (!active->path) {
+            return fail<void>(lfs::ErrorCode::FailedPrecondition,
+                              "This project has no path; use Save As.",
+                              "An untitled project cannot receive a thumbnail write",
+                              "project.path");
+        }
+        if (!expected_path.empty()) {
+            auto expected = normalizedProjectPath(expected_path);
+            if (!expected) {
+                return lfs::Status::failure(
+                    std::move(expected).error());
+            }
+            if (active->path->lexically_normal() !=
+                expected->lexically_normal()) {
+                return fail<void>(
+                    lfs::ErrorCode::FailedPrecondition,
+                    "The captured thumbnail no longer belongs to this project.",
+                    "The active project path changed before the thumbnail write",
+                    "project.path");
+            }
+        }
+        if (!expected_project_uuid.empty()) {
+            auto parsed = lfs::core::Uuid::from_string(
+                expected_project_uuid);
+            if (!parsed) {
+                return fail<void>(
+                    lfs::ErrorCode::InvalidArgument,
+                    "The project identity is invalid.",
+                    expected_project_uuid, "project.uuid");
+            }
+            if (active->project_uuid != parsed->to_string()) {
+                return fail<void>(
+                    lfs::ErrorCode::FailedPrecondition,
+                    "The captured thumbnail no longer belongs to this project.",
+                    "The active project identity changed before the thumbnail write",
+                    "project.uuid");
+            }
+        }
+        if (auto allowed = thumbnailWriteAllowed(); !allowed) {
+            return allowed;
+        }
+        last_project_write_error_.clear();
+        last_project_write_error_code_.reset();
+        pending_preview_png_.assign(
+            png_bytes.begin(), png_bytes.end());
+        ++pending_preview_generation_;
+        pending_preview_path_ = active->path->lexically_normal();
+        pending_preview_project_uuid_ = active->project_uuid;
+        if (close_save_state_.load(
+                std::memory_order_acquire) ==
+            CloseSaveState::Saving) {
+            return {};
+        }
+        if (auto started = startThumbnailWrite(); !started) {
+            clearPendingExplicitPreview();
+            return started;
+        }
+        return {};
     }
 
     lfs::Result<void>
@@ -8470,6 +8747,9 @@ namespace lfs::vis::project {
         if (isScratchBoundSession()) {
             return true;
         }
+        if (!pending_preview_png_.empty()) {
+            return true;
+        }
         if (canFlushFinishedTrainerSnapshot()) {
             return true;
         }
@@ -8642,14 +8922,19 @@ namespace lfs::vis::project {
             .disk_reserve_bytes =
                 64ull * 1024 * 1024,
             // Save-on-close is automatic: carry THMB
-            // forward rather than issuing a render.
-            .preview_png = {},
+            // forward rather than issuing a render,
+            // unless an explicit thumbnail is pending.
+            .preview_png = pending_preview_png_,
             .writer_lock_lease =
                 recovery_session_
                     ? std::optional{
                           recovery_session_->writer_lock()}
                     : std::nullopt,
         };
+        if (!pending_preview_png_.empty()) {
+            in_flight_preview_generation_ =
+                pending_preview_generation_;
+        }
         {
             std::lock_guard lock(
                 close_save_mutex_);
@@ -8770,18 +9055,21 @@ namespace lfs::vis::project {
     ProjectWritePoll ProjectLifecycle::pollWrite() {
         settleProjectWrite();
         ProjectWritePoll poll;
-        poll.running = pending_explicit_save_regenerate_preview_.has_value();
+        poll.running = pending_explicit_save_regenerate_preview_.has_value() ||
+                       !pending_preview_png_.empty();
         if (project_write_job_) {
             const auto job = viewer_.jobs().peek(
                 *project_write_job_);
-            poll.running =
-                !job || job->running();
+            poll.running = poll.running || !job || job->running();
             if (job) {
                 poll.error = job->error;
                 poll.error_code = job->error_code;
             }
         }
-        if (document_) {
+        if (project_write_job_ && cached_project_info_) {
+            poll.generation = cached_project_info_->generation;
+            poll.path = cached_project_info_->path;
+        } else if (document_) {
             poll.generation = document_->generation();
             poll.path =
                 isScratchBoundSession()

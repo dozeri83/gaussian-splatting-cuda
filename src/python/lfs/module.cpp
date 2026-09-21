@@ -107,6 +107,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <span>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -307,6 +308,53 @@ namespace {
             python_viewer_shutdown_error());
     }
 
+    lfs::Result<void> post_project_preview_set_to_viewer(
+        lfs::vis::Visualizer& viewer,
+        std::vector<std::byte> png_bytes,
+        std::filesystem::path expected_path,
+        std::string expected_project_uuid) {
+        if (viewer.isOnViewerThread()) {
+            return viewer.projectSetPreview(
+                png_bytes, expected_path, expected_project_uuid);
+        }
+        const lfs::core::TaskContext context{
+            .name = "python.project_set_preview",
+            .domain = lfs::ErrorDomain::Python,
+            .operation_id = lfs::OperationId::generate(),
+            .site = LFS_SOURCE_SITE_CURRENT(),
+        };
+        return lfs::vis::post_guarded_and_wait<void>(
+            viewer, context,
+            [&viewer, png_bytes = std::move(png_bytes),
+             expected_path = std::move(expected_path),
+             expected_project_uuid =
+                 std::move(expected_project_uuid)]() mutable {
+                return viewer.projectSetPreview(
+                    png_bytes, expected_path, expected_project_uuid);
+            },
+            python_viewer_shutdown_error());
+    }
+
+    lfs::Result<lfs::vis::ProjectWritePoll> post_project_write_poll_to_viewer(
+        lfs::vis::Visualizer& viewer, const bool wait = false) {
+        const lfs::core::TaskContext context{
+            .name = "python.project_poll_write",
+            .domain = lfs::ErrorDomain::Python,
+            .operation_id = lfs::OperationId::generate(),
+            .site = LFS_SOURCE_SITE_CURRENT(),
+        };
+        return lfs::vis::post_guarded_and_wait<lfs::vis::ProjectWritePoll>(
+            viewer, context,
+            [&viewer, wait]() -> lfs::Result<lfs::vis::ProjectWritePoll> {
+                if (wait) {
+                    viewer.projectWaitWrite();
+                }
+                // Polling settles completed writes and mutates the session.
+                return viewer.projectPollWrite();
+            },
+            python_viewer_shutdown_error());
+    }
+
     lfs::Error python_viewer_shutdown_error() {
         return lfs::make_error(lfs::ErrorInit{
             .code = lfs::ErrorCode::Cancelled,
@@ -336,7 +384,7 @@ namespace {
         if (auto posted = lfs::vis::post_guarded_and_wait<void>(
                 viewer, context,
                 [emit = std::forward<EmitFn>(emit_fn)]() mutable
-                -> lfs::Result<void> {
+                    -> lfs::Result<void> {
                     emit();
                     return {};
                 },
@@ -1301,7 +1349,7 @@ NB_MODULE(lichtfeld, m) {
             if (!started || !wait) {
                 return started;
             }
-            auto poll = viewer->projectPollWrite();
+            auto poll = post_project_write_poll_to_viewer(*viewer);
             if (!poll) {
                 return false;
             }
@@ -1400,6 +1448,51 @@ NB_MODULE(lichtfeld, m) {
         },
         "Clear the license metadata for the active project");
     m.def(
+        "project_set_preview",
+        [](const nb::bytes& png, const bool wait,
+           const std::string& path, const std::string& project_uuid) {
+            auto* const viewer = lfs::python::get_visualizer();
+            if (!viewer) {
+                throw std::runtime_error(
+                    "project_set_preview failed: no visualizer is available");
+            }
+            std::vector<std::byte> png_bytes(
+                static_cast<const std::byte*>(png.data()),
+                static_cast<const std::byte*>(png.data()) + png.size());
+            auto result = [&] {
+                nb::gil_scoped_release release;
+                return post_project_preview_set_to_viewer(
+                    *viewer, std::move(png_bytes),
+                    python_utf8_path(path), project_uuid);
+            }();
+            if (!result) {
+                throw std::runtime_error(std::format(
+                    "project_set_preview failed: {}",
+                    lfs::format_for_developer(result.error())));
+            }
+            if (!wait) {
+                return true;
+            }
+            auto poll = [&] {
+                nb::gil_scoped_release release;
+                return post_project_write_poll_to_viewer(*viewer, true);
+            }();
+            if (!poll) {
+                throw std::runtime_error(std::format(
+                    "project_set_preview wait failed: {}",
+                    lfs::format_for_developer(poll.error())));
+            }
+            if (!poll->error.empty()) {
+                throw std::runtime_error(poll->error);
+            }
+            return true;
+        },
+        nb::arg("png_bytes"),
+        nb::arg("wait") = false,
+        nb::arg("path") = "",
+        nb::arg("project_uuid") = "",
+        "Write a thumbnail onto the active project without saving unsaved edits");
+    m.def(
         "project_poll_write", []() {
             nb::dict result;
             auto* const viewer =
@@ -1407,7 +1500,10 @@ NB_MODULE(lichtfeld, m) {
             if (!viewer) {
                 return result;
             }
-            auto poll = viewer->projectPollWrite();
+            auto poll = [&] {
+                nb::gil_scoped_release release;
+                return post_project_write_poll_to_viewer(*viewer);
+            }();
             if (!poll) {
                 throw std::runtime_error(
                     std::format(
@@ -1495,6 +1591,25 @@ NB_MODULE(lichtfeld, m) {
                 });
         },
         "Compact the active .licht project in the background");
+    m.def("project_cancel_cleanup", [] {
+        nb::gil_scoped_release release;
+        emit_project_cmd_marshaled("python.project_cancel_cleanup", [] {
+            lfs::core::events::cmd::ProjectCompact{.cancel_clean = true}.emit();
+        });
+    });
+    m.def("project_clean", [](const std::string& destination, const std::string& expected_commit) {
+        if (!expected_commit.empty() && !lfs::core::Uuid::from_string(expected_commit))
+            throw std::invalid_argument("Invalid cleanup commit identity");
+        nb::gil_scoped_release release;
+        std::string error = "No project is open.";
+        emit_project_cmd_marshaled("python.project_clean", [&] {
+            lfs::core::events::cmd::ProjectCompact{
+                .clean = true, .destination = lfs::core::utf8_to_path(destination), .expected_commit = expected_commit,
+                .on_started = [&error](const std::string& message) { error = message; }}.emit();
+        });
+        if (!error.empty())
+            throw std::runtime_error(error);
+        return true; }, nb::arg("destination") = "", nb::arg("expected_commit") = "", "Clean the active saved project in the background, preserving its current resume point");
     m.def(
         "project_is_dirty", []() {
             auto* const viewer =

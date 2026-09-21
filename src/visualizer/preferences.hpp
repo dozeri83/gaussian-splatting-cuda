@@ -70,6 +70,16 @@ namespace lfs::vis {
         void setTensorBackend(const TensorPreferenceState& state);
         [[nodiscard]] TensorPreferenceState tensorBackend();
 
+        void setProjectManagerDefaultView(std::string_view value);
+        [[nodiscard]] std::string projectManagerDefaultView();
+        void setOpenProjectManagerAtStartup(bool enabled);
+        [[nodiscard]] bool openProjectManagerAtStartup();
+        void setRememberProjectManagerState(bool enabled);
+        [[nodiscard]] bool rememberProjectManagerState();
+        void setProjectManagerState(std::string_view serialized_state);
+        [[nodiscard]] std::string projectManagerState();
+        void resetProjectManagerPreferences();
+
         void setMcp(const McpPreferenceState& state);
         [[nodiscard]] McpPreferenceState mcp();
 

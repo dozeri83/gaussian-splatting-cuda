@@ -136,6 +136,7 @@ def _install_stub_modules(monkeypatch):
         is_drag_hovering=lambda: False,
         is_startup_visible=lambda: False,
         is_sequencer_visible=lambda: False,
+        is_panel_enabled=lambda _panel_id: False,
         get_sequencer_state=lambda: None,
         get_time=lambda: 0.0,
     )

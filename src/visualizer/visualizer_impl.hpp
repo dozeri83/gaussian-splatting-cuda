@@ -148,6 +148,11 @@ namespace lfs::vis {
         lfs::Result<void> projectSetLicense(
             const lfs::io::project::ProjectLicense& license) override;
         lfs::Result<void> projectClearLicense() override;
+        lfs::Result<void>
+        projectSetPreview(
+            std::span<const std::byte> png_bytes,
+            const std::filesystem::path& expected_path = {},
+            std::string expected_project_uuid = {}) override;
         lfs::Result<ProjectWritePoll>
         projectPollWrite() override;
         bool consumeProjectSaveStarted() override;
@@ -276,6 +281,7 @@ namespace lfs::vis {
         friend class DepthWindowPanelsInteractionTest;
         friend class DepthWindowGtHookTest;
         friend class P5SessionCaptureTestAccess;
+        friend class VisualizerImplResetTest_ActiveProjectPreviewWritePreservesEditsAndQueuesSave_Test;
         friend class VisualizerImplResetTest_OpenWithoutRestoreKeepsCheckpointBytesOnSave_Test;
         friend class VisualizerImplResetTest_StartWhileProjectIsLoadingReturnsRetryReason_Test;
         friend class VisualizerImplResetTest_StoredSessionAtPrmsIterationsReportsCompleted_Test;
@@ -327,6 +333,7 @@ namespace lfs::vis {
         friend class VisualizerImplResetTest_NewProjectClearsRecoveryPromptPendingSoNextOpenProceeds_Test;
         friend class VisualizerImplResetTest_RecoveredPublishUsesRecoveredCommitKind_Test;
         friend class VisualizerImplResetTest_AutosaveStartsAfterFirstSaveAsWithoutReopen_Test;
+        friend class VisualizerImplResetTest_CleanProjectWorksAfterFirstSaveWithoutReopen_Test;
         friend class VisualizerImplResetTest_AsyncCaptureKeepsNewerSceneDirty_Test;
         friend class VisualizerImplResetTest_AutosaveSkipsWhileManualProjectWriteJobIsRunning_Test;
         friend class VisualizerImplResetTest_RecoveredProjectSwitchDeletesTempOnlyAfterReplacement_Test;

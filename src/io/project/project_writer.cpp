@@ -5,6 +5,7 @@
 #include "io/project_container.hpp"
 
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "crc32c.hpp"
 #include "project_container_internal.hpp"
 #include "project_framing.hpp"
@@ -1813,6 +1814,13 @@ namespace lfs::io::project {
             return writer_error(lfs::ErrorCode::FailedPrecondition, path,
                                 "The project identity changed before writing. Refresh Projects and try again.",
                                 "the opened document no longer owns this destination", "project.identity");
+        if (!options.expected_commit_uuid.is_nil() &&
+            reader_result->commit().commit_uuid != options.expected_commit_uuid)
+            return writer_error(
+                lfs::ErrorCode::FailedPrecondition, path,
+                "The project changed before the thumbnail could be written.",
+                "the opened document's commit is no longer the destination head",
+                "project.commit");
         if (reader_result->open_state() != OpenState::Open) {
             return writer_error(
                 lfs::ErrorCode::Unsupported, path,
@@ -3058,7 +3066,7 @@ namespace lfs::io::project {
             }
             LOG_DEBUG(
                 "Project commit validation stage: path={} crc_only={:.3f} ms",
-                candidate.string(),
+                lfs::core::path_to_utf8(candidate),
                 std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - validation_started)
                     .count());
@@ -3244,6 +3252,13 @@ namespace lfs::io::project {
                 "semantic open did not select a supported generation",
                 "commit.read_compatibility"));
         }
+        if (!options.expected_source_commit_uuid.is_nil() &&
+            source_result->commit().commit_uuid != options.expected_source_commit_uuid) {
+            return status_failure(writer_error(
+                lfs::ErrorCode::FailedPrecondition, path,
+                "The project changed. Review the cleanup again.",
+                "the cleanup plan no longer matches the locked head", "clean.commit"));
+        }
         const WriteCompatibility compatibility =
             source_result->write_compatibility();
         if (!compatibility.safe) {
@@ -3382,8 +3397,13 @@ namespace lfs::io::project {
             return plan;
         }
         std::uint64_t planned_bytes = 0;
+        const auto keep_row = [&options](const ChunkInfo& row) {
+            return row.row_kind == RowKind::Live &&
+                   !(row.key.fourcc == FOURCC_CKPT &&
+                     std::ranges::find(options.excluded_checkpoints, row.key.instance_uuid) != options.excluded_checkpoints.end());
+        };
         for (const ChunkInfo& row : source_result->chunks()) {
-            if (row.row_kind != RowKind::Live) {
+            if (!keep_row(row)) {
                 continue;
             }
             auto next = detail::checked_add(
@@ -3400,13 +3420,13 @@ namespace lfs::io::project {
 
         const auto live_rows = std::ranges::count_if(
             source_result->chunks(),
-            [](const ChunkInfo& row) { return row.row_kind == RowKind::Live; });
+            keep_row);
         std::size_t copied_rows = 0;
         if (options.progress) {
             options.progress(0.0F, "Compacting project");
         }
         for (const ChunkInfo& source_row : source_result->chunks()) {
-            if (source_row.row_kind == RowKind::Live) {
+            if (keep_row(source_row)) {
                 if (options.cancel && options.cancel()) {
                     return status_failure(writer_error(
                         lfs::ErrorCode::Cancelled,
@@ -3473,7 +3493,8 @@ namespace lfs::io::project {
             };
             LOG_DEBUG(
                 "Project compaction stages: source={} destination={} source_open_metadata={:.3f} ms copy_crc_write={:.3f} ms commit={:.3f} ms total={:.3f} ms",
-                source_path.string(), destination_path.string(),
+                lfs::core::path_to_utf8(source_path),
+                lfs::core::path_to_utf8(destination_path),
                 milliseconds(compact_started, source_ready),
                 milliseconds(source_ready, copy_finished),
                 milliseconds(commit_started, finished),

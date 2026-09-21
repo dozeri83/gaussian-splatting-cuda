@@ -150,6 +150,15 @@ namespace lfs::io::project {
     [[nodiscard]] LFS_IO_API lfs::Result<ProjectReducePlan>
     plan_reduce_size(const std::filesystem::path& path);
 
+    // Keep the current scene and its bound resume checkpoint; publish atomically.
+    // An empty destination cleans in place. Copies must use a new destination.
+    [[nodiscard]] LFS_IO_API lfs::Result<ProjectInspectorCard>
+    clean_project_file(const std::filesystem::path& path,
+                       const std::filesystem::path& destination = {},
+                       const lfs::core::Uuid& expected_commit = {},
+                       ProjectOperationProgress progress = {},
+                       ProjectOperationCancel cancel = {});
+
     [[nodiscard]] LFS_IO_API lfs::Result<ProjectReduceResult>
     reduce_size(const std::filesystem::path& path,
                 bool drop_unbound_checkpoints,
@@ -196,6 +205,15 @@ namespace lfs::io::project {
 
     [[nodiscard]] LFS_IO_API lfs::Result<ProjectThumbnailSourceAvailability>
     inspect_project_thumbnail_sources(const std::filesystem::path& path);
+
+    [[nodiscard]] LFS_IO_API lfs::Result<std::vector<std::byte>>
+    encode_preview_from_image_file(const std::filesystem::path& image_path);
+
+    [[nodiscard]] LFS_IO_API lfs::Result<std::vector<std::byte>>
+    encode_preview_from_first_dataset_image(const std::filesystem::path& path);
+
+    [[nodiscard]] LFS_IO_API lfs::Result<std::vector<std::byte>>
+    encode_preview_from_first_embedded_image(const std::filesystem::path& path);
 
     [[nodiscard]] LFS_IO_API lfs::Result<ProjectInspectorCard>
     preview_from_first_dataset_image(const std::filesystem::path& path);

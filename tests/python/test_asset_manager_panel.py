@@ -119,6 +119,13 @@ def panel_module(monkeypatch):
             sys.modules.pop(name, None)
     _install_lf_stub(monkeypatch)
     module = import_module("lfs_plugins.asset_manager_panel")
+    monkeypatch.setattr(
+        module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "remember", "rememberState": True},
+    )
+    monkeypatch.setattr(module, "read_project_manager_state", lambda: {})
+    monkeypatch.setattr(module, "set_project_manager_state", lambda _value: None)
     yield module
     controller_module = sys.modules.get("lfs_plugins.gallery_controller")
     controller = getattr(controller_module, "_controller", None)
@@ -768,7 +775,7 @@ def test_add_folder_uses_real_directory_picker(panel_module):
     panel_module.lf._test_state.folder_dialog_path = selected
     calls = []
     panel._asset_index = _index(
-        add_folder=lambda path: calls.append(path)
+        add_folder=lambda path, recursive=None: calls.append((path, recursive))
         or SimpleNamespace(id="selected-folder"),
 
     )
@@ -779,7 +786,7 @@ def test_add_folder_uses_real_directory_picker(panel_module):
 
     assert len(panel_module.lf._test_state.confirm_dialogs) == 1
     panel_module.lf._test_state.confirm_dialogs[-1][3]("projects.action.include_subfolders")
-    assert calls == [selected]
+    assert calls == [(selected, True)]
     assert panel._selected_folder_id == "selected-folder"
 
 def test_folder_counts_match_search_results(panel_module):
@@ -1503,6 +1510,206 @@ def test_thumbnail_size_is_shared_across_responsive_breakpoints(panel_module):
     assert migrated.get_thumbnail_size() == 240
 
 
+def test_remembered_project_manager_state_overrides_project_chrome(panel_module, monkeypatch):
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "remember", "rememberState": True},
+    )
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_state",
+        lambda: {"view_mode": "gallery", "thumbnail_size": 208},
+    )
+
+    panel = panel_module.AssetManagerPanel()
+    panel.apply_chrome({"view_mode": "list", "thumbnail_size": 112})
+
+    assert panel._view_mode == "gallery"
+    assert panel.get_thumbnail_size() == 208
+
+
+def test_fixed_project_manager_view_does_not_restore_last_view(panel_module, monkeypatch):
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "gallery", "rememberState": True},
+    )
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_state",
+        lambda: {"view_mode": "list", "thumbnail_size": 208},
+    )
+
+    panel = panel_module.AssetManagerPanel()
+    panel.apply_chrome({"view_mode": "list"})
+
+    assert panel._view_mode == "gallery"
+    assert panel.get_thumbnail_size() == 208
+
+
+def test_project_manager_state_is_device_chrome_not_catalog_selection(panel_module, monkeypatch):
+    stored = []
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "remember", "rememberState": True},
+    )
+    monkeypatch.setattr(panel_module, "read_project_manager_state", lambda: {})
+    monkeypatch.setattr(panel_module, "set_project_manager_state", lambda value: stored.append(value))
+
+    panel = panel_module.AssetManagerPanel()
+    panel._selected_folder_id = "work"
+    panel.set_view_mode(None, None, ["gallery"])
+
+    assert stored[-1]["view_mode"] == "gallery"
+    assert "selected_folder_id" not in stored[-1]
+
+
+def test_project_manager_state_restores_outer_panel_width(panel_module, monkeypatch):
+    restored_widths = []
+    monkeypatch.setattr(
+        panel_module.lf.ui,
+        "get_panel",
+        lambda _id: SimpleNamespace(space=panel_module.lf.ui.PanelSpace.LEFT_DOCK),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "remember", "rememberState": True},
+    )
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_state",
+        lambda: {"view_mode": "list", "panel_width": 468.0},
+    )
+    monkeypatch.setattr(
+        panel_module.lf.ui,
+        "set_left_dock_width",
+        lambda width: restored_widths.append(width),
+        raising=False,
+    )
+
+    panel_module.AssetManagerPanel()
+
+    assert restored_widths == [468.0]
+
+
+def test_project_manager_state_does_not_resize_left_dock_while_floating(panel_module, monkeypatch):
+    restored_widths = []
+    info = SimpleNamespace(space=panel_module.lf.ui.PanelSpace.FLOATING)
+    monkeypatch.setattr(panel_module.lf.ui, "get_panel", lambda _id: info, raising=False)
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "remember", "rememberState": True},
+    )
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_state",
+        lambda: {"view_mode": "list", "panel_width": 468.0},
+    )
+    monkeypatch.setattr(
+        panel_module.lf.ui,
+        "set_left_dock_width",
+        lambda width: restored_widths.append(width),
+        raising=False,
+    )
+
+    panel = panel_module.AssetManagerPanel()
+
+    assert restored_widths == []
+    info.space = panel_module.lf.ui.PanelSpace.LEFT_DOCK
+    panel._sync_panel_space_state()
+    assert restored_widths == [468.0]
+
+
+def test_floating_project_manager_preserves_remembered_left_dock_width(panel_module, monkeypatch):
+    stored = []
+    info = SimpleNamespace(space=panel_module.lf.ui.PanelSpace.FLOATING)
+    monkeypatch.setattr(panel_module.lf.ui, "get_panel", lambda _id: info, raising=False)
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "remember", "rememberState": True},
+    )
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_state",
+        lambda: {"view_mode": "list", "panel_width": 468.0},
+    )
+    monkeypatch.setattr(panel_module, "set_project_manager_state", lambda value: stored.append(value))
+    monkeypatch.setattr(panel_module.lf.ui, "get_left_dock_width", lambda: 712.0, raising=False)
+
+    panel = panel_module.AssetManagerPanel()
+    panel._sync_panel_space_state()
+    panel._persist_project_manager_state()
+
+    assert stored[-1]["panel_width"] == 468.0
+
+
+def test_project_manager_state_captures_outer_width_without_transient_visibility(panel_module, monkeypatch):
+    stored = []
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "remember", "rememberState": True},
+    )
+    monkeypatch.setattr(panel_module, "read_project_manager_state", lambda: {})
+    monkeypatch.setattr(panel_module, "set_project_manager_state", lambda value: stored.append(value))
+    monkeypatch.setattr(panel_module.lf.ui, "get_left_dock_width", lambda: 512.0, raising=False)
+
+    panel = panel_module.AssetManagerPanel()
+    panel._persist_project_manager_state()
+
+    assert "panel_open" not in stored[-1]
+    assert stored[-1]["panel_width"] == 512.0
+
+
+def test_project_manager_state_preserves_last_width_when_native_geometry_is_unavailable(
+        panel_module, monkeypatch):
+    stored = []
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "remember", "rememberState": True},
+    )
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_state",
+        lambda: {"panel_width": 468.0, "panel_open": False, "future_key": "keep"},
+    )
+    monkeypatch.setattr(panel_module, "set_project_manager_state", lambda value: stored.append(value))
+    monkeypatch.setattr(panel_module.lf.ui, "get_left_dock_width", lambda: 0.0, raising=False)
+
+    panel = panel_module.AssetManagerPanel()
+    panel._persist_project_manager_state()
+
+    assert stored[-1]["panel_width"] == 468.0
+    assert stored[-1]["future_key"] == "keep"
+    assert "panel_open" not in stored[-1]
+
+
+def test_disabling_project_manager_state_keeps_project_chrome_and_avoids_writes(panel_module, monkeypatch):
+    stored = []
+    monkeypatch.setattr(
+        panel_module,
+        "read_project_manager_preferences",
+        lambda: {"defaultView": "remember", "rememberState": False},
+    )
+    monkeypatch.setattr(panel_module, "read_project_manager_state", lambda: {"view_mode": "gallery"})
+    monkeypatch.setattr(panel_module, "set_project_manager_state", lambda value: stored.append(value))
+
+    panel = panel_module.AssetManagerPanel()
+    panel.apply_chrome({"view_mode": "list", "thumbnail_size": 176})
+    panel.set_thumbnail_size(192)
+
+    assert panel._view_mode == "list"
+    assert panel.get_thumbnail_size() == 192
+    assert stored == []
+
+
 def test_move_to_trash_uses_platform_helper_before_catalog_removal(panel_module, monkeypatch):
     asset = _project(path="C:/projects/example.licht")
     panel = panel_module.AssetManagerPanel()
@@ -2191,7 +2398,9 @@ def test_add_folder_scans_only_the_added_folder(panel_module, monkeypatch):
     panel = panel_module.AssetManagerPanel()
     panel._handle = _Handle()
     panel._asset_index = _index(
-        add_folder=lambda path: SimpleNamespace(id="selected-folder", path=path),
+        add_folder=lambda path, recursive=None: SimpleNamespace(
+            id="selected-folder", path=path, recursive=recursive
+        ),
 
     )
     assert panel._add_folder_from_path("/tmp/mrnf_local") == "selected-folder"
@@ -2199,6 +2408,36 @@ def test_add_folder_scans_only_the_added_folder(panel_module, monkeypatch):
     assert one_calls == [("selected-folder", "/tmp/mrnf_local")]
     assert all_calls == []
     panel.on_unmount(_Document())
+
+
+def test_rescan_folder_preserves_non_recursive_policy(panel_module):
+    calls = []
+    panel = panel_module.AssetManagerPanel()
+    panel._asset_index = _index(
+        folders={
+            "selected-folder": {
+                "id": "selected-folder",
+                "path": "/tmp/mrnf_local",
+                "recursive": False,
+            }
+        }
+    )
+    panel.refresh_catalog = lambda **kwargs: calls.append(("refresh", kwargs))
+    panel._scan_asset_folders = lambda **kwargs: calls.append(("scan", kwargs))
+
+    panel._handle_folder_context_action("rescan", "selected-folder")
+
+    assert calls == [
+        ("refresh", {"scan_folders": False}),
+        (
+            "scan",
+            {
+                "folder_id": "selected-folder",
+                "directory": "/tmp/mrnf_local",
+                "recursive": False,
+            },
+        ),
+    ]
 
 def test_on_mount_scans_all_folders_only_before_first_completed_scan(
     panel_module, monkeypatch
@@ -2450,6 +2689,130 @@ def test_viewport_thumbnail_capture_refuses_a_different_active_project(panel_mod
             "/tmp/target-project.licht", "target"
         )
     assert exports == []
+
+
+def test_viewport_thumbnail_uses_active_project_write_not_closed_file(
+    panel_module, monkeypatch, tmp_path
+):
+    from lfs_plugins import project_operations
+
+    project_path = tmp_path / "active.licht"
+    project_path.write_bytes(b"project")
+    asset = _project(path=str(project_path))
+    closed = []
+    applied = []
+
+    def export_viewport_image(target, fmt, *args, **kwargs):
+        Path(target).write_bytes(_MIN_PNG)
+
+    def fail_closed(name):
+        def inner(*_args, **_kwargs):
+            closed.append(name)
+            raise AssertionError(f"closed-file {name}")
+
+        return inner
+
+    io = SimpleNamespace(
+        inspect_project_card=lambda _path: SimpleNamespace(
+            project_uuid=asset["id"], commit_uuid=asset["commit_uuid"]
+        ),
+        backup_project_file=fail_closed("backup_project_file"),
+        run_project_operation=fail_closed("run_project_operation"),
+        set_project_preview=fail_closed("set_project_preview"),
+    )
+    store = project_operations.ProjectOperations(io, tmp_path / "records")
+    monkeypatch.setattr(project_operations, "ProjectOperations", lambda _io: store)
+    monkeypatch.setattr(panel_module.lf, "io", io, raising=False)
+    panel_module.lf.project_poll_write = lambda: {
+        "path": str(project_path),
+        "running": False,
+        "error": "",
+    }
+    panel_module.lf.get_render_scene = lambda: SimpleNamespace(total_gaussian_count=8)
+    panel_module.lf.export_viewport_image = export_viewport_image
+    panel_module.lf.project_set_preview = lambda data, wait=False, **kwargs: applied.append(
+        (bytes(data), wait, kwargs.get("path"), kwargs.get("project_uuid"))
+    )
+
+    class InlineThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(panel_module.threading, "Thread", InlineThread)
+    panel = panel_module.AssetManagerPanel()
+    panel._handle = _Handle()
+    panel._asset_index = _index(assets={asset["id"]: asset})
+    panel._inspection_by_asset[asset["id"]] = {
+        "card": SimpleNamespace(
+            project_uuid=asset["id"], commit_uuid=asset["commit_uuid"]
+        )
+    }
+    monkeypatch.setattr(panel, "refresh_catalog", lambda **_kwargs: None)
+    monkeypatch.setattr(panel, "_request_model_update", lambda: None)
+    monkeypatch.setattr(panel, "_dirty_selection", lambda: None)
+
+    panel._dialog_data = {"source": "viewport"}
+    assert panel._start_thumbnail_operation(asset)
+    assert closed == []
+    assert applied == [(_MIN_PNG, False, str(project_path), asset["id"])]
+    assert next(iter(panel._project_operations.values()))["status"] == "completed"
+
+
+def test_viewport_thumbnail_capture_applies_preview_to_active_project(panel_module, tmp_path):
+    project_path = tmp_path / "active.licht"
+    project_path.write_bytes(b"project")
+    native_calls = []
+    applied = []
+    panel_module.lf.project_poll_write = lambda: {"path": str(project_path), "running": False}
+    panel_module.lf.get_render_scene = lambda: SimpleNamespace(total_gaussian_count=3)
+    panel_module.lf.export_viewport_image = lambda target, fmt, *args, **kwargs: Path(
+        target
+    ).write_bytes(_MIN_PNG)
+    panel_module.lf.project_set_preview = lambda data, wait=False, **kwargs: applied.append(
+        (bytes(data), wait, kwargs.get("path"), kwargs.get("project_uuid"))
+    )
+    panel_module.lf.io = SimpleNamespace(
+        set_project_preview=lambda *args: native_calls.append(("set_project_preview", args))
+    )
+
+    panel_module.AssetManagerPanel._capture_viewport_preview(str(project_path), "target")
+    assert applied == [(_MIN_PNG, False, str(project_path), "target")]
+    assert native_calls == []
+
+
+def test_viewport_thumbnail_capture_refuses_project_switch_after_capture(
+    panel_module, tmp_path
+):
+    project_path = tmp_path / "active.licht"
+    project_path.write_bytes(b"project")
+    applied = []
+    exported = []
+
+    def poll_write():
+        if exported:
+            return {"path": str(tmp_path / "other.licht"), "running": False}
+        return {"path": str(project_path), "running": False}
+
+    def export_viewport_image(target, fmt, *args, **kwargs):
+        Path(target).write_bytes(_MIN_PNG)
+        exported.append(True)
+
+    panel_module.lf.project_poll_write = poll_write
+    panel_module.lf.get_render_scene = lambda: SimpleNamespace(total_gaussian_count=3)
+    panel_module.lf.export_viewport_image = export_viewport_image
+    panel_module.lf.project_set_preview = lambda data, wait=False, **kwargs: applied.append(
+        data
+    )
+
+    with pytest.raises(RuntimeError, match="no longer belongs to this project"):
+        panel_module.AssetManagerPanel._capture_viewport_preview(
+            str(project_path), "target"
+        )
+    assert exported == [True]
+    assert applied == []
 
 
 def test_thumbnail_source_probe_rejects_unavailable_embedded_and_empty_viewport(panel_module):
@@ -2728,18 +3091,22 @@ def test_gallery_union_has_one_linked_pair_and_remote_projection(panel_module):
     assert [r['id'] for r in panel._filtered_assets()] == [local['id']]
 
 
-def test_gallery_cover_refreshes_the_saved_project_card(panel_module, monkeypatch):
-    panel, local, remote = _gallery_fixture(panel_module)
+def test_thumbnail_dialog_only_updates_the_local_project(panel_module):
+    panel, local, _ = _gallery_fixture(panel_module)
+    panel._select_asset_id(local["id"])
+    panel._dialog_kind = "update_thumbnail"
+    panel._dialog_data = {"path": local["path"], "source": "viewport",
+                          "sources": ["viewport"], "use_gallery_cover": True,
+                          "gallery_cover_available": True}
+    body, _ = panel._project_form()
+    assert 'use_gallery_cover' not in body
     calls = []
-    service = SimpleNamespace(identity=lambda: "account", set_cover=lambda *args: calls.append(("cover", args)))
-    controller = SimpleNamespace(service=service, refresh=lambda: None, _schedule_poll=lambda: None)
-    panel._controller = lambda: controller
-    panel._library_command = lambda *args: calls.append(args)
-    monkeypatch.setattr(panel_module.lf, "io", SimpleNamespace(
-        inspect_project=lambda _: SimpleNamespace(project_uuid=local["id"]),
-        read_preview=lambda _: b"saved thumbnail"), raising=False)
-    panel._gallery_thumbnail_callback(local)()
-    assert calls == [("verify_asset", local["id"]), ("cover", (local["id"], remote, b"saved thumbnail"))]
+    panel._start_project_operation = lambda *args, **kwargs: calls.append(kwargs)
+    assert panel._start_thumbnail_operation(local)
+    assert len(calls) == 1
+    assert calls[0].get("after") is None
+    assert calls[0]["reverify_asset"] is True
+
 
 def test_gallery_attention_scope_and_state_specific_context_menu(panel_module):
     panel, local, remote = _gallery_fixture(panel_module)
@@ -3130,6 +3497,8 @@ def test_P13_space_toggles_quick_look_and_arrows_update_its_project(panel_module
 
 
 def test_compact_view_menu_retains_every_collapsed_toolbar_action(panel_module):
+    import xml.etree.ElementTree as ET
+
     panel = panel_module.AssetManagerPanel()
     captured = {}
     panel._show_shared_context_menu = lambda items, choose: captured.update(
@@ -3146,8 +3515,47 @@ def test_compact_view_menu_retains_every_collapsed_toolbar_action(panel_module):
 
     resources = Path(__file__).resolve().parents[2] / "src/visualizer/gui/rmlui/resources"
     rml = (resources / "asset_manager.rml").read_text()
+    rcss = (resources / "asset_manager.rcss").read_text()
     assert 'class="asset-button asset-button--icon asset-button--toolbar24 asset-add-existing-icon"' in rml
     assert 'class="asset-button asset-button--icon asset-panel-close"' in rml
+    root = ET.fromstring(rml)
+    primary_toolbar = root.find(
+        ".//div[@class='toolbar-row toolbar-row-primary']"
+    )
+    assert primary_toolbar is not None
+    direct_child_classes = {
+        child.get("class", "") for child in list(primary_toolbar)
+    }
+    assert "asset-search-box" in direct_child_classes
+    assert "asset-button asset-button--icon asset-panel-close" in direct_child_classes
+    assert rml.count('class="asset-button asset-button--icon asset-view-button"') == 2
+    toolbar_rules = [
+        rule.split("}", 1)[0]
+        for rule in rcss.split(".toolbar-row-primary {")[1:]
+    ]
+    assert any("position: relative" in rule for rule in toolbar_rules)
+    assert any("padding: 8dp 40dp 8dp 8dp" in rule for rule in toolbar_rules)
+    close_rule = rcss.split(".asset-panel-close {", 1)[1].split("}", 1)[0]
+    assert "position: absolute" in close_rule
+    assert "top: 8dp" in close_rule
+    assert "right: 8dp" in close_rule
+    assert "z-index: 1" in close_rule
+    compact_rules = rcss.split(
+        ".asset-shell.is-compact .asset-toolbar-filter", 1
+    )[1].split(".asset-shell.is-medium", 1)[0]
+    assert ".asset-shell.is-compact .asset-view-toggle-icons" in compact_rules
+    icon_rule = compact_rules.split(
+        ".asset-shell.is-compact .asset-view-toggle-icons", 1
+    )[1].split("}", 1)[0]
+    assert "display: none" not in icon_rule
+    search_rule = compact_rules.split(
+        ".asset-shell.is-compact .asset-search-box", 1
+    )[1].split("}", 1)[0]
+    assert "flex-basis: 100%" in search_rule
+    assert "min-width: 0" in search_rule
+    assert ".asset-shell.is-compact .toolbar-row-primary { column-gap: 2dp; }" in rcss
+    assert ".asset-shell.is-compact .asset-view-toggle-icons { gap: 2dp; }" in rcss
+
 
 def test_A4_gallery_scopes_are_outside_the_scrolling_folder_content():
     import xml.etree.ElementTree as ET
@@ -3231,6 +3639,9 @@ def test_P12_model_bindings_do_not_register_duplicate_gallery_width(panel_module
     panel = panel_module.AssetManagerPanel()
     model = StrictBindingModel()
     panel.on_bind_model(_BindingContext(model))
+    assert model.func_bindings['catalog_loading']() is False
+    panel._backend_load_active = True
+    assert model.func_bindings['catalog_loading']() is True
     assert model.func_bindings['check_gallery_tooltip']().startswith('projects.action.check_gallery')
     panel._gallery_state['message'] = 'Sign in'
     assert panel._gallery_notice_text() == ''
@@ -3267,6 +3678,47 @@ def test_portal_posters_obey_scope_and_release_on_scroll(panel_module, tmp_path)
     assert panel._thumbnail_sources_by_asset == {}
     panel._gallery_state["posters"] = {}
     assert panel._format_asset_for_ui(row)["thumbnail_decorator"] == "none"
+
+def test_gallery_title_change_explains_the_field_without_opening(panel_module, monkeypatch):
+    translations = json.loads(
+        (Path(__file__).resolve().parents[2] / "src/visualizer/gui/resources/locales/en.json").read_text()
+    )
+    monkeypatch.setattr(panel_module.lf.ui, "tr", lambda key: translations.get(key, key))
+    panel, local, remote = _gallery_fixture(panel_module)
+    remote["title"] = "Portal title"
+    remote["metadataRevision"] = "title-edit"
+    panel._select_asset_id(local["id"])
+    badge = panel._gallery_badge(local)
+    model = _BindingModel()
+    panel.on_bind_model(_BindingContext(model))
+
+    assert badge["gallery_state"] == "remote"
+    assert badge["gallery_label"] == "Changes in gallery: Title"
+    assert "Published project" in badge["gallery_reason"]
+    assert "Portal title" in badge["gallery_reason"]
+    assert badge["gallery_has_reason"]
+    assert "Title" in badge["gallery_tooltip"]
+    assert model.func_bindings["gallery_selected_state"]() == "Changes in gallery: Title"
+    assert model.func_bindings["gallery_has_selected_reason"]()
+    assert "Portal title" in model.func_bindings["gallery_selected_reason"]()
+    assert panel_module.lf._test_state.opened == []
+
+
+def test_gallery_view_change_explains_the_viewer_settings(panel_module, monkeypatch):
+    translations = json.loads(
+        (Path(__file__).resolve().parents[2] / "src/visualizer/gui/resources/locales/en.json").read_text()
+    )
+    monkeypatch.setattr(panel_module.lf.ui, "tr", lambda key: translations.get(key, key))
+    panel, local, remote = _gallery_fixture(panel_module)
+    remote["viewerSettings"] = {"exposure": 3}
+    remote["metadataRevision"] = "view-edit"
+    badge = panel._gallery_badge(local)
+
+    assert badge["gallery_state"] == "remote"
+    assert badge["gallery_label"] == "Changes in gallery: View settings"
+    assert "Different settings" in badge["gallery_reason"]
+    assert panel_module.lf._test_state.opened == []
+
 
 @pytest.mark.parametrize("domain,expected", [("presentationRevision", "equal"), ("contentRevision", "remote"), ("metadataRevision", "remote")])
 def test_freshness_uses_domain_tokens_not_presentation(panel_module, domain, expected):
@@ -3557,6 +4009,77 @@ def test_image_file_thumbnail_uses_native_decode_and_cancel_keeps_dialog(panel_m
     assert closed == []
 
 
+def test_active_image_file_thumbnail_uses_live_preview_write_not_closed_file(
+    panel_module, monkeypatch
+):
+    panel = panel_module.AssetManagerPanel.__new__(panel_module.AssetManagerPanel)
+    panel._dialog_data = {"source": "image_file"}
+    operations = []
+    panel._start_project_operation = lambda asset_id, title, operation, **kwargs: operations.append(
+        (asset_id, title, operation, kwargs)
+    )
+    monkeypatch.setattr(
+        panel_module.lf.ui, "open_image_dialog", lambda *_args: "/tmp/selected.jpg", raising=False
+    )
+    panel_module.lf.project_poll_write = lambda: {"path": "/tmp/target.licht"}
+    applied = []
+    native_calls = []
+    monkeypatch.setattr(
+        panel_module.AssetManagerPanel,
+        "_native_io_call",
+        staticmethod(lambda name, *args: native_calls.append((name, *args)) or _MIN_PNG),
+    )
+    monkeypatch.setattr(
+        panel_module.AssetManagerPanel,
+        "_apply_active_project_preview",
+        staticmethod(lambda path, project_id, png: applied.append((path, project_id, png))),
+        raising=False,
+    )
+
+    assert panel._start_thumbnail_operation(
+        {"id": "target", "path": "/tmp/target.licht"}
+    )
+    assert operations[0][3].get("closed_file") is False
+    operations[0][2](lambda *_args: None, lambda: False)
+    assert native_calls == [("encode_preview_from_image_file", "/tmp/selected.jpg")]
+    assert applied == [("/tmp/target.licht", "target", _MIN_PNG)]
+
+
+def test_active_dataset_thumbnail_uses_live_preview_write_not_closed_file(
+    panel_module, monkeypatch
+):
+    panel = panel_module.AssetManagerPanel.__new__(panel_module.AssetManagerPanel)
+    panel._dialog_data = {"source": "first_dataset"}
+    operations = []
+    panel._start_project_operation = lambda asset_id, title, operation, **kwargs: operations.append(
+        (asset_id, title, operation, kwargs)
+    )
+    panel_module.lf.project_poll_write = lambda: {"path": "/tmp/target.licht"}
+    applied = []
+    native_calls = []
+    monkeypatch.setattr(
+        panel_module.AssetManagerPanel,
+        "_native_io_call",
+        staticmethod(lambda name, *args: native_calls.append((name, *args)) or _MIN_PNG),
+    )
+    monkeypatch.setattr(
+        panel_module.AssetManagerPanel,
+        "_apply_active_project_preview",
+        staticmethod(lambda path, project_id, png: applied.append((path, project_id, png))),
+        raising=False,
+    )
+
+    assert panel._start_thumbnail_operation(
+        {"id": "target", "path": "/tmp/target.licht"}
+    )
+    assert operations[0][3].get("closed_file") is False
+    operations[0][2](lambda *_args: None, lambda: False)
+    assert native_calls == [
+        ("encode_preview_from_first_dataset_image", "/tmp/target.licht")
+    ]
+    assert applied == [("/tmp/target.licht", "target", _MIN_PNG)]
+
+
 def test_completed_thumbnail_operation_reverifies_asset_before_refresh(
     panel_module, monkeypatch, tmp_path
 ):
@@ -3705,3 +4228,28 @@ def test_removed_asset_context_action_does_not_reuse_previous_selection(
     assert panel.get_selected_asset_id() == second["id"]
     assert gallery_actions == []
     assert project_actions == []
+
+
+def test_recent_thumbnail_uses_native_project_identity(panel_module, monkeypatch):
+    panel = panel_module.AssetManagerPanel.__new__(panel_module.AssetManagerPanel)
+    panel._dialog_data = {"source": "viewport"}
+    operations = []
+    panel._start_project_operation = lambda asset_id, title, operation, **kwargs: operations.append(operation)
+    panel_module.lf.project_poll_write = lambda: {"path": "/tmp/recent.licht"}
+    native_id = "976ebf83-5764-435b-953c-dc8444e538aa"
+    monkeypatch.setattr(panel_module.AssetManagerPanel, "_native_io_call",
+                        staticmethod(lambda name, path: SimpleNamespace(project_uuid=native_id)))
+    captured = []
+    monkeypatch.setattr(panel_module.AssetManagerPanel, "_capture_viewport_preview",
+                        staticmethod(lambda path, project_id: captured.append((path, project_id))))
+    assert panel._start_thumbnail_operation({"id": "recent:temporary", "path": "/tmp/recent.licht"})
+    operations[0](lambda *_: None, lambda: False)
+    assert captured == [("/tmp/recent.licht", native_id)]
+
+
+def test_thumbnail_training_rejection_shows_short_user_message(panel_module):
+    def rejected(*args, **kwargs):
+        raise RuntimeError("lfs::Error[FailedPrecondition/IO]\n user_message: Stop training before updating the project thumbnail.\n detail: internal context")
+    panel_module.lf.project_set_preview = rejected
+    with pytest.raises(RuntimeError, match=r"^Stop training before updating the project thumbnail\.$"):
+        panel_module.AssetManagerPanel._apply_active_project_preview("/tmp/test.licht", "target", _MIN_PNG)
