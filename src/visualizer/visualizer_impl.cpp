@@ -148,6 +148,7 @@ namespace lfs::vis {
         }
 
         constexpr double kResizeSettleMinWaitSeconds = 0.001;
+        constexpr double kArenaRetryPollSeconds = 0.004;
         constexpr double kTooltipRevealMinWaitSeconds = 0.001;
         constexpr double kScheduledRedrawMinWaitSeconds = 0.001;
         constexpr double kGuiScheduledUpdateMinWaitSeconds = 0.001;
@@ -1946,12 +1947,12 @@ namespace lfs::vis {
         });
 
         // Signal bridge event handlers
-        state::TrainingProgress::when([](const auto& event) {
-            auto& store = app_store();
-            lfs::core::reactive::BatchUpdate batch(store.store());
-            store.iteration.set(event.iteration);
-            store.loss.set(event.loss);
-            store.num_gaussians.set(static_cast<std::int64_t>(event.num_gaussians));
+        state::TrainingProgress::when([this](const auto& event) {
+            training_progress_publisher_.offer(
+                {.iteration = event.iteration,
+                 .loss = event.loss,
+                 .num_gaussians = static_cast<std::int64_t>(event.num_gaussians)},
+                std::chrono::steady_clock::now());
         });
 
         state::TrainingStarted::when([this](const auto& event) {
@@ -2451,6 +2452,16 @@ namespace lfs::vis {
             const double settle_wait = rendering_manager_->secondsUntilViewportResizeSettleReady();
             consider_timeout(std::max(kResizeSettleMinWaitSeconds, settle_wait), "resize_settle");
         }
+        if (rendering_manager_ && rendering_manager_->hasParkedArenaRetry())
+            consider_timeout(kArenaRetryPollSeconds, "arena_retry");
+        if (rendering_manager_ && trainer_manager_ && trainer_manager_->isRunning())
+            consider_timeout(std::max(kScheduledRedrawMinWaitSeconds,
+                                      rendering_manager_->secondsUntilTrainingRefresh()),
+                             "training_refresh");
+        if (const auto progress_wait =
+                training_progress_publisher_.secondsUntilDue(std::chrono::steady_clock::now()))
+            consider_timeout(std::max(kScheduledRedrawMinWaitSeconds, *progress_wait),
+                             "training_progress");
 
         // Wake exactly when a pending tooltip is due so the reveal costs a single
         // frame instead of rendering continuously through the hover delay.
@@ -2609,6 +2620,7 @@ namespace lfs::vis {
         bool store_dirty = false;
         {
             LOG_TIMER_THRESHOLD("gui_render.reactive_store_drain", 0.05);
+            training_progress_publisher_.flushDue(std::chrono::steady_clock::now());
             store_dirty = app_store().store().drain_dirty_into_frame();
         }
 
@@ -2616,6 +2628,10 @@ namespace lfs::vis {
             gui_manager_->sequencerUI().tickPlaybackBeforeSceneRender();
 
         const bool is_training = trainer_manager_ && trainer_manager_->isTrainingActive();
+        if (rendering_manager_) {
+            rendering_manager_->pollTrainingRefresh(trainer_manager_ && trainer_manager_->isRunning());
+            rendering_manager_->pollParkedArenaRetry();
+        }
         const FrameDemand frame_demand = collectFrameDemand(viewport_export_locked, store_dirty);
         if (gui_frame_rendered_ && !frame_demand.shouldRenderFrame()) {
             LOG_PERF("loop_idle skip_gui_render=true needs_render={} continuous_input={} py_anim={} py_overlay={} py_redraw={} gui_anim={} input_event={} posted_work={} render_work={} store_dirty={} swapchain_resize_pending={} swapchain_resize_ready={} window_resize_paint_pending={} viewport_resize_deferring={} viewport_resize_settle_ready={} wake_reason={} wake_timeout_source={}",
@@ -2655,7 +2671,16 @@ namespace lfs::vis {
 
             project_frame_started =
                 std::chrono::steady_clock::now();
+            const bool preview_refresh_only =
+                gui_frame_rendered_ && frame_demand.onlySceneDirty() &&
+                rendering_manager_->pendingDirtyMask() == DirtyFlag::SPLATS;
             const auto vulkan_frame = rendering_manager_->renderVulkanFrame(context);
+            // A preview refresh parked until training frees the shared scratch
+            // changed nothing on screen; present once it has rendered.
+            if (preview_refresh_only && rendering_manager_->hasParkedArenaRetry()) {
+                waitForNextEvent(is_training);
+                return;
+            }
             if (gui_manager_) {
                 gui_manager_->commitUiVisibilityTransitionIfFrameReady(
                     vulkan_frame.matches_viewport_extent);

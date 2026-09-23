@@ -158,6 +158,8 @@ class GalleryAssetMixin:
 
     def _gallery_scene(self, asset):
         project_id = self._gallery_project_id(asset)
+        if project_id in self._gallery_state.get("unlinkedProjects", ()):
+            return None
         scene_id = asset.get("scene_id") or self._gallery_state.get("links", {}).get(project_id, {}).get("sceneId")
         scene = next((s for s in self._gallery_state.get("scenes", []) if s.get("id") == scene_id), None)
         if scene is not None:
@@ -186,15 +188,16 @@ class GalleryAssetMixin:
             jobs.append(failure)
         gallery_asset = ({**asset, "project_uuid": project_id}
                          if project_id != asset.get("id") else asset)
+        explicitly_unlinked = project_id in self._gallery_state.get("unlinkedProjects", ())
         facts = asset_sync_state(None if remote else gallery_asset, link, self._gallery_scene(asset),
             jobs, checked=bool(self._gallery_state.get("checkedAt")),
             storage_issue=self._gallery_state.get("storage_issue", False), phase=phase,
-            cached_projection=asset.get("gallery") if "identity" not in self._gallery_state else None,
+            cached_projection=asset.get("gallery") if "identity" not in self._gallery_state and not explicitly_unlinked else None,
             established=self._gallery_state.get("established", self._gallery_state.get("connected", "identity" not in self._gallery_state)))
         for key in ("signed_in", "busy", "relink_required", "unsupported", "source_formats", "quotaBytes", "usedBytes", "reservedBytes", "hdrBackgrounds"):
             if key in self._gallery_state:
                 facts[key] = self._gallery_state[key]
-        previous = previous_scene_for(asset, self._gallery_state)
+        previous = None if explicitly_unlinked else previous_scene_for(asset, self._gallery_state)
         acknowledged = self._gallery_state.get("replacementAcknowledgments", {}).get(asset.get("id"), {})
         if previous and not link and (acknowledged.get("oldProject") != asset.get("previous_project_uuid")
                 or acknowledged.get("sceneId") != previous.get("sceneId")):
@@ -742,7 +745,8 @@ class GalleryAssetMixin:
         asset = asset if asset is not None else self._get_selected_asset() or {}
         scene = self._gallery_scene(asset) or {}
         link = self._gallery_state.get("links", {}).get(asset.get("id"), {})
-        fields = link.get("localFields") or link.get("sharedFields") or scene
+        draft = asset.get("gallery_details_draft")
+        fields = link.get("localFields") or link.get("sharedFields") or scene or (draft if isinstance(draft, dict) else {})
         return {"title": fields.get("title", display_name(asset)),
                 "description": fields.get("description", "")}
 
@@ -772,7 +776,7 @@ class GalleryAssetMixin:
     def _gallery_review_includes(self, *, publish_new=False):
         text = tr("review.includes", saved=self.get_selected_asset_modified())
         if self._gallery_scene(self._get_selected_asset() or {}) and not publish_new:
-            text += " " + tr("review.cover_kept")
+            text += " " + tr("review.cover_on_update")
         return text
 
     def _gallery_published_summary(self):

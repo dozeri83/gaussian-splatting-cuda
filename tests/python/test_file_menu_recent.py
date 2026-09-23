@@ -6,6 +6,7 @@ from importlib import import_module
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import sys
+import threading
 
 import pytest
 
@@ -189,6 +190,103 @@ def test_open_recent_submenu_appends_clear_only_when_entries_exist(monkeypatch):
 
 def _recent_item_callback(file_menu):
     return file_menu.FileMenu().menu_items()[2]["items"][0]["callback"]
+
+
+def _thumbnail_item(file_menu):
+    return next(
+        (item for item in file_menu.FileMenu().menu_items()
+         if item.get("label") == "tr:menu.file.update_thumbnail_from_view"),
+        None,
+    )
+
+
+def test_current_view_thumbnail_menu_requires_saved_renderable_project(monkeypatch, tmp_path):
+    project = tmp_path / "project-a.licht"
+    project.write_bytes(b"saved")
+    file_menu = _load_file_menu(monkeypatch)
+    lf = file_menu.lf
+    renderable = False
+    lf.get_render_scene = lambda: SimpleNamespace(total_gaussian_count=3 if renderable else 0)
+    lf.export_viewport_image = lambda *_args: None
+    lf.project_poll_write = lambda: {"path": str(project)}
+
+    assert _thumbnail_item(file_menu) is not None
+    assert _thumbnail_item(file_menu)["enabled"] is False
+    lf.project_has_path = lambda: True
+    assert _thumbnail_item(file_menu)["enabled"] is False
+    renderable = True
+    assert _thumbnail_item(file_menu)["enabled"] is True
+    lf.project_poll_write = lambda: {"path": ""}
+    assert _thumbnail_item(file_menu)["enabled"] is False
+
+
+def test_current_view_thumbnail_menu_uses_panel_capture_on_worker(monkeypatch, tmp_path):
+    project = tmp_path / "project-a.licht"
+    project.write_bytes(b"saved")
+    file_menu = _load_file_menu(monkeypatch)
+    lf = file_menu.lf
+    lf.project_has_path = lambda: True
+    lf.project_poll_write = lambda: {"path": str(project)}
+    saves = []
+    lf.project_save = lambda: saves.append(True)
+    lf.get_render_scene = lambda: SimpleNamespace(total_gaussian_count=3)
+    lf.export_viewport_image = lambda *_args: None
+    lf.io = SimpleNamespace(inspect_project_card=lambda _path: SimpleNamespace(project_uuid="project-a"))
+    lf.ui.schedule_on_ui_thread = lambda callback: callback()
+    calls = []
+    refreshed = []
+    lf.ui.get_panel_object = lambda _id: SimpleNamespace(
+        refresh_after_thumbnail_write=refreshed.append
+    )
+    panel_stub = ModuleType("lfs_plugins.asset_manager_panel")
+
+    class AssetManagerPanel:
+        @staticmethod
+        def _thumbnail_error_message(error):
+            return str(error)
+
+        @staticmethod
+        def _capture_viewport_preview(path, project_id):
+            calls.append((path, project_id))
+
+    panel_stub.AssetManagerPanel = AssetManagerPanel
+    monkeypatch.setitem(sys.modules, "lfs_plugins.asset_manager_panel", panel_stub)
+    workers = []
+
+    class DeferredThread:
+        def __init__(self, target, **kwargs):
+            workers.append((target, kwargs))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(threading, "Thread", DeferredThread)
+    item = _thumbnail_item(file_menu)
+    assert item is not None and item["enabled"]
+    item["callback"]()
+    assert calls == []
+    assert len(workers) == 1
+    workers[0][0]()
+    assert calls == [(str(project), "project-a")]
+    assert saves == []
+    assert refreshed == [str(project)]
+    assert lf.message_dialogs == [
+        ("tr:menu.file.update_thumbnail_from_view", "tr:menu.file.thumbnail_updated", None)
+    ]
+
+    lf.message_dialogs.clear()
+    refreshed.clear()
+
+    def reject(_path, _project_id):
+        raise RuntimeError("Thumbnail write failed")
+
+    AssetManagerPanel._capture_viewport_preview = reject
+    item["callback"]()
+    workers[1][0]()
+    assert refreshed == []
+    assert lf.message_dialogs == [
+        ("tr:menu.file.update_thumbnail_from_view", "Thumbnail write failed", "error")
+    ]
 
 
 def test_open_recent_missing_path_offers_remove(monkeypatch):
@@ -994,15 +1092,19 @@ def test_splat_picker_imports_ssog_as_splat(monkeypatch):
     assert file_menu.lf.load_file_calls == [((selected,), {"is_dataset": False})]
 
 
-def test_menu_bar_transfer_operator_opens_projects_panel(monkeypatch):
+def test_menu_bar_transfer_operator_shows_overlay(monkeypatch):
     import ast
     file_menu = _load_file_menu(monkeypatch)
     calls = []
+    overlays = ModuleType('lfs_plugins.overlays')
+    overlays.show_gallery_transfers = lambda: calls.append('overlay')
+    monkeypatch.setitem(sys.modules, 'lfs_plugins.overlays', overlays)
     monkeypatch.setattr(file_menu.lf.ui, 'set_panel_enabled', lambda panel_id, enabled: calls.append((panel_id, enabled)), raising=False)
     path = PROJECT_ROOT / 'src/python/lfs_plugins/help_menu.py'
     tree = ast.parse(path.read_text())
     node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'GalleryTransfersOperator')
     scope = {'Operator': object, '__package__': 'lfs_plugins', '__name__': 'lfs_plugins.help_menu'}
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), scope)
+    assert scope['GalleryTransfersOperator'].description == 'Show gallery transfers'
     assert scope['GalleryTransfersOperator']().execute(None) == {'FINISHED'}
-    assert calls == [('lfs.asset_manager', True)]
+    assert calls == ['overlay']

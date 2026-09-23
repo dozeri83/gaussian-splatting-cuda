@@ -51,6 +51,7 @@ from .project_inspector import (
     thumbnail_source_options,
 )
 from .project_dialog import form_content
+from .project_thumbnail import active_project_path, has_renderable_project_viewport, is_active_project_path
 from .project_manager_preferences import (
     read_preferences as read_project_manager_preferences,
     read_state as read_project_manager_state,
@@ -632,6 +633,9 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         model.bind_func("inspector_gallery_action_tooltip", lambda: (
             self._gallery_badge(self._get_selected_asset())["gallery_action_label"]
             if self._get_selected_asset() else ""))
+        model.bind_func("inspector_gallery_title", lambda: self._gallery_details()["title"])
+        model.bind_func("inspector_gallery_description", lambda: self._gallery_details()["description"])
+        model.bind_func("inspector_can_edit_gallery_details", self._can_edit_gallery_details)
         model.bind_func("inspector_more_label", lambda: tr("common.more"))
         model.bind_func("inspector_training_tooltip", lambda: " · ".join(filter(None, (
             self._selected_details_rows().get("iteration", ""), self._selected_details_rows().get("strategy", "")))))
@@ -886,6 +890,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             ("on_use_found_location", self.on_use_found_location),
             ("on_selected_fix", self.on_selected_fix),
             ("open_project_operation", self.open_project_operation),
+            ("open_gallery_details", self.open_gallery_details),
             ("contents_action", self.on_contents_action),
             ("toggle_operations", self.toggle_operations),
             ("on_bottom_panel_resize_start", self.on_bottom_panel_resize_start),
@@ -1264,15 +1269,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
 
     @staticmethod
     def _active_project_path() -> str:
-        poll = getattr(lf, "project_poll_write", None)
-        if not callable(poll):
-            return ""
-        try:
-            state = poll()
-            return str(state.get("path") or "") if isinstance(state, dict) else ""
-        except Exception:
-            _log.debug("Could not read the active project path for thumbnail source validation", exc_info=True)
-            return ""
+        return active_project_path()
 
     @staticmethod
     def _thumbnail_source_availability(path: str) -> tuple[bool, bool]:
@@ -1291,27 +1288,11 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
 
     @staticmethod
     def _is_active_project_path(path: str) -> bool:
-        active_path = AssetManagerPanel._active_project_path()
-        if not path or not active_path:
-            return False
-        try:
-            return Path(path).resolve() == Path(active_path).resolve()
-        except (OSError, RuntimeError, TypeError, ValueError):
-            return False
+        return is_active_project_path(path)
 
     @staticmethod
     def _has_renderable_project_viewport(path: str) -> bool:
-        if not AssetManagerPanel._is_active_project_path(path):
-            return False
-        try:
-            scene_getter = getattr(lf, "get_render_scene", None)
-            exporter = getattr(lf, "export_viewport_image", None)
-            if not callable(scene_getter) or not callable(exporter):
-                return False
-            scene = scene_getter()
-            return scene is not None and int(getattr(scene, "total_gaussian_count", 0) or 0) > 0
-        except (OSError, RuntimeError, TypeError, ValueError):
-            return False
+        return has_renderable_project_viewport(path)
 
     def _ensure_inspection_pipeline(self) -> InspectionFactsPipeline:
         if self._inspection_pipeline is None:
@@ -1586,9 +1567,9 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         if active == "missing":
             return not bool(asset.get("exists", True)) or str(asset.get("status") or "") == "MISSING"
         if active == "checkpoint":
-            return bool(asset.get("has_checkpoint") or asset.get("checkpoint_iteration"))
+            return bool((asset.get("inspection") or {}).get("has_checkpoint"))
         if active == "dataset":
-            return bool(asset.get("has_dataset") or asset.get("dataset_path"))
+            return bool((asset.get("inspection") or {}).get("has_dataset"))
         if active == "gallery":
             return bool(scene or asset.get("remote_only") or facts.get("relationship") not in (None, "unlinked"))
         return True
@@ -2476,6 +2457,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             "inspector_operations_expanded", "contents_pending", "contents_has_pending",
             "inspector_gallery_action_label", "inspector_has_gallery_action", "inspector_gallery_action_enabled",
             "inspector_gallery_action_tooltip",
+            "inspector_gallery_title", "inspector_gallery_description", "inspector_can_edit_gallery_details",
             "inspector_training_tooltip", "inspector_model_tooltip", "inspector_reclaimable_tooltip",
             "inspector_verify_result",
             "catalog_notice",
@@ -2569,6 +2551,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             "remove_content": "projects.contents.remove",
             "compact_content": "projects.contents.compact",
             "rename": "projects.dialog.rename_project",
+            "gallery_details": "projects.gallery.details.dialog",
             "repair": "projects.dialog.repair",
             "locate_dataset": "projects.dialog.locate_dataset",
         }.get(self._dialog_kind, "projects.inspector.operations"))
@@ -2581,6 +2564,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             "remove_content": "projects.contents.remove",
             "compact_content": "projects.contents.compact",
             "rename": "common.save",
+            "gallery_details": "common.save",
             "repair": "projects.action.repair",
             "locate_dataset": "projects.action.locate_dataset",
         }.get(self._dialog_kind, "common.ok"))
@@ -2608,7 +2592,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         lf.ui.form_dialog(key, self.get_dialog_title(), body, buttons,
                           lambda label, values: self._project_form_result(key, label, values),
                           lambda values: self._project_form_changed(key, values),
-                          width=560 if self._dialog_kind in {"remove_content", "compact_content", "license"} else 720)
+                          width=560 if self._dialog_kind in {"remove_content", "compact_content", "license", "gallery_details"} else 720)
 
     def _refresh_project_form(self, *, body: bool = True) -> None:
         if not self._dialog_kind:
@@ -2617,7 +2601,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         lf.ui.form_dialog_update(self._dialog_key, buttons, content if body else None)
 
     def _read_project_form(self, values) -> None:
-        for key in ("destination", "format", "source", "name", "license_choice", "license_name", "license_text", "attribution"):
+        for key in ("destination", "format", "source", "name", "gallery_title", "gallery_description", "license_choice", "license_name", "license_text", "attribution"):
             if key in values:
                 self._dialog_data[key] = str(values[key])
 
@@ -2655,6 +2639,26 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             self._handle.dirty_all()
         self._request_model_update()
 
+    def _can_edit_gallery_details(self) -> bool:
+        asset = self._get_selected_asset()
+        if not asset or asset.get("remote_only"):
+            return False
+        linked = self._gallery_project_id(asset) in self._gallery_state.get("links", {})
+        return bool(linked or not asset.get("recent_only") and asset["id"] in self._asset_index_assets())
+
+    def open_gallery_details(self, _handle=None, _ev=None, _args=None) -> None:
+        if not self._can_edit_gallery_details():
+            return
+        asset = self._get_selected_asset()
+        details = self._gallery_details(asset)
+        self._dialog_asset_id = asset["id"]
+        self._set_dialog("gallery_details", {
+            "path": asset.get("path", ""), "gallery_title": details["title"],
+            "gallery_description": details["description"],
+            "gallery_project_id": self._gallery_project_id(asset),
+            "gallery_identity": self._gallery_state.get("identity"),
+        })
+
     def open_project_operation(self, _handle=None, _ev=None, args=None) -> None:
         action = self._resolve_event_value(args, _ev, "data-project-operation")
         if not action and args:
@@ -2667,12 +2671,6 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             return
         self._dialog_asset_id = asset_id
         details = self._inspection_by_asset.get(asset_id, {}).get("details")
-        if action == "contents":
-            self._inspector_expanded = True
-            self._operations_expanded = True
-            self._dirty_selection()
-            self._dirty_inspector_layout()
-            return
         if action == "update_thumbnail":
             dataset_available, embedded_available = self._thumbnail_source_availability(
                 str(asset.get("path") or "")
@@ -2708,6 +2706,33 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             return
         path = str(asset["path"])
         data = self._dialog_data
+        if action == "gallery_details":
+            project_id = data["gallery_project_id"]
+            title = str(data.get("gallery_title", "")).strip()
+            description = str(data.get("gallery_description", ""))
+            if not title:
+                data["message"] = tr("projects.gallery.details.title_required")
+                self._refresh_project_form()
+                return
+            try:
+                if project_id in self._gallery_state.get("links", {}):
+                    controller = self._controller()
+                    if controller.service.identity() != data["gallery_identity"]:
+                        raise ValueError(tr("projects.gallery.error.account_changed"))
+                    controller.service.set_local_details(project_id, title, description)
+                    controller._schedule_poll()
+                elif not asset.get("recent_only") and self._library_command(
+                    "update_asset", asset["id"], gallery_details_draft={"title": title, "description": description}
+                ) is not None:
+                    self.refresh_catalog(scan_folders=False)
+                else:
+                    raise ValueError(tr("projects.gallery.error.storage"))
+            except Exception as exc:
+                data["message"] = str(exc)
+                self._refresh_project_form()
+                return
+            self.close_project_dialog()
+            return
         if action == "export_as":
             destination = str(data.get("destination") or "")
             if not destination:
@@ -3142,7 +3167,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             details = self._inspection_by_asset.get(str(asset.get("id") or ""), {}).get("details")
             if details is not None:
                 labels = {
-                    "contents": "projects.contents.title",
+                    "inspector": "projects.inspector.title",
                     "export_as": "projects.action.export_as",
                     "update_thumbnail": "projects.action.update_thumbnail",
                     "rename": "projects.action.rename",
@@ -3152,8 +3177,8 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
                     if action in labels:
                         items.append({
                             "label": tr(labels[action]),
-                            "action": "project:" + action,
-                            "separator_before": action == "contents",
+                            "action": action if action == "inspector" else "project:" + action,
+                            "separator_before": action == "inspector",
                         })
             return items
         items: List[Dict[str, Any]] = []
@@ -3171,9 +3196,10 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
                     "action": "use_found_location",
                 }
             )
+        if any(operation.get("action") == "rename" for operation in operation_actions(asset)):
+            items.append({"label": tr("projects.action.rename"), "action": "project:rename"})
         items.extend(
             [
-                {"label": tr("projects.action.rename"), "action": "rename"},
                 {
                     "label": tr("projects.action.show_in_folder"),
                     "action": "show_in_folder",
@@ -3191,7 +3217,6 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         if details is not None or asset.get("status") == "REPAIR_ONLY":
             labels = {
                 "repair": "projects.action.repair",
-                "contents": "projects.contents.title",
                 "embed_dataset": "projects.action.embed_dataset",
                 "locate_dataset": "projects.action.locate_dataset",
                 "export_as": "projects.action.export_as",
@@ -3199,12 +3224,12 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             }
             for operation in operation_actions(asset):
                 action = str(operation.get("action") or "")
-                if action == "rename" or action not in labels:
+                if action in ("rename", "inspector") or action not in labels:
                     continue
                 items.append({
                     "label": tr(labels[action]),
                     "action": "project:" + action,
-                    "separator_before": action == "contents",
+                    "separator_before": action == "export_as",
                 })
         return items
 
@@ -3218,11 +3243,10 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         elif action == "inspector":
             if self._select_asset_id(asset_id):
                 self._inspector_expanded = True
+                self._operations_expanded = True
                 self._dirty_inspector_layout()
         elif action == "use_found_location":
             self.on_use_found_location(None, None, [asset_id])
-        elif action == "rename":
-            self.on_rename_asset(None, None, [asset_id])
         elif action == "show_in_folder":
             self.on_show_in_folder(None, None, [asset_id])
         elif action == "remove":
@@ -3240,26 +3264,6 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             self._asset_context_menu_items(asset),
             lambda action: self._handle_asset_context_action(action, asset_id),
             anchor,
-        )
-
-    def on_rename_asset(self, _handle, _ev, args):
-        asset_id = self._resolve_event_value(args, _ev, "data-asset-id")
-        asset = self._asset_dict(asset_id)
-        if not asset or not self._asset_index:
-            return
-        current_name = str(asset.get("name") or Path(str(asset.get("path") or "")).stem)
-
-        def rename(name: Any) -> None:
-            value = str(name or "").strip()
-            if value and value != current_name:
-                self._library_command("update_asset", asset_id, name=value)
-                self.refresh_catalog(scan_folders=False)
-
-        lf.ui.input_dialog(
-            tr("projects.dialog.rename_asset"),
-            tr("projects.dialog.enter_new_name", name=current_name),
-            current_name,
-            rename,
         )
 
     def on_show_in_folder(self, _handle, _ev, args):
@@ -4866,6 +4870,25 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         if self._handle:
             self._handle.dirty_all()
         return True
+
+    def refresh_after_thumbnail_write(self, path: str) -> None:
+        if not self._panel_mounted or not self._asset_index:
+            return
+        key = self._project_path_key(path)
+        assets = list(self._asset_index_assets().values()) + list(self._recent_only_assets().values())
+        for asset in assets:
+            if self._project_path_key(asset.get("path")) != key:
+                continue
+            asset_id = str(asset["id"])
+            if not asset.get("recent_only"):
+                self._library_command("verify_asset", asset_id)
+            if self._inspection_pipeline is not None:
+                self._inspection_pipeline.invalidate(asset_id)
+            self._inspection_by_asset.pop(asset_id, None)
+        self._invalidate_recent_scope_cache()
+        self._refresh_records(assets=True)
+        self._dirty_selection()
+        self._start_inspection_refresh()
 
     def on_mount(self, doc):
         super().on_mount(doc)

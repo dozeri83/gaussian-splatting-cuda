@@ -270,6 +270,14 @@ namespace lfs::vis {
         void markCameraCut();
 
         [[nodiscard]] bool pollDirtyState();
+        [[nodiscard]] DirtyMask pendingDirtyMask() const { return dirty_mask_.load(std::memory_order_relaxed); }
+        // The training preview refreshes on its own cadence, not only when an
+        // unrelated redraw happens to notice it is due.
+        void pollTrainingRefresh(bool is_training);
+        [[nodiscard]] double secondsUntilTrainingRefresh() const;
+        // Re-arms a parked passive training refresh once its render can claim the arena.
+        void pollParkedArenaRetry();
+        [[nodiscard]] bool hasParkedArenaRetry() const { return parked_arena_retry_ != 0; }
 
         void setPivotAnimationEndTime(const std::chrono::steady_clock::time_point end_time) {
             animation_state_.setPivotAnimationEndTime(end_time);
@@ -882,6 +890,7 @@ namespace lfs::vis {
         void invalidateCameraMetricsRequests(bool clear_latest = false);
         void requestRenderFollowUp();
         void requestTemporalFollowUp();
+        void queueSharedScratchRetry(DirtyMask retry_dirty);
         void notifyAsyncLodResultsReady();
         void cameraMetricsWorkerLoop(std::stop_token stop_token);
         [[nodiscard]] GTComparisonImageLookup getOrQueueGTComparisonImage(
@@ -962,6 +971,8 @@ namespace lfs::vis {
         std::uint64_t vulkan_viewport_image_generation_ = 0;
         std::string last_logged_vksplat_render_error_;
         StaleFrameGuard vksplat_stale_frame_guard_;
+        DirtyMask parked_arena_retry_ = 0;
+        std::atomic<DirtyMask> training_refresh_dirty_{0};
         std::uint64_t viewport_projection_generation_ = 1;
         std::uint64_t temporal_scene_revision_ = 1;
         TemporalConvergenceController temporal_convergence_;

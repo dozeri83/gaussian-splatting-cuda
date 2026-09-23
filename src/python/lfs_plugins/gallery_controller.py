@@ -241,7 +241,8 @@ class GalleryController:
                 self.resolve_asset(asset, details)
                 return
         self.upload_format = upload_format
-        self._review_publish(scene, details, upload_format, publish_as_new, update=update)
+        self._review_publish(scene, details, upload_format, publish_as_new, update=update,
+                             expected_commit=str(asset.get("commit_uuid") or getattr(lf.io.inspect_project(path), "commit_uuid", "")))
         self._schedule_poll()
 
     def _publish_closed_asset(self, asset, details, upload_format, *, update, publish_as_new, handoff=None):
@@ -352,16 +353,32 @@ class GalleryController:
             local = stored_local_scene(link, details)
             project = (asset["id"], str(Path(asset["path"]).resolve()))
             reviewed_dirty = None
-        groups = conflict_groups(asset, link, local, remote, apply_only=apply_only)
+        from .gallery_project_facts import saved_content_stamp
+        saved_stamp = (saved_content_stamp(asset["path"])
+                       if link.get("contentStamp") and not reviewed_dirty and Path(asset["path"]).is_file() else "")
+        groups = conflict_groups(asset, link, local, remote, apply_only=apply_only,
+                                 saved_stamp=saved_stamp, closed=not current_open)
         if not groups:
             self._message = tr("state.equal")
             return
         identity = self._identity
+        reviewed_link = copy.deepcopy(link)
         local_view, remote_view = local.get("viewerSettings") or {}, remote.get("viewerSettings", {})
         reviewed_stamp = file_stamp(asset["path"]) if Path(asset["path"]).is_file() else None
 
         def apply(decisions, *, local_only=False):
             publish = not (apply_only or local_only)
+
+            text_only = (apply_only and decisions.get("text") == "gallery"
+                and asset.get("commit_uuid") == link.get("commitUuid")
+                and scene.get("contentRevision") == link.get("contentRevision")
+                and not any(choice in ("gallery", "both") for key, choice in decisions.items() if key != "text"))
+            if text_only:
+                if any(entry["asset"]["id"] == asset["id"] for entry in self._update_queue):
+                    raise ValueError(tr("error.project_changed"))
+                self.service.acknowledge_gallery_text(remote, asset["id"], asset["path"], reviewed_stamp, reviewed_link)
+                self._schedule_poll()
+                return
 
             def run():
                 if self.service.identity() != identity or self._project_identity() != project:
@@ -381,14 +398,15 @@ class GalleryController:
                     for key in ("title", "description"):
                         metadata[key] = remote.get(key, "")
                 view = copy.deepcopy(remote_view if decisions.get("view") == "gallery" else apply_local_view)
-                track = copy.deepcopy(remote_view.get("cameraPath") if decisions.get("track") == "gallery" else apply_local_view.get("cameraPath"))
+                track_source = remote_view if decisions.get("track") == "gallery" else apply_local_view
+                track = copy.deepcopy(track_source.get("cameraPath"))
                 if decisions.get("track") == "both":
                     if not apply_local_view.get("cameraPath"):
                         raise ValueError(tr("error.project_changed"))
                     track = combine_camera_tracks(apply_local_view["cameraPath"], remote_view["cameraPath"])
                 if track is not None:
                     view["cameraPath"] = track
-                else:
+                elif decisions.get("view") != "gallery":
                     view.pop("cameraPath", None)
                 metadata["viewerSettings"] = view
 
@@ -1206,7 +1224,7 @@ class GalleryController:
             raise ValueError("The project changed while saving. Your gallery operation was stopped; review your work and try again.")
         pending["continuation"]()
 
-    def _review_publish(self, scene, details, upload_format, publish_as_new, *, update=False):
+    def _review_publish(self, scene, details, upload_format, publish_as_new, *, update=False, expected_commit=None):
         project = self._project_identity()
         metadata = self._details(details)
         if publish_as_new:
@@ -1218,9 +1236,11 @@ class GalleryController:
         if scene:
             metadata.update(replaceSceneId=scene["id"], baseRevisions={name: scene[name + "Revision"] for name in ("content", "metadata")})
         self._publish(metadata, expected_project=project, environment_source=environment_source,
-                      upload_format=upload_format, update=update)
+                      upload_format=upload_format, update=update,
+                      save_project=bool(details.get("saveProject", True)), expected_commit=expected_commit)
 
-    def _publish(self, metadata, *, expected_project=None, environment_source=None, upload_format="studio", update=False):
+    def _publish(self, metadata, *, expected_project=None, environment_source=None, upload_format="studio", update=False,
+                 save_project=True, expected_commit=None):
         identity = self.service.identity()
         project_id, path = self._project_identity()
         if expected_project is not None and (project_id, path) != expected_project:
@@ -1243,10 +1263,16 @@ class GalleryController:
         log_stage("publish_requested", project_id=project_id, path=path, size=size,
                   format=upload_format, account_origin=safe_url(getattr(account, "base_url", "")),
                   update=update)
-        self._save_current_project(lambda: self._publish_saved(metadata, project_id, path, identity,
-                                                             environment_source, upload_format, update=update))
+        if save_project:
+            self._save_current_project(lambda: self._publish_saved(metadata, project_id, path, identity,
+                                                                 environment_source, upload_format, update=update))
+        else:
+            if lf.project_poll_write().get("running"):
+                raise ValueError("Wait for the current project save before continuing.")
+            self._publish_saved(metadata, project_id, path, identity, environment_source, upload_format,
+                                update=update, expected_commit=expected_commit or str(lf.io.inspect_project(path).commit_uuid))
 
-    def _patch_saved_update(self, metadata, project_id, path, *, update):
+    def _patch_saved_update(self, metadata, project_id, path, *, update, expected_commit=None):
         from .gallery_project_facts import saved_content_stamp
         content_stamp = saved_content_stamp(path)
         metadata["_contentStamp"] = content_stamp
@@ -1261,15 +1287,40 @@ class GalleryController:
                 and comparable(content_stamp) == comparable(baseline)
                 and metadata.get("replaceSceneId") == linked.get("sceneId")):
             details = {k: v for k, v in metadata.items() if k in ("title", "description", "viewerSettings")}
+            commit = str(lf.io.inspect_project(path).commit_uuid)
+            if expected_commit is not None and commit != expected_commit:
+                raise ValueError(tr("error.project_changed"))
+            cover = {}
+            if metadata.get("useEmbeddedPreview"):
+                import base64
+                self._pin_publish_preview(metadata, path, commit)
+                cover["cover_png"] = base64.b64decode(metadata["_previewPng"], validate=True)
             self.service.edit(linked["sceneId"], {name + "Revision": token for name, token in metadata["baseRevisions"].items()}, details,
-                commit_uuid=str(lf.io.inspect_project(path).commit_uuid), content_stamp=content_stamp, project_id=project_id)
+                commit_uuid=commit, content_stamp=content_stamp, project_id=project_id, **cover)
             return True
         return False
 
-    def _publish_saved(self, metadata, project_id, path, identity, environment_source=None, upload_format="studio", *, update=False):
+    def _publish_saved(self, metadata, project_id, path, identity, environment_source=None, upload_format="studio", *, update=False,
+                       expected_commit=None):
         if self.service.identity() != identity or self._project_identity() != (project_id, path):
             raise ValueError("The account or current project changed while saving. Review it before uploading.")
-        if self._patch_saved_update(metadata, project_id, path, update=update):
+        inspection = lf.io.inspect_project(path)
+        if expected_commit is not None and str(inspection.commit_uuid) != expected_commit:
+            raise ValueError(tr("error.project_changed"))
+        if expected_commit is not None:
+            references = lf.io.inspect_project_details(path).references
+            saved_environment = next((Path(ref.path).resolve() for ref in references if ref.kind == "environment_map"), None)
+            live_environment = Path(environment_source).resolve() if metadata.get("viewerSettings", {}).get("environment") and environment_source else None
+            if saved_environment != live_environment:
+                raise ValueError(tr("error.save_hdr_first"))
+        environment = metadata.get("viewerSettings", {}).get("environment")
+        if environment:
+            settings = lf.get_render_settings()
+            if (settings.environment_mode != "EQUIRECTANGULAR" or str(settings.environment_map_path) != environment_source
+                    or float(settings.environment_exposure) != environment["exposure"]
+                    or float(settings.environment_rotation_degrees) != environment["rotation"]):
+                raise ValueError("The HDR background changed. Review the current view and try uploading again.")
+        if self._patch_saved_update(metadata, project_id, path, update=update, expected_commit=expected_commit):
             return
         nodes = [n.name for n in self._visible_splats()]
         if not nodes:
@@ -1278,17 +1329,10 @@ class GalleryController:
             raise ValueError("Choose a supported upload format.")
         if "licht" not in self.service.snapshot().get("source_formats", []):
             raise ValueError(UNSUPPORTED_PORTAL)
-        environment = metadata.get("viewerSettings", {}).get("environment")
-        if environment:
-            settings = lf.get_render_settings()
-            if (settings.environment_mode != "EQUIRECTANGULAR" or str(settings.environment_map_path) != environment_source
-                    or float(settings.environment_exposure) != environment["exposure"]
-                    or float(settings.environment_rotation_degrees) != environment["rotation"]):
-                raise ValueError("The HDR background changed. Review the current view and try uploading again.")
         export = self.service.root / (str(uuid.uuid4()) + ".scene")
         metadata = dict(metadata)
-        metadata["_commitUuid"] = str(getattr(lf.io.inspect_project(path), "commit_uuid", ""))
-        file_uuid = str(getattr(lf.io.inspect_project(path), "file_uuid", ""))
+        metadata["_commitUuid"] = str(getattr(inspection, "commit_uuid", ""))
+        file_uuid = str(getattr(inspection, "file_uuid", ""))
         if file_uuid:
             metadata["originFileUuid"] = file_uuid
         metadata["_uploadFormat"] = upload_format
@@ -1879,9 +1923,15 @@ def _change_labels(groups):
     return list(dict.fromkeys(name for row in groups for name in row.get("fields") or [row["label"]] if name))
 
 
-def conflict_groups(asset, link, local, remote, *, apply_only=False):
+def conflict_groups(asset, link, local, remote, *, apply_only=False, saved_stamp="", closed=False):
     import json
     baseline = link.get("sharedFields", {})
+    baseline_stamp = link.get("contentStamp", "")
+    comparable_stamps = ":" in saved_stamp and ":" in baseline_stamp
+    saved_content, saved_view = saved_stamp.split(":", 1) if comparable_stamps else ("", "")
+    baseline_content, baseline_view = baseline_stamp.split(":", 1) if comparable_stamps else ("", "")
+    comparable_stamps = comparable_stamps and all((saved_content, saved_view, baseline_content, baseline_view))
+    saved_view_changed = closed and comparable_stamps and saved_view != baseline_view
     local_view, remote_view = local.get("viewerSettings", {}), remote.get("viewerSettings", {})
     parts = [
         ("text", {k: local.get(k, "") for k in ("title", "description")}, {k: remote.get(k, "") for k in ("title", "description")}, {k: baseline.get(k, "") for k in ("title", "description")}),
@@ -1894,7 +1944,8 @@ def conflict_groups(asset, link, local, remote, *, apply_only=False):
     for identifier, mine, gallery, base in parts:
         if mine == gallery:
             continue
-        mine_value, gallery_value = text(mine), text(gallery)
+        mine_value = tr("conflict.saved_view_changed") if saved_view_changed and identifier in ("view", "track") else text(mine)
+        gallery_value = text(gallery)
         values = tr("conflict.values", mine=mine_value, gallery=gallery_value)
         difference = values
         fields = [tr({"text": "conflict.text", "view": "conflict.view", "track": "conflict.track"}[identifier])]
@@ -1913,13 +1964,17 @@ def conflict_groups(asset, link, local, remote, *, apply_only=False):
         elif identifier == "track":
             difference = tr("conflict.track_counts", mine=len((mine or {}).get("keyframes", [])),
                             gallery=len((gallery or {}).get("keyframes", [])))
+        if saved_view_changed and identifier in ("view", "track"):
+            difference = values
+            fields = [tr("conflict.view" if identifier == "view" else "conflict.track")]
         rows.append(dict(id=identifier, label=tr({"text": "conflict.text", "view": "conflict.view", "track": "conflict.track"}[identifier]),
             mine_value=mine_value, gallery_value=gallery_value, fields=fields,
             difference=difference, values=values,
-            choice="gallery" if apply_only or mine == base else "mine",
+            choice="gallery" if apply_only or (mine == base and not (saved_view_changed and identifier in ("view", "track"))) else "mine",
             can_both=identifier == "track" and bool(mine and gallery)))
     content_changed = (link.get("contentRevision") != remote.get("contentRevision")
-        or not apply_only and (not link.get("commitUuid") or asset.get("commit_uuid") != link.get("commitUuid")))
+        or (not apply_only and (not link.get("commitUuid") or asset.get("commit_uuid") != link.get("commitUuid"))
+            and (not comparable_stamps or saved_content != baseline_content)))
     if content_changed:
         mine, gallery = tr("conflict.local_content"), tr("conflict.gallery_content")
         rows.append(dict(id="content", label=tr("conflict.content"), mine_value=mine, gallery_value=gallery,
@@ -1946,9 +2001,17 @@ def asset_sync_state(project=None, link=None, scene=None, jobs=(), *, checked=Fa
     freshness = "unknown"
     if link and link.get("commitUuid") and project.get("commit_uuid") and scene and all(link.get(key) and scene.get(key) for key in ("contentRevision", "metadataRevision")):
         # Links written by older builds still include visibility in their saved fields.
+        # Older applies could omit an explicit null camera track from local fields.
+        local_fields = {k: v for k, v in link.get("localFields", {}).items() if k != "visibility"}
+        gallery_fields = {k: v for k, v in link.get("sharedFields", {}).items() if k != "visibility"}
+        local_view = local_fields.get("viewerSettings")
+        gallery_view = gallery_fields.get("viewerSettings")
+        if (isinstance(local_view, dict) and isinstance(gallery_view, dict)
+                and "cameraPath" not in local_view and "cameraPath" in gallery_view
+                and gallery_view["cameraPath"] is None):
+            local_fields = dict(local_fields, viewerSettings=dict(local_view, cameraPath=None))
         local = (project["commit_uuid"] != link["commitUuid"] or
-                 "localFields" in link and {k: v for k, v in link["localFields"].items() if k != "visibility"} !=
-                 {k: v for k, v in link.get("sharedFields", {}).items() if k != "visibility"})
+                 "localFields" in link and local_fields != gallery_fields)
         remote = any(scene[key] != link[key] for key in ("contentRevision", "metadataRevision"))
         freshness = "diverged" if local and remote else "local" if local else "remote" if remote else "equal"
     scene_id = (link or scene or {}).get("sceneId", (scene or {}).get("id"))

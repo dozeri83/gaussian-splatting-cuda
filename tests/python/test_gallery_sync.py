@@ -48,6 +48,97 @@ def connected(tmp_path, monkeypatch):
     return service
 
 
+def test_explicit_unlink_stays_unlinked_with_matching_origin_after_reload(tmp_path, monkeypatch):
+    from lfs_plugins.asset_gallery_ui import GalleryAssetMixin
+
+    service = connected(tmp_path, monkeypatch)
+    scene = dict(id="scene", originProjectUuid="project", originCommitUuid="saved",
+                 status="ready", contentRevision="r1", metadataRevision="r1",
+                 title="Published project", description="", viewerSettings={})
+    monkeypatch.setattr(Client, "list_scenes", lambda self, **kwargs: [scene])
+    service._bucket()["links"]["project"] = gallery_sync.exchange_link(scene, "saved")
+    service._save()
+    service.scenes = [scene]
+
+    def facts():
+        panel = GalleryAssetMixin()
+        panel._gallery_state = service.snapshot()
+        panel._gallery_controller = None
+        return panel._gallery_facts({"id": "project", "exists": True, "commit_uuid": "saved",
+                                     "scene_id": "scene", "gallery": {"state": "equal"}})
+
+    service.unlink("project")
+    finish(service)
+    assert (facts()["relationship"], facts()["state"], facts().get("originMatch")) == ("unlinked", "unlinked", None)
+    assert facts()["action"] == "publish"
+
+    service.find_publications("project")
+    finish(service)
+    service.refresh(force=True)
+    finish(service)
+    assert "project" not in service.snapshot()["links"]
+    assert facts()["state"] == "unlinked"
+
+    service = gallery_sync.GallerySync(service.account, tmp_path)
+    service.refresh()
+    finish(service)
+    assert "project" not in service.snapshot()["links"]
+    assert facts()["state"] == "unlinked"
+
+
+def test_origin_matching_recovers_link_without_explicit_unlink(tmp_path, monkeypatch):
+    from lfs_plugins.asset_gallery_ui import GalleryAssetMixin
+
+    service = connected(tmp_path, monkeypatch)
+    scene = dict(id="scene", originProjectUuid="project", originCommitUuid="saved",
+                 status="ready", contentRevision="r1", metadataRevision="r1",
+                 title="Published project", description="", viewerSettings={})
+    monkeypatch.setattr(Client, "list_scenes", lambda self, **kwargs: [scene])
+    panel = GalleryAssetMixin()
+    panel._gallery_state = dict(service.snapshot(), scenes=[scene])
+    panel._gallery_controller = None
+    assert panel._gallery_facts({"id": "project", "exists": True})["originMatch"] is True
+    service.refresh(force=True)
+    finish(service)
+    assert service.snapshot()["links"]["project"]["sceneId"] == "scene"
+
+
+def test_linking_again_clears_explicit_unlink(tmp_path, monkeypatch):
+    service = connected(tmp_path, monkeypatch)
+    job = downloaded_job(service)
+    service._save()
+    service.unlink("project")
+    finish(service)
+    assert service.snapshot()["unlinkedProjects"] == ["project"]
+
+    project_path = tmp_path / "project.licht"
+    project_path.write_bytes(b"saved project")
+    service.link_download(job["id"], "project", project_path=project_path)
+    finish(service)
+    assert service.snapshot()["unlinkedProjects"] == []
+    assert service.snapshot()["links"]["project"]["sceneId"] == "scene"
+
+
+def test_local_gallery_details_are_saved_as_pending_fields_with_rollback(tmp_path, monkeypatch):
+    service = connected(tmp_path, monkeypatch)
+    scene = {"id": "scene", "title": "Shared title", "description": "Shared description",
+             "viewerSettings": {"camera": 1}, "contentRevision": "c1", "metadataRevision": "m1"}
+    service._bucket()["links"]["project"] = gallery_sync.exchange_link(scene, "saved")
+    service._save()
+    service.set_local_details("project", "Prepared title", "Prepared description")
+    link = service.snapshot()["links"]["project"]
+    assert link["localFields"] == {"title": "Prepared title", "description": "Prepared description", "viewerSettings": {"camera": 1}}
+    assert link["sharedFields"]["title"] == "Shared title"
+    assert json.loads(service._journal.read_text())["accounts"][next(iter(service._data["accounts"]))]["links"]["project"]["localFields"] == link["localFields"]
+    from lfs_plugins.gallery_controller import asset_sync_state
+    assert asset_sync_state({"id": "project", "commit_uuid": "saved", "exists": True}, link, scene)["freshness"] == "local"
+
+    monkeypatch.setattr(service, "_save", lambda **kwargs: (_ for _ in ()).throw(OSError("storage failed")))
+    with pytest.raises(OSError, match="storage failed"):
+        service.set_local_details("project", "Another title", "Another description")
+    assert service.snapshot()["links"]["project"] == link
+
+
 def test_relink_latches_automatic_refresh_but_manual_retry_is_allowed(tmp_path, monkeypatch):
     calls = []
     stages = []
@@ -955,6 +1046,8 @@ def test_failed_link_save_is_not_reported_as_a_completed_update(tmp_path, monkey
 
 def test_completed_upload_records_exact_prepared_commit(tmp_path, monkeypatch):
     service = connected(tmp_path, monkeypatch)
+    service._bucket()["unlinkedProjects"] = ["project"]
+    service._save()
     path = tmp_path/'scene.licht'
     path.write_bytes(b'ply-data')
     remote = dict(id='scene',revision='new',title='Example',description='',visibility='private',viewerSettings={}, contentRevision='new', metadataRevision='new')
@@ -966,10 +1059,121 @@ def test_completed_upload_records_exact_prepared_commit(tmp_path, monkeypatch):
     job = service.queue_upload(path,{'title':'Example','_commitUuid':'prepared-commit','_uploadFormat':'sog'},'project')
     finish(service)
     link=service.snapshot()['links']['project']
+    assert service.snapshot()["unlinkedProjects"] == []
     assert link['commitUuid']=='prepared-commit' and link['uploadFormat']=='sog'
     assert link['sharedFields']==gallery_sync.shared_fields(remote)
     assert link['exchangedAt'] > 0
     assert received == [dict(title='Example', originProjectUuid='project', originCommitUuid='prepared-commit', clientMutationId=job)]
+
+
+@pytest.mark.parametrize('linked,use_cover', [(True, True), (True, False), (False, True)])
+def test_upload_updates_cover_only_for_linked_replacement(tmp_path, monkeypatch, linked, use_cover):
+    import base64
+    png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jkWQAAAAASUVORK5CYII=')
+    service = connected(tmp_path, monkeypatch)
+    original = dict(id='scene', title='Original', contentRevision='old', metadataRevision='old',
+                    presentationRevision='old', posterRevision='old')
+    if linked:
+        service._bucket()['links']['project'] = gallery_sync.exchange_link(original, 'saved')
+    path = tmp_path / 'project.licht'
+    path.write_bytes(b'prepared project')
+    updated = dict(original, contentRevision='new', metadataRevision='new', presentationRevision='new', posterRevision='new')
+    covers = []
+    monkeypatch.setattr(Client, 'upload', lambda *_args, **_kwargs: {'scene': updated}, raising=False)
+    monkeypatch.setattr(Client, 'set_cover', lambda _client, scene_id, scene, png: covers.append((scene_id, scene, png)), raising=False)
+    monkeypatch.setattr(Client, 'scene', lambda _client, _scene_id: updated, raising=False)
+    metadata = dict(title='Title', useEmbeddedPreview=use_cover,
+                    _previewPng=base64.b64encode(png).decode('ascii'))
+    if linked:
+        metadata['replaceSceneId'] = 'scene'
+        metadata['baseRevisions'] = {'content': 'old', 'metadata': 'old'}
+
+    job = service.queue_upload(path, metadata, 'project')
+    finish(service)
+
+    assert service._job(job)['status'] == 'completed'
+    assert covers == ([('scene', updated, png)] if linked and use_cover else [])
+
+
+@pytest.mark.parametrize('cover_fails', [False, True])
+def test_metadata_update_sets_cover_after_patch_and_reports_failure(tmp_path, monkeypatch, cover_fails):
+    service = connected(tmp_path, monkeypatch)
+    original = dict(id='scene', title='Original', contentRevision='old', metadataRevision='old',
+                    presentationRevision='old', posterRevision='old')
+    updated = dict(original, title='Updated', metadataRevision='new', presentationRevision='new', posterRevision='new')
+    service._bucket()['links']['project'] = gallery_sync.exchange_link(original, 'saved')
+    service.scenes = [original]
+    actions = []
+    monkeypatch.setattr(Client, 'update', lambda _client, *_args, **_kwargs: actions.append('patch') or updated, raising=False)
+    def set_cover(_client, scene_id, scene, png):
+        actions.append(('cover', scene_id, scene, png))
+        if cover_fails:
+            raise ValueError('Cover upload failed')
+    monkeypatch.setattr(Client, 'set_cover', set_cover, raising=False)
+    monkeypatch.setattr(Client, 'scene', lambda _client, _scene_id: updated, raising=False)
+
+    service.edit('scene', {'contentRevision': 'old', 'metadataRevision': 'old'}, {'title': 'Updated'},
+                 project_id='project', cover_png=b'thumbnail')
+    finish(service)
+
+    assert actions == ['patch', ('cover', 'scene', updated, b'thumbnail')]
+    if cover_fails:
+        from lfs_plugins.gallery_controller import asset_sync_state
+        assert service.snapshot()['links']['project']['metadataRevision'] == 'new'
+        saved = next(iter(json.loads(service._journal.read_text())['accounts'].values()))['links']['project']
+        assert saved['metadataRevision'] == 'new'
+        assert service.scenes == [updated]
+        assert asset_sync_state({'id': 'project', 'commit_uuid': 'saved', 'exists': True},
+                                service.snapshot()['links']['project'], updated)['freshness'] == 'equal'
+        assert 'Cover upload failed' in service.snapshot()['actionFailure']['message']
+        monkeypatch.setattr(Client, 'set_cover', lambda *_args: None, raising=False)
+        covered = dict(updated, presentationRevision='covered', posterRevision='covered')
+        monkeypatch.setattr(Client, 'scene', lambda _client, _scene_id: covered, raising=False)
+        service.set_cover('project', updated, b'thumbnail')
+        finish(service)
+        assert service.snapshot()['links']['project']['acknowledgedPresentationRevision'] == 'covered'
+    else:
+        assert service.snapshot()['links']['project']['metadataRevision'] == 'new'
+        assert service.snapshot()['links']['project']['acknowledgedPresentationRevision'] == 'new'
+        assert service.snapshot()['actionFailure'] is None
+
+
+def test_replacement_cover_failure_is_visible_on_transfer(tmp_path, monkeypatch):
+    import base64
+    service = connected(tmp_path, monkeypatch)
+    original = dict(id='scene', title='Original', contentRevision='old', metadataRevision='old',
+                    presentationRevision='old', posterRevision='old')
+    service._bucket()['links']['project'] = gallery_sync.exchange_link(original, 'saved')
+    path = tmp_path / 'project.licht'
+    path.write_bytes(b'prepared project')
+    png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jkWQAAAAASUVORK5CYII=')
+    updated = dict(original, contentRevision='new', metadataRevision='new', presentationRevision='new', posterRevision='new')
+    uploads = []
+    monkeypatch.setattr(Client, 'upload', lambda *_args, **_kwargs: uploads.append(True) or {'scene': updated}, raising=False)
+    monkeypatch.setattr(Client, 'set_cover', lambda *_args: (_ for _ in ()).throw(ValueError('Cover upload failed')), raising=False)
+    metadata = dict(title='Updated', replaceSceneId='scene', baseRevisions={'content': 'old', 'metadata': 'old'},
+                    useEmbeddedPreview=True, _previewPng=base64.b64encode(png).decode('ascii'), _commitUuid='saved')
+
+    job = service.queue_upload(path, metadata, 'project')
+    finish(service)
+
+    assert service._job(job)['status'] == 'completed'
+    assert service.snapshot()['links']['project']['contentRevision'] == 'new'
+    assert service.snapshot()['links']['project']['metadataRevision'] == 'new'
+    saved = next(iter(json.loads(service._journal.read_text())['accounts'].values()))['links']['project']
+    assert saved['contentRevision'] == 'new' and saved['metadataRevision'] == 'new'
+    assert service.scenes == [updated]
+    from lfs_plugins.gallery_controller import asset_sync_state
+    assert asset_sync_state({'id': 'project', 'commit_uuid': 'saved', 'exists': True},
+                            service.snapshot()['links']['project'], updated)['freshness'] == 'equal'
+    assert 'Cover upload failed' in service.snapshot()['actionFailure']['message']
+    covered = dict(updated, presentationRevision='covered', posterRevision='covered')
+    monkeypatch.setattr(Client, 'set_cover', lambda *_args: None, raising=False)
+    monkeypatch.setattr(Client, 'scene', lambda _client, _scene_id: covered, raising=False)
+    service.set_cover('project', updated, png)
+    finish(service)
+    assert uploads == [True]
+    assert service.snapshot()['links']['project']['acknowledgedPresentationRevision'] == 'covered'
 
 def test_publish_as_new_keeps_old_pair_until_success(tmp_path, monkeypatch):
     service=connected(tmp_path,monkeypatch)
@@ -1692,6 +1896,93 @@ def test_local_only_resolution_keeps_unpublished_content_after_restart(tmp_path,
     assert link["metadataRevision"] == "m2"
     assert link["localFields"] == gallery_sync.shared_fields(remote)
     assert path.read_bytes() == b"locally edited geometry with checkpoint"
+
+
+@pytest.mark.parametrize("local_view", [None, {"camera": {"position": [1, 2, 3]}}])
+def test_text_apply_updates_only_the_link(tmp_path, monkeypatch, local_view):
+    from lfs_plugins.gallery_controller import asset_sync_state
+
+    service = connected(tmp_path, monkeypatch)
+    base = dict(id="remote", title="Scene", description="Before", viewerSettings={"camera": {"position": [0, 2, 3]}},
+                contentRevision="c1", metadataRevision="m1")
+    remote = dict(base, description="Changed in portal", metadataRevision="m2")
+    monkeypatch.setattr(Client, "scene", lambda *args: remote)
+    path = tmp_path / "project.licht"
+    path.write_bytes(b"saved project")
+    link = gallery_sync.exchange_link(base, "saved")
+    link["contentStamp"] = "unchanged"
+    link["localFields"] = gallery_sync.shared_fields(base)
+    if local_view is not None:
+        link["localFields"]["viewerSettings"] = local_view
+    service._bucket()["links"]["project"] = link
+    service._save()
+    before = path.read_bytes()
+    stamp = gallery_sync.file_stamp(path)
+
+    service.acknowledge_gallery_text(remote, "project", str(path), stamp, link)
+    finish(service)
+
+    applied = service.snapshot()["links"]["project"]
+    assert service.message == "projects.gallery.info.applied"
+    assert path.read_bytes() == before and gallery_sync.file_stamp(path) == stamp
+    assert applied["commitUuid"] == "saved" and applied["contentRevision"] == "c1"
+    assert applied["contentStamp"] == "unchanged"
+    assert applied["metadataRevision"] == "m2" and applied["metadata"] == remote
+    assert applied["sharedFields"] == gallery_sync.shared_fields(remote)
+    if local_view is None:
+        assert "localFields" not in applied
+        assert asset_sync_state({"id": "project", "commit_uuid": "saved"}, applied, remote)["freshness"] == "equal"
+    else:
+        assert applied["localFields"] == {"viewerSettings": local_view}
+    assert not service.snapshot()["jobs"]
+    restarted = gallery_sync.GallerySync(service.account, tmp_path)
+    restarted.refresh()
+    finish(restarted)
+    durable = restarted.snapshot()["links"]["project"]
+    assert {key: value for key, value in durable.items() if key != "checkedAt"} == {
+        key: value for key, value in applied.items() if key != "checkedAt"}
+
+
+@pytest.mark.parametrize("change", ["revision", "file", "link", "account", "transfer", "journal"])
+def test_text_apply_keeps_link_when_guard_fails(tmp_path, monkeypatch, change):
+    service = connected(tmp_path, monkeypatch)
+    base = dict(id="remote", title="Scene", description="Before", viewerSettings={},
+                contentRevision="c1", metadataRevision="m1")
+    remote = dict(base, description="Changed in portal", metadataRevision="m2")
+    latest = dict(remote)
+    monkeypatch.setattr(Client, "scene", lambda *args: latest)
+    path = tmp_path / "project.licht"
+    path.write_bytes(b"saved project")
+    link = gallery_sync.exchange_link(base, "saved")
+    service._bucket()["links"]["project"] = link
+    service._save()
+    reviewed_link = gallery_sync.copy.deepcopy(link)
+    stamp = gallery_sync.file_stamp(path)
+    if change == "revision":
+        latest = dict(remote, metadataRevision="m3")
+    elif change == "file":
+        path.write_bytes(b"changed project")
+    elif change == "link":
+        link["metadataRevision"] = "other-update"
+    elif change == "account":
+        def scene_after_sign_out(*args):
+            service.account.email = "other@example.com"
+            return latest
+        monkeypatch.setattr(Client, "scene", scene_after_sign_out)
+    elif change == "transfer":
+        service._bucket()["jobs"].append(dict(id="pending", project="project", sceneId="remote",
+            path=str(path), message="", kind="upload", status="queued"))
+    else:
+        monkeypatch.setattr(service, "_save", lambda **kwargs: (_ for _ in ()).throw(OSError("journal failed")))
+
+    before_link = gallery_sync.copy.deepcopy(link)
+    service.acknowledge_gallery_text(remote, "project", str(path), stamp, reviewed_link)
+    finish(service)
+    if change == "account":
+        service.account.email = "one@example.com"
+
+    assert service.snapshot()["links"]["project"] == before_link
+    assert service.snapshot()["actionFailure"] is not None
 
 
 def test_gallery_content_keeps_chosen_local_settings_pending(tmp_path, monkeypatch):
