@@ -2575,9 +2575,9 @@ namespace lfs::vis::gui {
             std::uint64_t hash = 0;
             const glm::mat3 rotation = viewport.getRotationMatrix();
             const glm::vec3 translation = viewport.getTranslation();
-            for (size_t i = 0; i < 9; ++i)
+            for (int i = 0; i < 9; ++i)
                 hashCombine(hash, hashQuantizedFloat(rotation[i / 3][i % 3], 1.0e-6f));
-            for (size_t i = 0; i < 3; ++i)
+            for (int i = 0; i < 3; ++i)
                 hashCombine(hash, hashQuantizedFloat(translation[i], 1.0e-6f));
             return hash;
         }
@@ -2590,7 +2590,7 @@ namespace lfs::vis::gui {
             hashCombine(hash, settings.orthographic);
             hashCombine(hash, settings.equirectangular);
             hashCombine(hash, hashFloat(settings.ortho_scale));
-            for (size_t i = 0; i < 3; ++i) {
+            for (int i = 0; i < 3; ++i) {
                 hashCombine(hash, hashFloat(settings.train_camera_color[i]));
                 hashCombine(hash, hashFloat(settings.eval_camera_color[i]));
             }
@@ -4679,10 +4679,6 @@ namespace lfs::vis::gui {
         lfs::python::set_rml_manager(&rmlui_manager_);
         initDevResourceHotReload();
 
-        startup_overlay_.setUserDismissCallback([] {
-            if (UserPreferences::instance().openProjectManagerAtStartup())
-                PanelRegistry::instance().set_panel_enabled("lfs.asset_manager", true);
-        });
         startup_overlay_.init(&rmlui_manager_);
         const bool startup_overlay_enabled = viewer_->options_.show_startup_overlay;
         if (!startup_overlay_enabled) {
@@ -5358,10 +5354,6 @@ namespace lfs::vis::gui {
         reg_panel("native.pie_menu", "Pie Menu",
                   make_panel(PieMenuPanel(&gizmo_manager_)),
                   PanelSpace::ViewportOverlay, 950);
-
-        reg_panel("native.startup_overlay", "Startup Overlay",
-                  make_panel(StartupOverlayPanel(&startup_overlay_, &drag_drop_hovering_)),
-                  PanelSpace::ViewportOverlay, 0);
     }
 
     VulkanViewportPassParams GuiManager::buildVulkanViewportParams(const VkExtent2D extent,
@@ -6296,6 +6288,7 @@ namespace lfs::vis::gui {
         bool progress_overlay_visible = false;
         bool context_menu_open = false;
         bool startup_overlay_blocking = startup_overlay_.blocksUnderlayInput();
+        bool startup_overlay_blocks_pointer = false;
         bool block_underlay_input = startup_overlay_blocking;
         {
             LOG_TIMER_THRESHOLD("gui_render.panel_setup.frame_state", 0.25);
@@ -6304,12 +6297,28 @@ namespace lfs::vis::gui {
             modal_overlay_pending = rml_modal_overlay_->hasPendingRequest();
             progress_overlay_visible = rml_progress_overlay_ && rml_progress_overlay_->isVisible();
             context_menu_open = global_context_menu_ && global_context_menu_->isOpen();
+            if ((modal_overlay_open || modal_overlay_pending) && startup_overlay_.isVisible()) {
+                startup_overlay_.dismiss();
+                startup_overlay_blocking = false;
+            }
+            startup_overlay_blocks_pointer =
+                startup_overlay_.blocksPointerInput(sdl_input.mouse_x, sdl_input.mouse_y);
+            if (startup_overlay_blocks_pointer &&
+                (hasMouseButtonClicked(sdl_input) || hasMouseButtonDown(sdl_input))) {
+                startup_overlay_pointer_capture_active_ = true;
+            }
+            startup_overlay_blocks_pointer =
+                startup_overlay_blocks_pointer || startup_overlay_pointer_capture_active_;
+            if (startup_overlay_pointer_capture_active_ && !hasMouseButtonDown(sdl_input))
+                startup_overlay_pointer_capture_active_ = false;
             block_underlay_input = block_underlay_input || modal_overlay_open || modal_overlay_pending ||
                                    progress_overlay_visible || context_menu_open;
             if (block_underlay_input) {
                 auto& focus = guiFocusState();
                 focus.want_capture_mouse = true;
                 focus.want_capture_keyboard = true;
+            } else if (startup_overlay_blocks_pointer) {
+                guiFocusState().want_capture_mouse = true;
             }
 
             const bool escape_pressed =
@@ -6374,8 +6383,8 @@ namespace lfs::vis::gui {
             localized_rml_language_generation_ = language_generation;
             ui_layout_settle_frames_ = std::max<uint8_t>(ui_layout_settle_frames_, 3);
             if (rmlui_manager_.refreshLocalizedDocuments()) {
-                if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr)
-                    rendering->markDirty(DirtyFlag::OVERLAY);
+                if (auto* const overlay_rendering = viewer_ ? viewer_->getRenderingManager() : nullptr)
+                    overlay_rendering->markDirty(DirtyFlag::OVERLAY);
             }
         }
 
@@ -6429,6 +6438,8 @@ namespace lfs::vis::gui {
             menu_input.screen_h = sdl_input.window_h;
             if (block_underlay_input)
                 menu_input = maskInputForBlockedUi(std::move(menu_input));
+            else if (startup_overlay_blocks_pointer)
+                menu_input = maskPointerInputForUnderlay(std::move(menu_input));
 
             if (block_underlay_input && rml_menu_bar_.isOpen())
                 rml_menu_bar_.closeDropdown();
@@ -6474,7 +6485,7 @@ namespace lfs::vis::gui {
                 startup_overlay_input = maskInputForBlockedUi(std::move(startup_overlay_input));
             if (startup_overlay_blocking)
                 frame_input = maskInputForBlockedUi(std::move(frame_input));
-            else if (menu_blocks_underlay_pointer)
+            else if (startup_overlay_blocks_pointer || menu_blocks_underlay_pointer)
                 frame_input = maskPointerInputForUnderlay(std::move(frame_input));
             updateInputOverrides(frame_input, mouse_in_viewport);
             if (auto* const wm = viewer_->getWindowManager()) {
@@ -7656,6 +7667,14 @@ namespace lfs::vis::gui {
                 rml_menu_bar_.setViewportRightEdge(menu_toolbar_right_edge_ - panel_input.screen_x);
                 rml_menu_bar_.draw(panel_input.screen_w, panel_input.screen_h);
             }
+            if (startup_overlay_.isVisible()) {
+                LOG_TIMER_THRESHOLD("gui_render.menu_context_modal_render.startup_overlay", 0.25);
+                startup_overlay_.render(panel_input.screen_x,
+                                        panel_input.screen_y,
+                                        static_cast<float>(panel_input.screen_w),
+                                        static_cast<float>(panel_input.screen_h),
+                                        drag_drop_hovering_);
+            }
             if (global_context_menu_->hasPendingRenderWork()) {
                 LOG_TIMER_THRESHOLD("gui_render.menu_context_modal_render.context_menu", 0.25);
                 global_context_menu_->render(panel_input.screen_w, panel_input.screen_h,
@@ -7903,8 +7922,8 @@ namespace lfs::vis::gui {
             updateInteractiveTransitionGuard();
             if (!first_render_completed_) {
                 first_render_completed_ = true;
-                if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr)
-                    rendering->markDirty(DirtyFlag::OVERLAY);
+                if (auto* const overlay_rendering = viewer_ ? viewer_->getRenderingManager() : nullptr)
+                    overlay_rendering->markDirty(DirtyFlag::OVERLAY);
             }
             return presented;
         }

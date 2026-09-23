@@ -328,10 +328,7 @@ def _build_builtin_panel_steps(lf):
         from .project_manager_preferences import read_preferences
 
         preferences = read_preferences()
-        # When the startup overlay is visible, native UI opens Projects only
-        # after the user dismisses it. If the overlay is disabled, preserve the
-        # same preference by opening the panel as soon as it is registered.
-        if preferences["openAtStartup"] and not lf.ui.is_startup_visible():
+        if preferences["openAtStartup"]:
             lf.ui.set_panel_enabled("lfs.asset_manager", True)
 
     def overlays():

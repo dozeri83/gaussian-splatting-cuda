@@ -810,6 +810,7 @@ namespace lfs::vis {
                  (root / "generated/projection_forward_shn_q16_survivors.spv").string()},
                 {"prepare_visible_chain", (root / "generated/prepare_visible_chain.spv").string()},
                 {"copy_visible_indices", (root / "generated/copy_visible_indices.spv").string()},
+                {"prepare_stable_depth_sort", (root / "generated/prepare_stable_depth_sort.spv").string()},
                 {"cumsum_block_scan_indirect",
                  (root / "generated/cumsum_block_scan_indirect.spv").string()},
                 {"cumsum_scan_block_sums_indirect",
@@ -2033,6 +2034,10 @@ namespace lfs::vis {
             uniforms.shN_layout_slots = shN_layout_slots;
             uniforms.camera_model = packedVksplatCameraModel(frame_view, equirectangular, gut);
             uniforms.mip_filter = mip_filter ? 1u : 0u;
+            uniforms.rasterization_scale =
+                std::isfinite(frame_view.rasterization_scale) && frame_view.rasterization_scale > 0.0f
+                    ? frame_view.rasterization_scale
+                    : 1.0f;
 
             const auto intrinsics = frame_view.getCameraIntrinsics();
             uniforms.fx = intrinsics.focal_x;
@@ -6276,11 +6281,11 @@ namespace lfs::vis {
                         return std::unexpected(
                             "VkSplat q16/f16 SH requires a non-zero shN buffer device address");
                     }
-                    const auto n = splat_data.size();
+                    const auto splat_count = splat_data.size();
                     const auto rest = static_cast<std::uint32_t>(splat_data.max_sh_coeffs_rest());
                     const std::size_t need_bytes = layout->shN_q16
-                                                       ? lfs::core::sh_value_quant::sh_value_u16_count(n, rest) * 2u
-                                                       : lfs::core::sh_swizzled_f16_byte_count(n, rest);
+                                                       ? lfs::core::sh_value_quant::sh_value_u16_count(splat_count, rest) * 2u
+                                                       : lfs::core::sh_swizzled_f16_byte_count(splat_count, rest);
                     if (need_bytes > buffers_.shN_committed_bytes) {
                         return std::unexpected(std::format(
                             "VkSplat shN BDA region is smaller than the live index footprint: "
@@ -9565,7 +9570,8 @@ namespace lfs::vis {
         const lfs::rendering::ViewportRenderRequest& request,
         const bool force_input_upload,
         const OutputSlot output_slot,
-        const bool synchronize_input_upload) {
+        const bool synchronize_input_upload,
+        const bool deterministic_export) {
         const glm::ivec2 size = request.frame_view.size;
         if (size.x <= 0 || size.y <= 0) {
             return std::unexpected("VkSplat received an invalid viewport size");
@@ -10131,8 +10137,24 @@ namespace lfs::vis {
         if (request.depth_view) {
             uniforms.mip_filter |= 2u;
         }
-        const bool higs_warmup_frame = higs_candidate && macro_chain_warmup_pending_;
+        // Synchronous exports use the exact instance-count gate and must keep
+        // the same raster chain across every band, including a cold first band.
+        // Interactive viewport and sequencer previews retain their warmup.
+        const bool higs_warmup_frame = higs_candidate && macro_chain_warmup_pending_ &&
+                                       !deterministic_export;
         const bool higs_active = higs_candidate && !higs_warmup_frame;
+        if ((higs_active || request.gut) && output_slot == OutputSlot::Preview &&
+            request.frame_view.subregion_full_size.y > 0) {
+            // Keep projection and coverage decisions in full-image coordinates.
+            // HiGS also retains the full grid: repartitioning its depth waves
+            // per band changes half-precision blending and median depth.
+            uniforms.mip_filter |= 4u;
+            if (higs_active) {
+                uniforms.grid_width = _CEIL_DIV(uniforms.camera_width, TILE_WIDTH);
+                uniforms.grid_height = _CEIL_DIV(uniforms.camera_height, TILE_HEIGHT);
+            }
+        }
+        renderer_.setBandedExport((uniforms.mip_filter & 4u) != 0u);
         // Capture forces the non-batched per-pixel rasterizer (full pixel_depth
         // coverage); the batched compose only writes a subset of pixels.
         renderer_.setDepthCapture(depth_capture_mode_);
@@ -10460,7 +10482,8 @@ namespace lfs::vis {
                 if (higs_active) {
                     {
                         LOG_TIMER("vksplat.render.record.executeSortPrimitivesByDepth");
-                        renderer_.executeSortPrimitivesByDepthVisible(uniforms, buffers_, visible_capacity);
+                        renderer_.executeSortPrimitivesByDepthVisible(uniforms, buffers_, visible_capacity,
+                                                                      deterministic_export);
                     }
                     {
                         LOG_TIMER("vksplat.render.record.executeMacroCoverage");

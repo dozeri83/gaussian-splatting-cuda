@@ -250,9 +250,9 @@ namespace lfs::vis::project {
             const glm::mat3& value) {
             std::array<float, 9> result{};
             std::size_t index = 0;
-            for (std::size_t column = 0;
+            for (int column = 0;
                  column < 3; ++column) {
-                for (std::size_t row = 0;
+                for (int row = 0;
                      row < 3; ++row) {
                     result[index++] =
                         value[column][row];
@@ -265,9 +265,9 @@ namespace lfs::vis::project {
             const std::array<float, 9>& value) {
             glm::mat3 result{1.0f};
             std::size_t index = 0;
-            for (std::size_t column = 0;
+            for (int column = 0;
                  column < 3; ++column) {
-                for (std::size_t row = 0;
+                for (int row = 0;
                      row < 3; ++row) {
                     result[column][row] =
                         value[index++];
@@ -314,7 +314,7 @@ namespace lfs::vis::project {
         template <typename Owner, typename Member>
         JsonField<Owner> required_field(
             const std::string_view name,
-            Member Owner::*member) {
+            Member Owner::* member) {
             return {
                 .name = name,
                 .write = [member](const Owner& source) { return Json(source.*member); },
@@ -333,7 +333,7 @@ namespace lfs::vis::project {
         template <typename Owner, typename Member>
         JsonField<Owner> optional_field(
             const std::string_view name,
-            Member Owner::*member) {
+            Member Owner::* member) {
             return {
                 .name = name,
                 .write = [member](const Owner& source) { return Json(source.*member); },
@@ -351,7 +351,7 @@ namespace lfs::vis::project {
         template <typename Owner>
         JsonField<Owner> vec3_field(
             const std::string_view name,
-            glm::vec3 Owner::*member) {
+            glm::vec3 Owner::* member) {
             return {
                 .name = name,
                 .write = [member](const Owner& source) { return vec3_json(source.*member); },
@@ -375,7 +375,7 @@ namespace lfs::vis::project {
                   typename AfterAssign = std::nullptr_t>
         JsonField<Owner> enum_field(
             const std::string_view name,
-            Enum Owner::*member,
+            Enum Owner::* member,
             const int minimum,
             const int maximum,
             const std::string_view invalid_detail,
@@ -467,7 +467,7 @@ namespace lfs::vis::project {
         template <typename Owner, std::size_t Size>
         JsonField<Owner> array_field(
             const std::string_view name,
-            std::array<float, Size> Owner::*member) {
+            std::array<float, Size> Owner::* member) {
             return custom_field<Owner>(
                 name,
                 [member](const Owner& source) {
@@ -503,7 +503,7 @@ namespace lfs::vis::project {
         template <typename Owner>
         JsonField<Owner> nullable_positive_float_field(
             const std::string_view name,
-            std::optional<float> Owner::*member) {
+            std::optional<float> Owner::* member) {
             return custom_field<Owner>(
                 name,
                 [member](const Owner& source) {
@@ -1693,7 +1693,7 @@ namespace lfs::vis::project {
             using Panel = gui::PanelProjectState;
             const auto nullable_float = [](
                                             const std::string_view name,
-                                            float Panel::*member) {
+                                            float Panel::* member) {
                 return custom_field<Panel>(
                     name,
                     [member](const Panel& panel) {
@@ -2571,7 +2571,7 @@ namespace lfs::vis::project {
                 retained_uuid;
             if (retained_clips &&
                 retained_clips->is_array()) {
-                const auto retained =
+                const auto retained_clip =
                     std::ranges::find_if(
                         *retained_clips,
                         [&](const Json& item) {
@@ -2582,13 +2582,13 @@ namespace lfs::vis::project {
                                        clip->node_uuid
                                            .to_string();
                         });
-                if (retained !=
+                if (retained_clip !=
                     retained_clips->end()) {
                     const auto reference =
-                        retained->find(
+                        retained_clip->find(
                             "directory_reference_uuid");
                     if (reference !=
-                            retained->end() &&
+                            retained_clip->end() &&
                         reference->is_string()) {
                         retained_uuid =
                             lfs::core::Uuid::

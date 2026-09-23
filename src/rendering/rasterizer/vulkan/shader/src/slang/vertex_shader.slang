@@ -901,10 +901,24 @@ void main(
 
     // projection (differentiable)
     // forward
+    // Project in the source viewport's pixel units so fixed dilation and the
+    // 512-pixel covariance cap do not shrink splats in high-resolution exports.
+    // Rescale the footprint before binning into the full-resolution tile grid.
+    const float rasterization_scale = uniforms.rasterization_scale > 0.0f
+        ? uniforms.rasterization_scale : 1.0f;
+    Camera projection_cam = cam;
+    if (rasterization_scale != 1.0f) {
+        projection_cam.fx /= rasterization_scale;
+        projection_cam.fy /= rasterization_scale;
+        projection_cam.cx /= rasterization_scale;
+        projection_cam.cy /= rasterization_scale;
+        projection_cam.W = max(1, int(round(float(cam.W) / rasterization_scale)));
+        projection_cam.H = max(1, int(round(float(cam.H) / rasterization_scale)));
+    }
   #if LFS_3DGUT_PROJECTION
     Splat_2D_Vertex splat = project_gaussian_to_camera_gut(
         gauss,
-        cam,
+        projection_cam,
         active_sh,
         mean_ws,
         model_transforms,
@@ -916,7 +930,7 @@ void main(
   #else
     Splat_2D_Vertex splat = project_gaussian_to_camera_model(
         gauss,
-        cam,
+        projection_cam,
         active_sh,
         mean_ws,
         model_transforms,
@@ -926,9 +940,17 @@ void main(
         spark_rad_opacity_path,
         uniforms.splat_render_profile == 1u && !spark_rad_opacity_path);
   #endif
-
+    if (rasterization_scale != 1.0f) {
+        const float variance_scale = rasterization_scale * rasterization_scale;
+        splat.xyz_vs.xy = (splat.xyz_vs.xy + 0.5f) * rasterization_scale - 0.5f;
+        splat.cov_vs *= variance_scale;
+        splat.inv_cov_vs_opac.xyz /= variance_scale;
+        splat.det *= variance_scale * variance_scale;
+    }
     // radii, bounds, number of tiles
-    splat.xyz_vs.xy -= float2(uniforms.render_origin_x, uniforms.render_origin_y);
+    if (!full_frame_binning(uniforms)) {
+        splat.xyz_vs.xy -= float2(uniforms.render_origin_x, uniforms.render_origin_y);
+    }
 
     float opacity_threshold = ALPHA_THRESHOLD;
 #if EXPORT_MODE == EXPORT_MODE_VULKAN_FORWARD
@@ -970,11 +992,17 @@ void main(
         radii.y = min(radii.y, 0.49f * float(image_height));
     }
 
+    // GUT keeps a local tile grid, but crops the full-image rectangle only
+    // after choosing its ellipse scan axis. Both count and emission use it.
+    const bool banded_gut = full_frame_binning(uniforms) && is_gut_projection_mode(uniforms.camera_model);
+    const uint bin_grid_width = banded_gut ? (camera_width + TILE_WIDTH - 1u) / TILE_WIDTH : grid_width;
+    const uint bin_grid_height = banded_gut ? (camera_height + TILE_HEIGHT - 1u) / TILE_HEIGHT : grid_height;
     rectangle rect_tile_space = equirectangular_camera
         ? get_wrapped_rectangle_tile_space(splat_dist.xyz_vs.xy, radii, grid_height, grid_width)
-        : get_rectangle_tile_space(splat_dist.xyz_vs.xy, radii, grid_height, grid_width);
+        : get_rectangle_tile_space(splat_dist.xyz_vs.xy, radii, bin_grid_height, bin_grid_width);
+    const rectangle render_rect = banded_gut ? clip_to_render_grid(rect_tile_space, uniforms) : rect_tile_space;
 
-    int32_t n_tiles = int32_t(rect_tile_space.max_x - rect_tile_space.min_x) * int32_t(rect_tile_space.max_y - rect_tile_space.min_y);
+    int32_t n_tiles = int32_t(render_rect.max_x - render_rect.min_x) * int32_t(render_rect.max_y - render_rect.min_y);
     if (n_tiles == 0) {
         #if !LFS_PROJECTION_SURVIVORS
             clear_forward_projection_output(out_idx, overlay_flags, uniforms.lod_enabled);
@@ -986,7 +1014,8 @@ void main(
     if (!equirectangular_camera) {
         n_tiles = no_diff count_ellipse_grid_overlaps(
             splat_dist.xyz_vs.xy, splat_dist.inv_cov_vs_opac.xyz/(extend*extend),
-            rect_tile_space
+            render_rect,
+            rect_tile_space.max_y - rect_tile_space.min_y <= rect_tile_space.max_x - rect_tile_space.min_x
         );
     }
   #endif

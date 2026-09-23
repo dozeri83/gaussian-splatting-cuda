@@ -383,7 +383,8 @@ namespace lfs::io {
             const auto scaled = lfs::core::scale_undistort_params(
                 *params.undistort,
                 static_cast<int>(tensor.shape()[2]),
-                static_cast<int>(tensor.shape()[1]));
+                static_cast<int>(tensor.shape()[1]),
+                params.max_width);
             tensor = lfs::core::undistort_image(tensor, scaled, nullptr);
 
             if (restore_uint8) {
@@ -1387,7 +1388,7 @@ namespace lfs::io {
             decoded.ptr<float>(), normal.ptr<float>(), height, width,
             static_cast<cudaStream_t>(cuda_stream));
         normal.set_stream(static_cast<cudaStream_t>(cuda_stream));
-        return lfs::core::resize_normal_prior(normal, height, width, static_cast<cudaStream_t>(cuda_stream));
+        return lfs::core::resize_normal_prior(normal, static_cast<int>(height), static_cast<int>(width), static_cast<cudaStream_t>(cuda_stream));
     }
 
     cudaEvent_t PipelinedImageLoader::record_sidecar_ready_event(cudaStream_t stream) {
@@ -2708,7 +2709,8 @@ namespace lfs::io {
                             rgb = rgb.to(lfs::core::DataType::Float32) / 255.0f;
                         }
                         const auto scaled = lfs::core::scale_undistort_params(
-                            *item.undistort, static_cast<int>(W), static_cast<int>(H));
+                            *item.undistort, static_cast<int>(W), static_cast<int>(H),
+                            item.params.max_width);
                         rgb = lfs::core::undistort_image(rgb, scaled, nullptr);
                         alpha = lfs::core::undistort_mask(alpha, scaled, nullptr);
                         if (restore_uint8) {
@@ -2844,7 +2846,8 @@ namespace lfs::io {
                     if (item.undistort) {
                         const auto scaled = lfs::core::scale_undistort_params(
                             *item.undistort,
-                            static_cast<int>(W), static_cast<int>(H));
+                            static_cast<int>(W), static_cast<int>(H),
+                            item.params.max_width);
                         aux_tensor = lfs::core::undistort_mask(aux_tensor, scaled, aux_stream);
                     }
 
@@ -2975,9 +2978,10 @@ namespace lfs::io {
                         const auto scaled = lfs::core::scale_undistort_params(
                             *item.undistort,
                             static_cast<int>(normal_tensor.shape()[2]),
-                            static_cast<int>(normal_tensor.shape()[1]));
+                            static_cast<int>(normal_tensor.shape()[1]),
+                            item.params.max_width);
                         normal_tensor = lfs::core::undistort_image(normal_tensor, scaled, sidecar_stream);
-                        normal_tensor = lfs::core::resize_normal_prior(normal_tensor.contiguous(), normal_tensor.shape()[1], normal_tensor.shape()[2], sidecar_stream);
+                        normal_tensor = lfs::core::resize_normal_prior(normal_tensor.contiguous(), static_cast<int>(normal_tensor.shape()[1]), static_cast<int>(normal_tensor.shape()[2]), sidecar_stream);
                     }
 
                     if (item.aux_target_width > 0 && item.aux_target_height > 0 &&
@@ -3031,7 +3035,8 @@ namespace lfs::io {
                         const auto scaled = lfs::core::scale_undistort_params(
                             *item.undistort,
                             static_cast<int>(decoded.shape()[2]),
-                            static_cast<int>(decoded.shape()[1]));
+                            static_cast<int>(decoded.shape()[1]),
+                            item.params.max_width);
                         decoded = lfs::core::undistort_image(decoded, scaled, nullptr);
                         if (restore_uint8) {
                             auto uint8_decoded = lfs::core::Tensor::empty(

@@ -535,7 +535,7 @@ namespace lfs::io::project::detail {
         }
         return static_cast<std::uint64_t>(size.QuadPart);
 #else
-        struct stat status {};
+        struct stat status{};
         if (::fstat(fd_, &status) != 0 || status.st_size < 0) {
             const int error = errno;
             return project_error(native_error_code(error, false),
@@ -826,7 +826,7 @@ namespace lfs::io::project::detail {
 #ifndef _WIN32
     lfs::Result<bool> writer_lock_fd_matches_path(
         const int fd, const std::filesystem::path& lock_path) {
-        struct stat fd_status {};
+        struct stat fd_status{};
         if (::fstat(fd, &fd_status) != 0) {
             const int error = errno;
             return project_error(
@@ -835,7 +835,7 @@ namespace lfs::io::project::detail {
                 std::format("lockfile fstat failed: {}", std::strerror(error)), lock_path,
                 std::nullopt, "writer_lock", error, std::strerror(error));
         }
-        struct stat path_status {};
+        struct stat path_status{};
         if (::stat(lock_path.c_str(), &path_status) != 0 ||
             fd_status.st_dev != path_status.st_dev ||
             fd_status.st_ino != path_status.st_ino) {
@@ -890,12 +890,12 @@ namespace lfs::io::project::detail {
             OVERLAPPED operation{};
             const DWORD flags = LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY;
             if (!LockFileEx(handle, flags, 0, 1, 0, &operation)) {
-                const DWORD error = GetLastError();
+                const DWORD lock_error = GetLastError();
                 CloseHandle(handle);
                 return project_error(
                     lfs::ErrorCode::Unavailable, "The project is already open for writing.",
-                    std::format("LockFileEx denied the held lock with Windows error {}", error),
-                    lock_path, std::nullopt, "writer_lock", static_cast<std::int64_t>(error),
+                    std::format("LockFileEx denied the held lock with Windows error {}", lock_error),
+                    lock_path, std::nullopt, "writer_lock", static_cast<std::int64_t>(lock_error),
                     "Win32");
             }
             WriterLock result(lock_path, handle);

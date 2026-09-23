@@ -103,7 +103,7 @@ PACK_STRUCT(struct VulkanGSRendererUniforms {
     float color_exposure;
     uint32_t color_tonemapping;
     uint32_t splat_render_profile;
-    uint32_t color_padding;
+    float rasterization_scale;
 });
 static_assert(sizeof(VulkanGSRendererUniforms) == 208);
 static_assert(offsetof(VulkanGSRendererUniforms, shN_address) % 8 == 0);
@@ -297,7 +297,8 @@ public:
     // prepare_visible_chain fan-out + indirect depth sort + sorted-id snapshot.
     void executeSortPrimitivesByDepthVisible(const VulkanGSRendererUniforms& uniforms,
                                              VulkanGSPipelineBuffers& buffers,
-                                             size_t visible_capacity);
+                                             size_t visible_capacity,
+                                             bool deterministic_ties = false);
     // Per depth rank: conservative macro-tile coverage count, written in rank
     // order (combines the legacy apply-depth-ordering reorder with the
     // macro-granularity coverage). Feeds the visible-bounded cumsum.
@@ -470,6 +471,7 @@ protected:
         2));
     _ComputePipeline pipeline_prepare_visible_chain = _ComputePipeline(4);
     _ComputePipeline pipeline_copy_visible_indices = _ComputePipeline(3);
+    _ComputePipeline pipeline_prepare_stable_depth_sort = _ComputePipeline(6);
     struct _CumsumIndirectComputePipeline {
         _ComputePipeline block_scan = _ComputePipeline(4);
         _ComputePipeline scan_block_sums = _ComputePipeline(4);

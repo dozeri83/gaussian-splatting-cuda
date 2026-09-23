@@ -538,23 +538,23 @@ namespace lfs::io::project {
         try {
             impl->snapshot = std::make_unique<lfs::core::SplatData>(
                 std::move(cloned));
-            if (const auto status = has_cuda_tensor ? cudaEventCreateWithFlags(
-                                                          &impl->ready, cudaEventDisableTiming)
-                                                    : cudaSuccess;
-                status != cudaSuccess) {
+            if (const auto create_status = has_cuda_tensor ? cudaEventCreateWithFlags(
+                                                                 &impl->ready, cudaEventDisableTiming)
+                                                           : cudaSuccess;
+                create_status != cudaSuccess) {
                 return splat_error(
                     lfs::ErrorCode::ResourceExhausted,
                     "The splat snapshot event could not be created.",
                     std::format("CUDA event creation failed: {}",
-                                cudaGetErrorString(status)));
+                                cudaGetErrorString(create_status)));
             }
-            if (const auto status = has_cuda_tensor ? cudaEventRecord(impl->ready, impl->stream) : cudaSuccess;
-                status != cudaSuccess) {
+            if (const auto record_status = has_cuda_tensor ? cudaEventRecord(impl->ready, impl->stream) : cudaSuccess;
+                record_status != cudaSuccess) {
                 return splat_error(
-                    lfs::core::cuda_status_to_error_code(status),
+                    lfs::core::cuda_status_to_error_code(record_status),
                     "The splat snapshot could not be queued.",
                     std::format("CUDA event record failed: {}",
-                                cudaGetErrorString(status)));
+                                cudaGetErrorString(record_status)));
             }
         } catch (const std::bad_alloc& error) {
             return splat_error(

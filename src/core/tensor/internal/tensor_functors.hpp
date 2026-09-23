@@ -86,12 +86,14 @@ namespace lfs::core {
         // only bases 1 and -1 keep a nonzero result.
         template <typename T>
         HOST_DEVICE constexpr T integer_pow(const T base, const T exponent) {
-            if (exponent < T(0)) {
-                if (base == T(1))
-                    return T(1);
-                if (base == T(-1))
-                    return (exponent % T(2)) != T(0) ? T(-1) : T(1);
-                return T(0);
+            if constexpr (std::is_signed_v<T>) {
+                if (exponent < T(0)) {
+                    if (base == T(1))
+                        return T(1);
+                    if (base == T(-1))
+                        return (exponent % T(2)) != T(0) ? T(-1) : T(1);
+                    return T(0);
+                }
             }
             unsigned long long result = 1ull;
             unsigned long long factor = static_cast<unsigned long long>(static_cast<long long>(base));
