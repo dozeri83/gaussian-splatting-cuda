@@ -4,6 +4,7 @@
 
 #include "spz.hpp"
 #include "coordinate-system-adobe.h"
+#include "core/error.hpp"
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
 #include "core/provenance.hpp"
@@ -321,14 +322,29 @@ namespace lfs::io {
             });
         }
 
-        glm::dmat4 glb_node_matrix(const nlohmann::json& node) {
+        lfs::Error glb_error(std::string message) {
+            return lfs::make_error(lfs::ErrorInit{
+                .code = lfs::ErrorCode::DataLoss,
+                .domain = lfs::ErrorDomain::IO,
+                .detail = std::move(message),
+                .detection = LFS_SOURCE_SITE_CURRENT(),
+            });
+        }
+
+        lfs::Result<glm::dmat4> glb_node_matrix(const nlohmann::json& node) {
             if (node.contains("matrix")) {
                 const auto m = node["matrix"].get<std::vector<double>>();
-                return m.size() == 16 ? glm::make_mat4(m.data()) : glm::dmat4(1.0);
+                if (m.size() != 16) {
+                    return glb_error("GLB node matrix must have 16 values");
+                }
+                return glm::dmat4(glm::make_mat4(m.data()));
             }
             const auto t = node.value("translation", std::vector<double>{0, 0, 0});
             const auto r = node.value("rotation", std::vector<double>{0, 0, 0, 1});
             const auto s = node.value("scale", std::vector<double>{1, 1, 1});
+            if (t.size() != 3 || r.size() != 4 || s.size() != 3) {
+                return glb_error("GLB node translation, rotation and scale must have 3, 4 and 3 values");
+            }
             glm::dmat4 matrix = glm::mat4_cast(glm::dquat(r[3], r[0], r[1], r[2]));
             matrix[0] *= s[0];
             matrix[1] *= s[1];
@@ -337,14 +353,14 @@ namespace lfs::io {
             return matrix;
         }
 
-        std::expected<GlbSpz, std::string> read_glb_spz(const std::vector<uint8_t>& glb) {
+        lfs::Result<GlbSpz> read_glb_spz(const std::vector<uint8_t>& glb) {
             uint32_t header[3] = {};
             if (glb.size() < sizeof(header)) {
-                return std::unexpected("truncated GLB header");
+                return glb_error("truncated GLB header");
             }
             std::memcpy(header, glb.data(), sizeof(header));
             if (header[0] != GLB_MAGIC || header[1] != 2) {
-                return std::unexpected("not a glTF 2.0 binary");
+                return glb_error("not a glTF 2.0 binary");
             }
 
             nlohmann::json doc;
@@ -354,7 +370,7 @@ namespace lfs::io {
                 std::memcpy(chunk, glb.data() + offset, sizeof(chunk));
                 offset += sizeof(chunk);
                 if (chunk[0] > glb.size() - offset) {
-                    return std::unexpected("truncated GLB chunk");
+                    return glb_error("truncated GLB chunk");
                 }
                 if (chunk[1] == GLB_CHUNK_JSON) {
                     doc = nlohmann::json::parse(glb.begin() + offset, glb.begin() + offset + chunk[0]);
@@ -376,7 +392,7 @@ namespace lfs::io {
                     const auto view_length = view.at("byteLength").get<size_t>();
                     if (view.value("buffer", 0) != 0 || view_offset > bin.size() ||
                         view_length > bin.size() - view_offset) {
-                        return std::unexpected("SPZ buffer view is outside the embedded GLB buffer");
+                        return glb_error("SPZ buffer view is outside the embedded GLB buffer");
                     }
 
                     GlbSpz result;
@@ -385,14 +401,18 @@ namespace lfs::io {
                                               .value("colorSpace", "") == "lin_rec709_display";
                     for (const auto& node : doc.value("nodes", nlohmann::json::array())) {
                         if (node.value("mesh", -1) == static_cast<int>(mesh)) {
-                            result.transform = glm::mat4(GLB_Y_UP_TO_Z_UP * glb_node_matrix(node));
+                            auto node_matrix = glb_node_matrix(node);
+                            if (!node_matrix) {
+                                return std::move(node_matrix).error();
+                            }
+                            result.transform = glm::mat4(GLB_Y_UP_TO_Z_UP * *node_matrix);
                             break;
                         }
                     }
                     return result;
                 }
             }
-            return std::unexpected(std::format("no primitive uses {}", GLB_SPZ_EXTENSION));
+            return glb_error(std::format("no primitive uses {}", GLB_SPZ_EXTENSION));
         }
 
         // Recenters positions and picks fractional bits so the extent fits the 24-bit fixed point.
@@ -541,7 +561,7 @@ namespace lfs::io {
                 auto glb = read_glb_spz(data);
                 if (!glb) {
                     return std::unexpected(std::format(
-                        "Failed to load {} file '{}': {}", format_name, lfs::core::path_to_utf8(filepath), glb.error()));
+                        "Failed to load {} file '{}': {}", format_name, lfs::core::path_to_utf8(filepath), glb.error().detail()));
                 }
                 data = std::move(glb->spz);
                 glb_transform = glb->transform;
