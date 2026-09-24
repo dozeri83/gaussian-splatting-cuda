@@ -144,6 +144,83 @@ FIXTURES = Path(__file__).parents[1] / "data"
 NATIVE_SPZ = Path(__file__).parents[1] / "data" / "spz"
 
 
+def test_gallery_publishing_corpus():
+    expected = json.loads((FIXTURES / 'gallery_publishing' / 'expected.json').read_text())
+    messages = {
+        'history': 'Project history is excluded',
+        'training': 'Training sources',
+        'unreferenced_asset': 'Unreferenced embedded assets',
+        'degree': 'Published lighting detail exceeds',
+        'unreferenced_member': 'Unreferenced files',
+        'license_size': 'license exceeds 64 KiB',
+        'compressed_texture': 'Invalid portable LichtFeld project',
+        'manifest_count': 'Invalid portable LichtFeld project',
+        'spz_flags': 'SPZ flags are invalid',
+        'spz_extension': 'SPZ coordinate extension is invalid',
+        'spz_version': 'container version 4',
+        'spz_legacy': 'Not an SPZ payload',
+    }
+    for name, item in expected.items():
+        data = (FIXTURES / 'gallery_publishing' / name).read_bytes()
+        if item.get('reason') == 'compressed_texture':
+            with ZipFile(io.BytesIO(data)) as archive:
+                assert archive.getinfo('texture.webp').compress_type == ZIP_DEFLATED
+        if item.get('reason') == 'manifest_count':
+            with ZipFile(io.BytesIO(data)) as archive:
+                assert json.loads(archive.read('meta.json'))['count'] != 1
+
+        def validate():
+            suffix = name.rsplit('.', 1)[1]
+            stream = io.BytesIO(data)
+            if suffix == 'licht':
+                project = codec.ProjectFile(stream)
+                assert project.manifest['format'] == 'lichtfeld-gallery'
+                for index in range(len(project.manifest['nodes'])):
+                    project.copy_node(index, io.BytesIO())
+                if 'environment' in project.manifest:
+                    project.copy_environment(io.BytesIO())
+            elif suffix == 'spz':
+                codec.validate_spz(codec.SliceReader(stream, 0, len(data)), 64)
+            else:
+                codec.validate_compressed(codec.SliceReader(stream, 0, len(data)), suffix, 1)
+
+        with unittest.TestCase().subTest(name=name):
+            if item['verdict'] == 'accept':
+                validate()
+            else:
+                try:
+                    validate()
+                except ValueError as error:
+                    assert messages[item['reason']] in str(error), name
+                else:
+                    raise AssertionError(f'{name} unexpectedly accepted')
+
+
+def test_gallery_publishing_zip_timestamps_are_fixed():
+    corpus = FIXTURES / 'gallery_publishing'
+    for name in ('license_case.sog', 'valid_ssog_license.licht'):
+        if name.endswith('.licht'):
+            project = codec.ProjectFile(io.BytesIO((corpus / name).read_bytes()))
+            output = io.BytesIO()
+            project.copy_node(0, output)
+            stream = output
+        else:
+            stream = corpus / name
+        with ZipFile(stream) as archive:
+            for member in archive.infolist():
+                assert member.date_time == (1980, 1, 1, 0, 0, 0)
+
+
+def test_gallery_publishing_compressed_projects_keep_native_textures():
+    corpus = FIXTURES / 'gallery_publishing'
+    for name in ('valid_sog_environment.licht', 'valid_ssog_license.licht'):
+        project = codec.ProjectFile(io.BytesIO((corpus / name).read_bytes()))
+        output = io.BytesIO()
+        project.copy_node(0, output)
+        with ZipFile(io.BytesIO(output.getvalue())) as archive:
+            assert any(member.endswith('.webp') for member in archive.namelist()), name
+
+
 def _validate(payload, count):
     return codec.validate_spz(codec.SliceReader(io.BytesIO(payload), 0, len(payload)), count)
 
