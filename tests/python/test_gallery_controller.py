@@ -265,6 +265,27 @@ def test_update_link_failure_reports_already_saved_project(gallery, monkeypatch,
         panel._finish_local_update(job)
     assert actions == ["project saved"] and update["phase"] == "linking"
 
+
+@pytest.mark.parametrize("suffix", [".sog", ".ssog"])
+def test_gallery_update_rejects_raw_splat_stage(gallery, monkeypatch, tmp_path, suffix):
+    panel, state, _ = gallery
+    module = import_module("lfs_plugins.gallery_controller")
+    project = ("project", str(tmp_path / "current.licht"))
+    update = {"project": project, "phase": "staging", "stage_id": "stage"}
+    job = {"id": "download", "_update": update}
+    state["jobs"] = [{"id": "download", "stagedImport": {
+        "id": "stage", "state": "ready", "path": str(tmp_path / ("download" + suffix))}}]
+    calls = []
+    monkeypatch.setattr(panel, "_project_identity", lambda: project)
+    monkeypatch.setattr(module.lf, "get_scene", lambda: SimpleNamespace(get_node=lambda _: None), raising=False)
+    monkeypatch.setattr(module.lf, "load_file", lambda path: calls.append(path), raising=False)
+
+    with pytest.raises(ValueError, match="downloaded project identity or path changed"):
+        panel._finish_local_update(job)
+
+    assert not calls
+
+
 @pytest.mark.parametrize("outcome", ["success", "edited", "generation", "project", "account", "failed"])
 def test_update_final_save_links_only_its_clean_committed_project(gallery, monkeypatch, outcome):
     panel, state, actions = gallery
@@ -1880,6 +1901,65 @@ def test_enter_on_conflict_action_does_not_publish(gallery, monkeypatch, action,
     event = SimpleNamespace(get_parameter=lambda *args: str(KI_RETURN), target=lambda: target, stop_propagation=lambda: None)
     doc.listeners["keydown"](event)
     assert calls == [expected]
+
+
+def test_enter_in_gallery_description_keeps_editing_but_title_submits(gallery, monkeypatch):
+    from lfs_plugins.gallery_file_panel import GalleryFilePanel
+    from lfs_plugins.rml_keys import KI_RETURN
+    from test_asset_manager_panel import _Document, _Element
+    module = import_module("lfs_plugins.gallery_file_panel")
+    monkeypatch.setattr(module.lf.ui, "get_panel_object", lambda _: None, raising=False)
+    monkeypatch.setattr(module.lf.ui, "request_redraw", lambda: None, raising=False)
+    panel = GalleryFilePanel()
+    calls = []
+    panel._submit = lambda **kw: calls.append(("submit", kw))
+    panel._close = lambda _: calls.append(("close",))
+    description = _Element({"tag_name": "textarea"})
+    doc = _Document({"gallery-file-description": description})
+    panel.on_mount(doc)
+
+    # RmlUi delivers Return from the focused textarea's internal widget as a div.
+    description.listeners["focus"](None)
+    textarea = SimpleNamespace(tag_name="div", get_attribute=lambda *_: "")
+    textarea_event = SimpleNamespace(
+        get_parameter=lambda *args: str(KI_RETURN), target=lambda: textarea,
+        stop_propagation=lambda: calls.append(("stopped",)),
+    )
+    doc.listeners["keydown"](textarea_event)
+    assert calls == []
+
+    description.listeners["blur"](None)
+    title = SimpleNamespace(tag_name="input", get_attribute=lambda *_: "")
+    title_event = SimpleNamespace(
+        get_parameter=lambda *args: str(KI_RETURN), target=lambda: title,
+        stop_propagation=lambda: calls.append(("stopped",)),
+    )
+    doc.listeners["keydown"](title_event)
+    assert calls == [("submit", {}), ("stopped",)]
+
+
+def test_publish_preserves_gallery_description_text_exactly(gallery, monkeypatch):
+    from lfs_plugins.gallery_file_panel import GalleryFilePanel
+    module = import_module("lfs_plugins.gallery_file_panel")
+    monkeypatch.setattr(module.lf.ui, "request_redraw", lambda: None, raising=False)
+    description = 'first line\n"quoted" <tag> & 😀 https://example.com/a?x=1&y=2\n'
+    submitted = []
+    controller = SimpleNamespace(
+        service=SimpleNamespace(identity=lambda: "identity"),
+        publish_asset=lambda asset, fields, *args, **kwargs: submitted.append(fields),
+    )
+    panel = GalleryFilePanel()
+    panel._review = {
+        "controller": controller, "identity": "identity", "action": "publish",
+        "open_project": False, "asset": {"id": "project"}, "publish_new": False,
+    }
+    panel._fields = {"title": "Title", "description": description, "upload_format": "sog"}
+    panel._can_submit = lambda: True
+    panel._close = lambda _submitted: None
+
+    panel._submit()
+
+    assert submitted[0]["description"] == description
 
 
 def test_pull_keeps_remote_snapshot_separate_from_local_choices(gallery, monkeypatch, tmp_path):

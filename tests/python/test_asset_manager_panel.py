@@ -910,6 +910,51 @@ def test_project_filters_use_catalog_inspection_for_unselected_projects(panel_mo
         panel._active_filter = active
         assert [row["id"] for row in panel.get_filtered_assets()] == [checkpoint["id"]]
 
+
+def test_filter_menu_names_the_all_option_as_a_clear_action(panel_module):
+    panel = panel_module.AssetManagerPanel()
+    panel._active_filter = "missing"
+
+    panel.open_filter_menu()
+
+    menu = panel_module.lf._test_state.context_menus[-1]
+    assert menu["items"][0] == {"label": "projects.filter.clear", "action": "all"}
+    menu["on_action"]("all")
+    assert panel._active_filter == "all"
+
+    panel.open_view_menu()
+    view_menu = panel_module.lf._test_state.context_menus[-1]
+    assert any(
+        item.get("label") == "projects.filter.clear" and item.get("action") == "filter:all"
+        for item in view_menu["items"]
+    )
+    assert panel.get_filter_label() == "projects.toolbar.filter"
+
+    resources = Path(__file__).resolve().parents[2] / "src/visualizer/gui/rmlui/resources"
+    rml = (resources / "asset_manager.rml").read_text()
+    assert 'data-attr-title="active_filter_label"' in rml
+    assert '<span class="asset-button-text">{{filter_menu_label}}</span>' in rml
+
+
+def test_filter_summary_explains_empty_results_with_scope_count_and_filter(panel_module, monkeypatch):
+    panel, _local, _remote = _gallery_fixture(panel_module)
+    panel._selected_folder_id = "default"
+    panel._active_filter = "missing"
+    translations = {
+        "projects.filter.missing": "Missing files",
+        "projects.status.showing_filtered_projects.other": (
+            "Showing {count}/{total} projects, filtered by: {filter}"
+        ),
+    }
+    monkeypatch.setattr(panel_module.lf.ui, "tr", lambda key: translations.get(key, key))
+
+    panel._filtered_assets()
+
+    assert panel.get_asset_results_summary() == (
+        "Showing 0/1 projects, filtered by: Missing files"
+    )
+
+
 def test_all_assets_navigation_and_folder_scopes_filter_catalog(panel_module):
     first = _project(name="Bicycle")
     second = _project(
@@ -1962,6 +2007,40 @@ def test_list_gallery_column_stays_a_compact_status_icon(panel_module, monkeypat
     header = root.find('.//div[@class="asset-list-header"]')
     header_columns = [child.get("class") for child in header]
     assert header_columns.index("asset-col asset-col-gallery") == header_columns.index("asset-list-menu-spacer") - 1
+
+def test_gallery_status_is_available_on_icons_without_label_text(panel_module):
+    import xml.etree.ElementTree as ET
+
+    resources = Path(__file__).resolve().parents[2] / "src/visualizer/gui/rmlui/resources"
+    root = ET.fromstring((resources / "asset_manager.rml").read_text())
+    rcss = (resources / "asset_manager.rcss").read_text()
+
+    card = root.find('.//div[@class="asset-card"]')
+    card_state = card.find('.//span[@class="gallery-card-state"]')
+    card_icon = card_state.find('img[@class="gallery-list-icon"]')
+    assert card_icon is not None
+    assert card_icon.get("data-attr-title") == "asset.gallery_tooltip"
+    assert list(card_state) == [card_icon]
+    assert "{{asset.gallery_label}}" not in ET.tostring(card, encoding="unicode")
+
+    row = root.find('.//div[@class="asset-list-row"]')
+    name = row.find('./span[@class="asset-col asset-col-name"]')
+    gallery = row.find('./span[@class="asset-col asset-col-gallery"]')
+    assert name.find('.//span[@class="asset-list-secondary text-muted"]') is None
+    assert gallery.find("img").get("data-attr-title") == "asset.gallery_tooltip"
+    assert "{{asset.gallery_label}}" not in ET.tostring(row, encoding="unicode")
+    assert row.find('.//span[@class="asset-health-badge"]').get("data-attr-title") == "asset.health_label"
+    assert card.find('.//span[@class="asset-health-badge"]').get("data-attr-title") == "asset.health_label"
+    assert row.find('.//span[@class="gallery-activity"]').get("data-attr-title") == "asset.gallery_tooltip"
+    assert card.find('.//span[@class="gallery-activity"]').get("data-attr-title") == "asset.gallery_tooltip"
+    assert row.find('./div[@class="gallery-list-progress gallery-progress"]').get("data-attr-title") == "asset.gallery_tooltip"
+    assert card.find('.//div[@class="gallery-card-transfer"]').get("data-attr-title") == "asset.gallery_tooltip"
+    assert card.find('.//span[@data-if="asset.has_problem"]').text == "{{asset.health_label}}"
+    assert ".asset-scroll-shell-list.gallery-compact .asset-list-row { height: 48dp" not in rcss
+    assert ".asset-list-secondary" not in rcss
+    panel = panel_module.AssetManagerPanel()
+    panel._layout_class = "compact"
+    assert panel._asset_window_viewport_signature(0.0, 100.0, 320.0)[1] == 40.0
 
 def test_sidebar_rows_and_disclosure_activate_from_keyboard(panel_module):
     panel = panel_module.AssetManagerPanel()
@@ -3256,13 +3335,16 @@ def test_gallery_inspector_has_title_description_and_edit_action(panel_module):
 
 
 def test_gallery_inspector_reads_link_and_saves_pending_details(panel_module, monkeypatch):
+    from html.parser import HTMLParser
+
     panel, asset, scene = _gallery_fixture(panel_module)
+    description = 'first line\n"quoted" <tag> & 😀 https://example.com/a?x=1&y=2\n'
     panel._gallery_state["identity"] = "account"
     panel._gallery_state["links"][asset["id"]]["localFields"] = {
-        "title": "Local title", "description": "Local description", "viewerSettings": {"camera": 1}
+        "title": "Local title", "description": description, "viewerSettings": {"camera": 1}
     }
     panel._select_asset_id(asset["id"])
-    assert panel._gallery_details() == {"title": "Local title", "description": "Local description"}
+    assert panel._gallery_details() == {"title": "Local title", "description": description}
     assert panel._can_edit_gallery_details()
     forms = []
     monkeypatch.setattr(panel_module.lf.ui, "form_dialog", lambda *args, **kwargs: forms.append((args, kwargs)), raising=False)
@@ -3272,9 +3354,44 @@ def test_gallery_inspector_reads_link_and_saves_pending_details(panel_module, mo
     panel.open_gallery_details()
     assert 'name="gallery_title"' in forms[-1][0][2]
     assert 'name="gallery_description"' in forms[-1][0][2]
-    panel._read_project_form({"gallery_title": "Edited title", "gallery_description": "Edited description"})
+    markup = forms[-1][0][2]
+
+    class TextareaParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_textarea = False
+            self.value = []
+            self.attributes = {}
+
+        def handle_starttag(self, tag, attrs):
+            self.in_textarea = tag == "textarea"
+            if self.in_textarea:
+                self.attributes = dict(attrs)
+
+        def handle_endtag(self, tag):
+            if tag == "textarea":
+                self.in_textarea = False
+
+        def handle_data(self, value):
+            if self.in_textarea:
+                self.value.append(value)
+
+    parser = TextareaParser()
+    parser.feed(markup)
+    assert parser.attributes["value"] == description
+    assert "".join(parser.value) == ""
+
+    edited = 'edited\n"quotes" < > & 😀 https://example.com/?a=1&b=2\n'
+    panel._read_project_form({"gallery_title": "Edited title", "gallery_description": edited})
     panel.confirm_project_dialog()
-    assert saved == [(asset["id"], "Edited title", "Edited description")]
+    assert saved == [(asset["id"], "Edited title", edited)]
+
+
+def test_gallery_description_textarea_can_scroll_multiline(panel_module):
+    css = (Path(__file__).resolve().parents[2] / "src/visualizer/gui/rmlui/resources/modal_overlay.rcss").read_text()
+    assert ".form-modal .modal-field--multiline textarea" in css
+    assert "max-height: none" in css
+    assert "overflow-y: auto" in css
 
 
 def test_recent_only_gallery_details_need_a_link(panel_module, monkeypatch):
@@ -3359,7 +3476,7 @@ def test_gallery_union_has_one_linked_pair_and_remote_projection(panel_module):
     panel.select_gallery_scope()
     rows = panel._filtered_assets()
     assert {r['id'] for r in rows} == {local['id'],'remote:remote-only'}
-    assert panel.get_all_assets_count() == 1
+    assert panel.get_all_assets_count() == 2
     assert set(panel._asset_index.assets) == {local['id']}
     assert panel._select_asset_id('remote:remote-only')
     panel._repair_selection()
@@ -3367,7 +3484,44 @@ def test_gallery_union_has_one_linked_pair_and_remote_projection(panel_module):
     badge = panel._gallery_badge(panel._asset_dict('remote:remote-only'))
     assert badge['gallery_state'] == 'remote_only' and badge['gallery_action'] == 'pull'
     panel._select_folder_id('__all__')
-    assert [r['id'] for r in panel._filtered_assets()] == [local['id']]
+    assert {r['id'] for r in panel._filtered_assets()} == {local['id'], 'remote:remote-only'}
+
+
+def test_all_projects_scope_includes_gallery_only_rows(panel_module):
+    panel, local, _remote = _gallery_fixture(panel_module)
+
+    assert [row["id"] for row in panel._filtered_assets()] == [local["id"], "remote:remote-only"]
+    assert panel.get_all_assets_count() == 2
+    assert panel.get_local_assets_count() == 1
+
+
+def test_local_projects_scope_keeps_only_local_rows(panel_module):
+    panel, local, _remote = _gallery_fixture(panel_module)
+    assert panel._select_folder_id("__local__") is True
+
+    assert [row["id"] for row in panel._filtered_assets()] == [local["id"]]
+
+
+def test_gallery_only_filter_keeps_only_gallery_rows_without_local_projects(panel_module):
+    panel, _local, _remote = _gallery_fixture(panel_module)
+    panel.select_gallery_scope()
+    panel._active_filter = "gallery"
+
+    assert [row["id"] for row in panel._filtered_assets()] == ["remote:remote-only"]
+
+
+def test_projects_menu_returns_from_gallery_without_resetting_local_scope(panel_module):
+    panel, local, _remote = _gallery_fixture(panel_module)
+    panel.select_gallery_scope()
+    assert panel._selected_folder_id == panel_module.SCOPE_PUBLISHED
+
+    panel.select_projects_scope()
+    assert panel._selected_folder_id == panel_module.SCOPE_ALL
+    assert {asset['id'] for asset in panel._filtered_assets()} == {local['id'], 'remote:remote-only'}
+
+    panel._selected_folder_id = "default"
+    panel.select_projects_scope()
+    assert panel._selected_folder_id == "default"
 
 
 def test_explicit_unlink_hides_catalog_and_origin_associations(panel_module):

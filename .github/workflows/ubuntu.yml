@@ -173,6 +173,24 @@ jobs:
         run: |
           uv run --python 3.12 --no-project --with numpy --with pillow --with pytest python -m pytest -q tests/python/test_scene_reconstruction_benchmark.py
 
+      - name: Install Python test dependencies
+        run: |
+          build/vcpkg_installed/x64-linux/tools/python3/python3.12 -m ensurepip --user
+          build/vcpkg_installed/x64-linux/tools/python3/python3.12 -m pip install --user -r tests/python/requirements-test.txt
+
+      - name: Run CPU Python tests
+        env:
+          CUDA_VISIBLE_DEVICES: ''
+          NVIDIA_VISIBLE_DEVICES: void
+          DISPLAY: ''
+          LFS_TEST_BUILD_DIR: ${{ github.workspace }}/build
+        # The runner has no NVIDIA driver; the toolkit's stub libcuda lets the extension load without a GPU.
+        run: |
+          mkdir -p "$RUNNER_TEMP/cuda-driver-stub"
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/cuda-driver-stub/libcuda.so.1"
+          LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-driver-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            build/vcpkg_installed/x64-linux/tools/python3/python3.12 -m pytest tests/python -m 'not gpu and not slow and not integration' -q
+
   # .clang-tidy is for local/IDE use only here; CI needs compile_commands.json in a later phase.
   error-debt-gate:
     if: github.repository == 'MrNeRF/LichtFeld-Studio' || github.event.pull_request.base.repo.full_name == 'MrNeRF/LichtFeld-Studio'

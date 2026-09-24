@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Portable native projects: a fresh .licht container with embedded splat and HDR assets.
 
-Mirrored in the portal. Only the bounded, stored, single-generation publishing
-subset is admitted here; this is deliberately not a general project importer.
+Only the bounded, stored, single-generation gallery publishing subset is
+admitted here; this is deliberately not a general project importer.
 """
 import hashlib
 import json
@@ -263,7 +263,7 @@ class ProjectFile:
             self._nodes.append(asset)
             manifest_nodes.append({'file': f'nodes/{i:06d}.{extension}', 'count': count, 'shDegree': degree,
                                    'transform': matrix, 'sha256': '', 'bytes': asset['size']})
-        self.manifest = {'version': 1, 'nodes': manifest_nodes}
+        self.manifest = {'format': 'lichtfeld-gallery', 'version': 1, 'nodes': manifest_nodes}
         settings = self.chapters[b'VIEW']['render_settings']
         references = self.chapters[b'REFS']['references']
         _check(isinstance(references, list) and len(references) <= 1)
@@ -401,6 +401,10 @@ def _validate_spz_extensions(stream, start, end):
     _check(remaining == 0)
 
 
+def license_member(name):
+    return name.lower() in ('license', 'license.txt', 'license.md')
+
+
 def validate_compressed(stream, extension, count):
     # Check ZIP structure and referenced texture paths before browser decoding.
     with ZipFile(stream) as archive:
@@ -413,7 +417,10 @@ def validate_compressed(stream, extension, count):
             _check(name == entry.orig_filename and name not in names and not entry.is_dir()
                    and not any(c in name for c in '\\:%?#\x00') and not name.startswith('/')
                    and all(part not in ('', '.', '..') for part in name.split('/')))
-            _check((entry.compress_type == ZIP_STORED or (entry.compress_type == 8 and name.endswith('.json') and entry.file_size <= codec.MAX_MANIFEST_BYTES)) and not (entry.flag_bits & 1)
+            if license_member(name):
+                _check(entry.file_size <= 64 * 1024, 'Compressed splat license exceeds 64 KiB.')
+            deflatable = (name.endswith('.json') and entry.file_size <= codec.MAX_MANIFEST_BYTES) or license_member(name)
+            _check((entry.compress_type == ZIP_STORED or (entry.compress_type == 8 and deflatable)) and not (entry.flag_bits & 1)
                    and stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG))
             names.add(name)
             expanded += entry.file_size
@@ -452,5 +459,5 @@ def validate_compressed(stream, extension, count):
                            and texture.endswith('.webp') and prefix + texture in names)
 
                     used.add(prefix + texture)
-        _check(used == names, 'Unreferenced files cannot be published inside compressed splats.')
+        _check(used | {name for name in names if license_member(name)} == names, 'Unreferenced files cannot be published inside compressed splats.')
         return degree

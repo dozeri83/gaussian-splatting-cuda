@@ -32,7 +32,6 @@ from .asset_layout import (
     gallery_slot_width,
     grid_columns,
     grid_slot_width,
-    list_row_height,
     native_to_dp,
     panel_layout,
     list_columns,
@@ -72,7 +71,7 @@ from .ui import RuntimeState
 _log = logging.getLogger(__name__)
 
 PRECISE_SCROLL_STEP = 32.0
-ASSET_LIST_ROW_HEIGHT_DP = 48.0
+ASSET_LIST_ROW_HEIGHT_DP = 40.0
 ASSET_GALLERY_ROW_HEIGHT_DP = 230.0
 ASSET_CARD_PREFERRED_WIDTH_DP = 208.0
 ASSET_WINDOW_OVERSCAN_ROWS = 2
@@ -83,6 +82,7 @@ _RML_PATH_SAFE_CHARS = "/:._-~"
 _THUMBNAIL_FIT_ALIGN = "cover center"
 _SELECTION_UNCHANGED = object()
 SCOPE_ALL = "__all__"
+SCOPE_LOCAL = "__local__"
 SCOPE_RECENT = "__recent__"
 PROJECT_DRAG_PAYLOAD_TYPE = "application/x-lichtfeld-project"
 _folder_scan_completed_in_process = False
@@ -235,6 +235,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         self._asset_scroll_event_suppressed = False
         self._asset_scroll_suppressed_top = -1.0
         self._last_asset_match_count = 0
+        self._last_asset_scope_count = 0
 
         self._panel_space = lf.ui.PanelSpace.LEFT_DOCK
         self._is_floating = False
@@ -304,7 +305,9 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         self._restore_project_manager_preferences()
 
     def capture_chrome(self) -> Dict[str, Any]:
-        folder_id = self._selected_folder_id if self._selected_folder_id in self._asset_index_folders() else SCOPE_ALL
+        folder_id = self._selected_folder_id
+        if folder_id not in {*self._asset_index_folders(), SCOPE_ALL, SCOPE_LOCAL}:
+            folder_id = SCOPE_ALL
         return {
             "view_mode": self._view_mode,
             "folders_collapsed": self._folders_collapsed,
@@ -414,7 +417,10 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
                     and isinstance(value, (int, float)) and math.isfinite(value)
                 }
             folder_id = payload.get("selected_folder_id")
-            self._selected_folder_id = str(folder_id) if folder_id in self._asset_index_folders() else SCOPE_ALL
+            if folder_id in {*self._asset_index_folders(), SCOPE_ALL, SCOPE_LOCAL}:
+                self._selected_folder_id = str(folder_id)
+            else:
+                self._selected_folder_id = SCOPE_ALL
             # Old sidebar heights are superseded by content/viewport sizing.
             self._layout_signature = None
             self._sync_panel_layout()
@@ -581,6 +587,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         model.bind_func("folders_expanded", lambda: not self._folders_collapsed)
         model.bind_func("all_assets_selected", lambda: self._selected_folder_id == SCOPE_ALL)
         model.bind_func("all_assets_count", self.get_all_assets_count)
+        model.bind_func("local_assets_count", self.get_local_assets_count)
         model.bind_func("selected_asset_id", self.get_selected_asset_id)
         model.bind_func("selected_count", self.get_selected_count)
         model.bind_func("selected_count_text", self.get_selected_count_text)
@@ -838,6 +845,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             "operations_section_title": "projects.contents.title",
             "resume_button_label": "projects.action.resume_training",
             "scope_all_label": "projects.sidebar.all_projects",
+            "scope_local_label": "projects.sidebar.local_projects",
             "scope_recent_label": "projects.sidebar.recent",
             "scope_published_label": "projects.gallery.sidebar.published",
             "view_menu_label": "projects.toolbar.view",
@@ -906,6 +914,10 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
 
     def _set_scope_value(self, value: Any) -> None:
         self._select_folder_id(str(value or SCOPE_ALL))
+
+    def select_projects_scope(self) -> None:
+        if self._selected_folder_id in GALLERY_SCOPES:
+            self._select_folder_id(SCOPE_ALL)
 
     def get_thumbnail_size(self) -> float:
         return self._thumbnail_size
@@ -1046,7 +1058,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
 
     def get_filter_label(self) -> str:
         return tr({
-            "all": "projects.filter.all",
+            "all": "projects.toolbar.filter",
             "attention": "projects.filter.attention",
             "not_published": "projects.filter.not_published",
             "published": "projects.filter.published",
@@ -1058,7 +1070,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
 
     def open_filter_menu(self, _handle=None, _ev=None, _args=None):
         filters = [
-            ("projects.filter.all", "all"),
+            ("projects.filter.clear", "all"),
             ("projects.filter.attention", "attention"),
             ("projects.filter.not_published", "not_published"),
             ("projects.filter.published", "published"),
@@ -1571,7 +1583,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         if active == "dataset":
             return bool((asset.get("inspection") or {}).get("has_dataset"))
         if active == "gallery":
-            return bool(scene or asset.get("remote_only") or facts.get("relationship") not in (None, "unlinked"))
+            return bool(asset.get("remote_only"))
         return True
 
     def _repair_selection(self) -> None:
@@ -1584,7 +1596,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         if cursor not in assets:
             cursor = next(iter(selected), None)
         self._set_asset_selection(selected, cursor=cursor)
-        if self._selected_folder_id not in {*folders, SCOPE_ALL, SCOPE_RECENT, *GALLERY_SCOPES}:
+        if self._selected_folder_id not in {*folders, SCOPE_ALL, SCOPE_LOCAL, SCOPE_RECENT, *GALLERY_SCOPES}:
             self._selected_folder_id = SCOPE_ALL
         self._update_selection_type()
 
@@ -1865,17 +1877,21 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         folder_id = self._selected_folder_id if folder_id is None else folder_id
         query = self._search_query.strip().casefold()
         rows: List[Dict[str, Any]] = []
+        scope_count = 0
         if folder_id == SCOPE_RECENT:
             source = self._recent_scope_assets()
         elif folder_id in GALLERY_SCOPES:
             source = self._gallery_rows(folder_id == SCOPE_ATTENTION)
+        elif folder_id == SCOPE_ALL:
+            source = self._all_display_assets().values()
         else:
             source = self._asset_index_assets().values()
         for asset in source:
-            if folder_id not in (None, SCOPE_ALL, SCOPE_RECENT, *GALLERY_SCOPES) and asset.get("folder_id") != folder_id:
+            if folder_id not in (None, SCOPE_ALL, SCOPE_LOCAL, SCOPE_RECENT, *GALLERY_SCOPES) and asset.get("folder_id") != folder_id:
                 continue
             if not self._asset_matches_query(asset, query):
                 continue
+            scope_count += 1
             if not self._asset_matches_filter(asset):
                 continue
             rows.append(asset)
@@ -1898,6 +1914,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
                 return value, name
             rows.sort(key=sort_value, reverse=self._sort_descending)
         self._last_asset_match_count = len(rows)
+        self._last_asset_scope_count = scope_count
         return rows
 
     def _gallery_window_metrics(self, client_width: float) -> tuple[int, float, float]:
@@ -1942,7 +1959,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         if self._view_mode == "gallery":
             start, end = self._update_gallery_window_geometry(total)
         else:
-            row_height = list_row_height(gallery_column_visible=self._list_columns()["gallery"] != 32) if self._layout_class else ASSET_LIST_ROW_HEIGHT_DP
+            row_height = ASSET_LIST_ROW_HEIGHT_DP
             first = max(0, int(scroll_top // row_height) - ASSET_WINDOW_OVERSCAN_ROWS)
             start = first // ASSET_WINDOW_BATCH_ROWS * ASSET_WINDOW_BATCH_ROWS
             visible = (
@@ -1986,6 +2003,17 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         query = self._search_query.strip().casefold()
         if not query:
             count = getattr(self._asset_index, "count", None)
+            local_count = int(count()) if callable(count) else len(self._asset_index_assets())
+            return local_count + len(self._gallery_remote_assets())
+        return sum(
+            self._asset_matches_query(asset, query)
+            for asset in self._all_display_assets().values()
+        )
+
+    def get_local_assets_count(self) -> int:
+        query = self._search_query.strip().casefold()
+        if not query:
+            count = getattr(self._asset_index, "count", None)
             if callable(count):
                 return int(count())
         return sum(
@@ -1995,6 +2023,13 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
 
     def get_asset_results_summary(self) -> str:
         try:
+            if self._active_filter != "all":
+                return localized_count(
+                    "projects.status.showing_filtered_projects",
+                    self._last_asset_match_count,
+                    total=self._last_asset_scope_count,
+                    filter=self.get_filter_label(),
+                )
             return localized_count(
                 "projects.status.showing_projects", self._last_asset_match_count
             )
@@ -2216,7 +2251,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
 
     def open_view_menu(self, _handle=None, _ev=None, _args=None):
         items = [
-            {"label": tr("projects.filter.all"), "action": "filter:all"},
+            {"label": tr("projects.filter.clear"), "action": "filter:all"},
             {"label": tr("projects.filter.attention"), "action": "filter:attention"},
             {"label": tr("projects.filter.not_published"), "action": "filter:not_published"},
             {"label": tr("projects.filter.published"), "action": "filter:published"},
@@ -2338,7 +2373,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             self._set_catalog_notice(tr("projects.status.import_failed"))
 
     def _select_folder_id(self, folder_id: str) -> bool:
-        if folder_id not in {*self._asset_index_folders(), SCOPE_ALL, SCOPE_RECENT, *GALLERY_SCOPES}:
+        if folder_id not in {*self._asset_index_folders(), SCOPE_ALL, SCOPE_LOCAL, SCOPE_RECENT, *GALLERY_SCOPES}:
             return False
         if folder_id in self._asset_index_folders():
             self._gallery_last_folder = folder_id
@@ -3999,11 +4034,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
                 else ASSET_GALLERY_FALLBACK_ROWS
             ) + ASSET_WINDOW_OVERSCAN_ROWS * 2 + ASSET_WINDOW_BATCH_ROWS - 1
             return "gallery", columns, start, visible
-        gallery_visible = list_columns(
-            self._effective_list_layout_width(client_width),
-            self._text_column_metrics, self._list_column_overrides
-        )["gallery"] != 32
-        row_height = list_row_height(gallery_column_visible=gallery_visible)
+        row_height = ASSET_LIST_ROW_HEIGHT_DP
         first = max(0, int(scroll_top // row_height) - ASSET_WINDOW_OVERSCAN_ROWS)
         start = first // ASSET_WINDOW_BATCH_ROWS * ASSET_WINDOW_BATCH_ROWS
         visible = (
@@ -4283,7 +4314,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             start = row * row_height
             end = start + row_height
         else:
-            row_height = list_row_height(gallery_column_visible=self._list_columns()["gallery"] != 32) if self._layout_class else ASSET_LIST_ROW_HEIGHT_DP
+            row_height = ASSET_LIST_ROW_HEIGHT_DP
             start = index * row_height
             end = start + row_height
         top = self._asset_window_scroll_top
