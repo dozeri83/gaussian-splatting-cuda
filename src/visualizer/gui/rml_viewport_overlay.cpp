@@ -1581,7 +1581,7 @@ namespace lfs::vis::gui {
             tooltip_changed = applyFrameTooltip();
         }
         if (rml_manager_) {
-            rml_manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_, tooltip_.needsFrame());
+            rml_manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_, tooltip_.hasActiveState());
             rml_manager_->setContextTooltipRevealDeadline(rml_context_, tooltip_.revealDeadline());
         }
         const bool can_update_tooltip_only =
@@ -1680,7 +1680,7 @@ namespace lfs::vis::gui {
             tooltip_changed = applyFrameTooltip();
         }
         if (rml_manager_) {
-            rml_manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_, tooltip_.needsFrame());
+            rml_manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_, tooltip_.hasActiveState());
             rml_manager_->setContextTooltipRevealDeadline(rml_context_, tooltip_.revealDeadline());
         }
 
