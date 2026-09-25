@@ -230,7 +230,7 @@ _vulkan_add_slang_shader(lod_compact_touch        lod_compact_touch.slang)
 # vertex_shader.slang → projection_forward variants
 _vulkan_add_slang_shader(projection_forward        vertex_shader.slang)
 _vulkan_add_slang_shader(projection_forward_3dgut  vertex_shader.slang LFS_3DGUT_PROJECTION=1)
-# Canonical quantized LOD pool variants (lod_pool_quant.hpp)
+# Canonical quantized LOD pool variants (core/rad_pool_quant.hpp)
 _vulkan_add_slang_shader(projection_forward_quant       vertex_shader.slang LFS_QUANT_POOL=1)
 _vulkan_add_slang_shader(projection_forward_quant_3dgut vertex_shader.slang LFS_3DGUT_PROJECTION=1 LFS_QUANT_POOL=1)
 # Standalone PLY/SOG IEEE f16 SH rest
@@ -289,8 +289,11 @@ _vulkan_add_slang_shader(wave_partition         macro_tile_shader.slang MACRO_EN
 _vulkan_add_slang_shader(wave_partition_visible macro_tile_shader.slang MACRO_ENTRY=6 LFS_VISIBLE_BOUNDED=1)
 _vulkan_add_slang_shader(macro_raster                  macro_raster.slang)
 _vulkan_add_slang_shader(macro_raster_fp32             macro_raster.slang LFS_HIGS_FP32=1)
+_vulkan_add_slang_shader(macro_raster_fp32_lean        macro_raster.slang LFS_HIGS_FP32=1 LFS_HIGS_LEAN_STAGING=1)
 _vulkan_add_slang_shader(macro_raster_overlays         macro_raster.slang LFS_RASTER_OVERLAYS=1)
+_vulkan_add_slang_shader(macro_raster_overlays_lean    macro_raster.slang LFS_RASTER_OVERLAYS=1 LFS_HIGS_LEAN_STAGING=1)
 _vulkan_add_slang_shader(macro_raster_overlays_fp32    macro_raster.slang LFS_HIGS_FP32=1 LFS_RASTER_OVERLAYS=1)
+_vulkan_add_slang_shader(macro_raster_overlays_fp32_lean macro_raster.slang LFS_HIGS_FP32=1 LFS_RASTER_OVERLAYS=1 LFS_HIGS_LEAN_STAGING=1)
 _vulkan_add_slang_shader(macro_compose          macro_compose.slang)
 _vulkan_add_slang_shader(macro_compose_overlays macro_compose.slang LFS_RASTER_OVERLAYS=1)
 

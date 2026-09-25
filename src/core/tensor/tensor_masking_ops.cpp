@@ -2,15 +2,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/device_fault.hpp"
+#include "core/cuda_error.hpp"
+#include "core/detail/tensor_half.hpp"
 #include "core/logger.hpp"
-#include "core/tensor/backend/cuda/kernels/tensor_ops.hpp"
-#include "core/tensor/backend/cuda/runtime/cuda_stream_context.hpp"
-#include "core/tensor/backend/cuda/runtime/memory_pool.hpp"
+#include "core/tensor_cuda_interop.hpp"
 #include "internal/tensor_impl.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <execution>
 #include <format>
 #include <limits>
 #include <numeric>
@@ -25,8 +24,8 @@ namespace lfs::core {
         }
 
         template <>
-        __half masked_fill_cast<__half>(float value) {
-            return __float2half(value);
+        detail::tensor_half_t masked_fill_cast<detail::tensor_half_t>(float value) {
+            return detail::tensor_float_to_half(value);
         }
 
         template <typename T>
@@ -62,8 +61,6 @@ namespace lfs::core {
             return dtype == DataType::Int32 || dtype == DataType::Int64;
         }
 
-        // Host-only dtype/empty/upper-bound checks (tensor_masking_ops.cpp:68-78
-        // region per phase-6c §9 sign-off 4). No D2H value scan.
         void assert_index_tensor_host_only(const Tensor& indices,
                                            const size_t upper_bound,
                                            const std::string_view operation) {
@@ -90,10 +87,6 @@ namespace lfs::core {
                 return;
             }
 
-            // D2H value scan — retained for gather/scatter/etc. Removed ONLY on
-            // the converted index_select Assert CUDA path (sign-off 4); that path
-            // calls assert_index_tensor_host_only and relies on the device fault
-            // record for release safety.
             const Tensor cpu_indices = indices.device() == Device::CPU
                                            ? indices.contiguous()
                                            : indices.cpu().contiguous();
@@ -124,10 +117,37 @@ namespace lfs::core {
             }
         }
 
+        void assert_async_index_tensor(const Tensor& indices, size_t upper_bound,
+                                       std::string_view operation, bool check_bounds) {
+#ifdef NDEBUG
+            if (indices.device() == Device::GPU) {
+                assert_index_tensor_host_only(indices, upper_bound, operation);
+                return;
+            }
+#endif
+            assert_index_tensor(indices, upper_bound, operation, check_bounds);
+        }
+
+        Tensor index_cast(const Tensor& indices, const Tensor& consumer, size_t extent, BoundaryMode mode = BoundaryMode::Assert) {
+            if (indices.dtype() != DataType::Int64)
+                return indices;
+            if (indices.device() != Device::GPU || mode != BoundaryMode::Assert)
+                return indices.to(DataType::Int32);
+            const CUDAStreamGuard guard(consumer.stream());
+            auto result = internal::allocate_like(consumer, indices.shape(), DataType::Int32);
+            pin_operands({&indices, &result});
+            const auto stream = prepare_inputs_for_stream({&indices, &result}, result.stream());
+            internal::backend_ops_for(indices).index_cast(internal::storage_ref(indices),
+                                                          internal::storage_ref(result), indices.numel(), extent, internal::ExecContext{stream});
+            return result;
+        }
+
         // §1.9 host entry: reject graph capture before checked index_select launch.
         void reject_index_select_graph_capture(const Tensor& tensor, const cudaStream_t stream) {
             if (internal::backend_ops_for(tensor).stream_is_capturing(internal::ExecContext{stream})) {
+#if LFS_HAS_CUDA
                 throw_device_fault_graph_capture_error(stream, LFS_SOURCE_SITE_CURRENT());
+#endif
             }
         }
     } // namespace
@@ -250,7 +270,7 @@ namespace lfs::core {
                 masked_select_cpu(ptr<float>(), mask.ptr<unsigned char>(), result.ptr<float>(), numel());
                 break;
             case DataType::Float16:
-                masked_select_cpu(ptr<__half>(), mask.ptr<unsigned char>(), result.ptr<__half>(), numel());
+                masked_select_cpu(ptr<detail::tensor_half_t>(), mask.ptr<unsigned char>(), result.ptr<detail::tensor_half_t>(), numel());
                 break;
             case DataType::Int32:
                 masked_select_cpu(ptr<int32_t>(), mask.ptr<unsigned char>(), result.ptr<int32_t>(), numel());
@@ -323,7 +343,7 @@ namespace lfs::core {
                 masked_fill_cpu(ptr<float>(), mask_data, numel(), stored_value);
                 break;
             case DataType::Float16:
-                masked_fill_cpu(ptr<__half>(), mask_data, numel(), stored_value);
+                masked_fill_cpu(ptr<detail::tensor_half_t>(), mask_data, numel(), stored_value);
                 break;
             case DataType::Int32:
                 masked_fill_cpu(ptr<int32_t>(), mask_data, numel(), stored_value);
@@ -463,17 +483,13 @@ namespace lfs::core {
             input.index_select_into(out, dim, dense_indices, mode);
             return;
         }
-        // Phase 6C-P3 sign-off 4: on the converted index_select Assert CUDA path,
-        // keep host-only dtype/empty/upper-bound checks and drop the D2H value
-        // scan. Release safety transfers to the device fault record. All other
-        // modes/devices retain the full assert_index_tensor scan.
         const bool device_fault_assert_path =
             device_ == Device::GPU && mode == BoundaryMode::Assert;
         if (device_fault_assert_path) {
             assert_index_tensor_host_only(indices, shape_[dim], "index_select_into");
         } else {
-            assert_index_tensor(indices, shape_[dim], "index_select_into",
-                                mode == BoundaryMode::Assert);
+            assert_async_index_tensor(indices, shape_[dim], "index_select_into",
+                                      mode == BoundaryMode::Assert);
         }
 
         auto indices_same_device = ensure_same_device(indices);
@@ -483,7 +499,7 @@ namespace lfs::core {
         Tensor indices_int32;
         if (is_int64) {
             // Only convert for the kernel call, not in-place
-            indices_int32 = indices_same_device.to(DataType::Int32);
+            indices_int32 = index_cast(indices_same_device, out, shape_[dim], mode);
         }
         const Tensor& kernel_index = is_int64 ? indices_int32 : indices_same_device;
 
@@ -513,14 +529,9 @@ namespace lfs::core {
                     .index_size = indices.numel(),
                 },
                 internal::ExecContext{execution_stream});
-            // Assert mode drains inline: the pre-6C Assert path was already
-            // synchronous (full index D2H + host scan), so a 32-byte record
-            // readback here REPLACES a sync rather than adding one, and keeps
-            // Assert's throw guarantee — enqueue_reset would otherwise drop an
-            // unconsumed fault at the next op. Clamp/Wrap stay sync-free.
+#ifndef NDEBUG
             if (device_fault_assert_path) {
                 if (internal::gpu_backend_tag(*this) == GpuBackend::Vulkan) {
-                    // The Vulkan fault record is read at the next synchronization.
                     internal::backend_ops_for(*this).synchronize_stream(
                         internal::ExecContext{execution_stream});
                 } else {
@@ -529,6 +540,7 @@ namespace lfs::core {
                         LFS_SOURCE_SITE_CURRENT());
                 }
             }
+#endif
         } else {
             // CPU implementation
             pin_operands({this, &kernel_index});
@@ -608,7 +620,7 @@ namespace lfs::core {
         dim = resolve_dim(dim);
         LFS_ASSERT_MSG(dim >= 0 && dim < static_cast<int>(shape_.rank()),
                        "gather dimension is out of range");
-        assert_index_tensor(indices, shape_[dim], "gather", mode == BoundaryMode::Assert);
+        assert_async_index_tensor(indices, shape_[dim], "gather", mode == BoundaryMode::Assert);
 
         if (indices.ndim() == 1) {
             return index_select(dim, indices, mode);
@@ -638,7 +650,7 @@ namespace lfs::core {
         const bool is_int64 = indices_same_device.dtype() == DataType::Int64;
         Tensor indices_int32;
         if (is_int64) {
-            indices_int32 = indices_same_device.to(DataType::Int32);
+            indices_int32 = index_cast(indices_same_device, result, shape_[dim], mode);
         }
         const Tensor& kernel_index = is_int64 ? indices_int32 : indices_same_device;
 
@@ -751,7 +763,7 @@ namespace lfs::core {
 
             // IMPORTANT: Use sequential execution to avoid TBB threading issues with CUDA
             // TBB worker threads don't have CUDA device context, causing cudaErrorInvalidDevice
-            std::transform(std::execution::seq,
+            std::transform(
                            idx, idx + indices_int32.numel(), dst,
                            [src, total](int pos) {
                                if (pos < 0)
@@ -774,7 +786,7 @@ namespace lfs::core {
             const int resolved_dim = resolve_dim(dim);
             LFS_ASSERT_MSG(resolved_dim >= 0 && resolved_dim < static_cast<int>(shape_.rank()),
                            "scatter_ dimension is out of range");
-            assert_index_tensor(idx, shape_[resolved_dim], "scatter_", true);
+            assert_async_index_tensor(idx, shape_[resolved_dim], "scatter_", true);
             return index_add_(dim, idx, src);
         }
 
@@ -811,7 +823,7 @@ namespace lfs::core {
         dim = resolve_dim(dim);
         LFS_ASSERT_MSG(dim >= 0 && dim < static_cast<int>(shape_.rank()),
                        "scatter_ dimension is out of range");
-        assert_index_tensor(idx, shape_[dim], "scatter_", true);
+        assert_async_index_tensor(idx, shape_[dim], "scatter_", true);
 
         if (shape_.rank() == 1 && dim == 0) {
             LFS_ASSERT_MSG(src.ndim() == 1,
@@ -824,7 +836,7 @@ namespace lfs::core {
             const bool is_int64 = indices_same_device.dtype() == DataType::Int64;
             Tensor indices_int32;
             if (is_int64) {
-                indices_int32 = indices_same_device.to(DataType::Int32);
+                indices_int32 = index_cast(indices_same_device, *this, shape_[dim]);
             }
             const Tensor& kernel_index = is_int64 ? indices_int32 : indices_same_device;
 
@@ -897,7 +909,7 @@ namespace lfs::core {
         const bool is_int64 = idx_same_device.dtype() == DataType::Int64;
         Tensor idx_int32;
         if (is_int64) {
-            idx_int32 = idx_same_device.to(DataType::Int32);
+            idx_int32 = index_cast(idx_same_device, *this, shape_[dim]);
         }
         const Tensor& kernel_index = is_int64 ? idx_int32 : idx_same_device;
 
@@ -1054,7 +1066,7 @@ namespace lfs::core {
         dim = resolve_dim(dim);
         LFS_ASSERT_MSG(dim >= 0 && dim < static_cast<int>(shape_.rank()),
                        "index_copy_ dimension is out of range");
-        assert_index_tensor(idx, shape_[dim], "index_copy_", true);
+        assert_async_index_tensor(idx, shape_[dim], "index_copy_", true);
 
         std::vector<size_t> expected_src_shape = shape_.dims();
         expected_src_shape[dim] = idx.numel();
@@ -1068,7 +1080,7 @@ namespace lfs::core {
         const bool is_int64 = idx_same_device.dtype() == DataType::Int64;
         Tensor idx_int32;
         if (is_int64) {
-            idx_int32 = idx_same_device.to(DataType::Int32);
+            idx_int32 = index_cast(idx_same_device, *this, shape_[dim]);
         }
         const Tensor& kernel_index = is_int64 ? idx_int32 : idx_same_device;
 
@@ -1166,7 +1178,7 @@ namespace lfs::core {
         dim = resolve_dim(dim);
         LFS_ASSERT_MSG(dim >= 0 && dim < static_cast<int>(shape_.rank()),
                        "index_add_ dimension is out of range");
-        assert_index_tensor(idx, shape_[dim], "index_add_", true);
+        assert_async_index_tensor(idx, shape_[dim], "index_add_", true);
 
         if (shape_.rank() == 1 && dim == 0) {
             LFS_ASSERT_MSG(src.ndim() == 1 && src.numel() == idx.numel(),
@@ -1178,7 +1190,7 @@ namespace lfs::core {
             if (device_ == Device::GPU) {
                 // Convert int64 indices to int32 for kernel (kernel expects int* not int64_t*)
                 auto idx_int32 = (idx_same_device.dtype() == DataType::Int64)
-                                     ? idx_same_device.to(DataType::Int32)
+                                     ? index_cast(idx_same_device, *this, shape_[dim])
                                      : idx_same_device;
                 pin_operands({this, &idx_int32, &src_same_device});
                 const cudaStream_t execution_stream =
@@ -1269,7 +1281,7 @@ namespace lfs::core {
         if (device_ == Device::GPU) {
             // Convert int64 indices to int32 for kernel (kernel expects int* not int64_t*)
             auto idx_int32 = (idx_same_device.dtype() == DataType::Int64)
-                                 ? idx_same_device.to(DataType::Int32)
+                                 ? index_cast(idx_same_device, *this, shape_[dim])
                                  : idx_same_device;
             pin_operands({this, &idx_int32, &src_same_device});
             const cudaStream_t execution_stream =
@@ -1575,7 +1587,7 @@ namespace lfs::core {
                 } else {
                     // Element-wise assignment
                     size_t num_elements = numel();
-                    std::for_each(std::execution::seq,
+                    std::for_each(
                                   std::views::iota(size_t(0), idx.numel()).begin(),
                                   std::views::iota(size_t(0), idx.numel()).end(),
                                   [data, indices, values, num_elements](size_t i) {
@@ -2307,8 +2319,8 @@ namespace lfs::core {
                                    other.ptr<float>(), tensor_->numel());
                 break;
             case DataType::Float16:
-                masked_scatter_cpu(const_cast<Tensor*>(tensor_)->ptr<__half>(), mask,
-                                   other.ptr<__half>(), tensor_->numel());
+                masked_scatter_cpu(const_cast<Tensor*>(tensor_)->ptr<detail::tensor_half_t>(), mask,
+                                   other.ptr<detail::tensor_half_t>(), tensor_->numel());
                 break;
             case DataType::Int32:
                 masked_scatter_cpu(const_cast<Tensor*>(tensor_)->ptr<int32_t>(), mask,

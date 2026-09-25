@@ -163,12 +163,16 @@ class PreferencesPanel(Panel):
                 lambda section=section: section in self._expanded_sections,
             )
         for key in ("backend", "vulkan_device", "vulkan_validation", "force_fp32_half",
-                    "force_no_atomic_float", "viewer_vulkan_inputs"):
+                    "force_no_atomic_float"):
             model.bind(
                 f"tensor_{key}",
                 lambda key=key: lf.ui.get_tensor_backend_preferences()[key],
                 lambda value, key=key: self._set_tensor_preference(key, value),
             )
+        model.bind_func(
+            "tensor_cuda_available",
+            lambda: bool(lf.ui.get_tensor_backend_preferences()["cuda_available"]),
+        )
         model.bind("theme_family_idx", self._theme_family_index, self._set_theme_family_index)
         model.bind_func("theme_has_variants", self._theme_has_variants)
         model.bind("progress_bar_idx", self._progress_bar_index, self._set_progress_bar_index)
@@ -365,9 +369,10 @@ class PreferencesPanel(Panel):
 
     def _set_tensor_preference(self, key, value):
         state = dict(lf.ui.get_tensor_backend_preferences())
+        state.pop("cuda_available", None)
         if key == "vulkan_validation":
             value = int(value)
-        elif key in ("force_fp32_half", "force_no_atomic_float", "viewer_vulkan_inputs"):
+        elif key in ("force_fp32_half", "force_no_atomic_float"):
             value = bool(value)
         state[key] = value
         lf.ui.set_tensor_backend_preferences(**state)

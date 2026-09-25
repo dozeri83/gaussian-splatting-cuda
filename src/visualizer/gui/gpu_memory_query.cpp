@@ -3,13 +3,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/gpu_memory_query.hpp"
+#include "core/gpu_device_info.hpp"
+#include "core/tensor_backend.hpp"
 
+#if LFS_HAS_CUDA
 #include <cuda_runtime.h>
+#endif
 
 #ifdef _WIN32
 #include <dxgi1_4.h>
 #include <windows.h>
-#else
+#elif defined(__linux__)
 #include <dlfcn.h>
 #include <unistd.h>
 #endif
@@ -24,7 +28,7 @@ namespace lfs::vis::gui {
             return name;
         }
 
-#ifdef _WIN32
+#if LFS_HAS_CUDA && defined(_WIN32)
         // Windows: DXGI QueryVideoMemoryInfo for per-process GPU memory.
         // NVML process memory returns NVML_VALUE_NOT_AVAILABLE under WDDM, but
         // device utilization rates work and are used for the GPU% meter.
@@ -147,6 +151,7 @@ namespace lfs::vis::gui {
         }
 #endif
 
+#if LFS_HAS_CUDA
         // NVML: process memory on Linux; utilization on Linux and Windows.
         using NvmlDevice = void*;
         enum { NVML_SUCCESS = 0 };
@@ -258,25 +263,36 @@ namespace lfs::vis::gui {
             static NvmlState s;
             return s;
         }
+#endif
 
     } // namespace
 
-    GpuMemoryInfo queryGpuMemory() {
+    GpuMemoryInfo queryGpuMemory(const lfs::core::GpuBackend backend) {
         GpuMemoryInfo info;
-
-        int cuda_device = 0;
-        if (cudaGetDevice(&cuda_device) == cudaSuccess) {
-            cudaDeviceProp prop{};
-            if (cudaGetDeviceProperties(&prop, cuda_device) == cudaSuccess)
-                info.device_name = shortenGpuDeviceName(prop.name);
+        const auto device = lfs::core::gpu_backend_device_info(backend);
+        if (device) {
+            info.device_name = shortenGpuDeviceName(device->name);
+            info.total = device->total_memory_bytes;
         }
-
-        size_t free_mem = 0;
-        size_t total_mem = 0;
-        cudaMemGetInfo(&free_mem, &total_mem);
-
-        info.total = total_mem;
-        info.total_used = total_mem - free_mem;
+        if (backend == lfs::core::GpuBackend::Vulkan) {
+            info.uses_process_budget = true;
+            if (device && device->supports_process_memory_budget) {
+                info.process_budget = device->process_memory_budget_bytes;
+                info.process_budget_used = device->process_memory_used_bytes;
+            }
+            return info;
+        }
+        if (!device) {
+            return info;
+        }
+#if !LFS_HAS_CUDA
+        return info;
+#else
+        const auto memory = lfs::core::gpu_backend_memory_info(backend);
+        info.total = memory.total_bytes;
+        info.total_used = memory.total_bytes >= memory.free_bytes
+                              ? memory.total_bytes - memory.free_bytes
+                              : 0;
 #ifdef _WIN32
         info.process_used = dxgiState().getProcessMemory();
 #else
@@ -288,10 +304,18 @@ namespace lfs::vis::gui {
             info.process_used = 0;
 
         return info;
+#endif
     }
 
     float queryGpuUtilization() {
+        if (lfs::core::default_gpu_backend() == lfs::core::GpuBackend::Vulkan) {
+            return -1.f;
+        }
+#if LFS_HAS_CUDA
         return nvmlState().getUtilization();
+#else
+        return -1.f;
+#endif
     }
 
 } // namespace lfs::vis::gui

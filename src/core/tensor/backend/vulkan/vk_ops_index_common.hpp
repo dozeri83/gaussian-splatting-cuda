@@ -1,12 +1,13 @@
 /* SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
+#include "core/tensor/internal/private_access.hpp"
 
 #include "../../internal/tensor_impl.hpp"
 #include "core/assert.hpp"
 #include "vk_ops_common.hpp"
 
-#include <cuda_fp16.h>
+#include "core/detail/tensor_half.hpp"
 
 #include <array>
 #include <cstdint>
@@ -70,7 +71,7 @@ namespace lfs::core::internal::vk_index {
             return {bits, 0};
         }
         case DataType::Float16: {
-            const __half converted = __float2half_rn(as_float);
+            const detail::tensor_half_t converted = detail::tensor_float_to_half(as_float);
             uint16_t bits = 0;
             std::memcpy(&bits, &converted, sizeof(bits));
             return {bits, 0};

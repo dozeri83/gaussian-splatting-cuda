@@ -26,13 +26,43 @@
 #include "python/runner.hpp"
 
 #include <cstdlib>
+#if LFS_HAS_CUDA
 #include <cuda_runtime.h>
+#endif
 #include <filesystem>
 #include <print>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace {
+#ifdef __APPLE__
+    void configureHomebrewVulkanDriver() {
+        // The vcpkg Vulkan loader does not always discover Homebrew's MoltenVK
+        // manifest. Keep an explicit Vulkan driver selection from the caller.
+        if (std::getenv("VK_DRIVER_FILES") || std::getenv("VK_ICD_FILENAMES") ||
+            std::getenv("VK_ADD_DRIVER_FILES"))
+            return;
+
+        const auto try_prefix = [](const std::filesystem::path& prefix) {
+            const auto manifest = prefix / "etc/vulkan/icd.d/MoltenVK_icd.json";
+            std::error_code error;
+            if (!std::filesystem::is_regular_file(manifest, error))
+                return false;
+            return lfs::core::environment::set_value("VK_DRIVER_FILES", manifest.string());
+        };
+
+        if (const char* const prefix = std::getenv("HOMEBREW_PREFIX")) {
+            if (try_prefix(prefix))
+                return;
+        }
+        if (try_prefix("/opt/homebrew"))
+            return;
+        (void)try_prefix("/usr/local");
+    }
+#endif
+
+#if LFS_HAS_CUDA
     // Apply CUDA driver-level VRAM-reduction knobs BEFORE the primary context exists.
     // Setting these after cudaFree(nullptr) is too late — the driver has already
     // committed defaults (1 KiB/thread stack reserve × SMs × max-threads = ~192 MiB on
@@ -44,6 +74,7 @@ namespace {
         setenv("CUDA_MODULE_LOADING", "LAZY", /*overwrite=*/0);
 #endif
     }
+#endif
 
     void publishResolvedUserPaths() {
         // Publish canonical paths for Python plugins; native code calls UserPaths directly.
@@ -74,6 +105,7 @@ namespace {
         }
     }
 
+#if LFS_HAS_CUDA
     // Probe what the CUDA driver allocates during context creation, *attributed to this
     // process* (NVML per-PID, not device-wide cudaMemGetInfo). Each phase is the delta
     // against the previous probe so the sum reconstructs the total context cost.
@@ -132,6 +164,7 @@ namespace {
         // measurements and libcurand probe are completed by the warmup worker.
         p.captureCudaDeviceBaseline();
     }
+#endif
 
     int run_mode(lfs::core::args::ParsedArgs args) {
         return std::visit([](auto&& mode) -> int {
@@ -143,9 +176,17 @@ namespace {
                 std::println("LichtFeld Studio {} ({})", GIT_TAGGED_VERSION, GIT_COMMIT_HASH_SHORT);
                 return 0;
             } else if constexpr (std::is_same_v<T, lfs::core::args::WarmupMode>) {
-                applyCudaContextTuning();
+#if LFS_HAS_CUDA
+                if (lfs::core::default_gpu_backend() == lfs::core::GpuBackend::CUDA) {
+                    applyCudaContextTuning();
+                }
+#endif
                 preflightGpuOrExit(false);
-                analyzeCudaContextDistribution();
+#if LFS_HAS_CUDA
+                if (lfs::core::default_gpu_backend() == lfs::core::GpuBackend::CUDA) {
+                    analyzeCudaContextDistribution();
+                }
+#endif
                 return 0;
             } else if constexpr (std::is_same_v<T, lfs::core::args::TensorBackendSelftestMode>) {
                 const char* name = mode.backend == lfs::core::GpuBackend::Vulkan ? "vulkan" : "cuda";
@@ -175,15 +216,31 @@ namespace {
             } else if constexpr (std::is_same_v<T, lfs::core::args::PluginMode>) {
                 return lfs::python::run_plugin_command(mode);
             } else if constexpr (std::is_same_v<T, lfs::core::args::TrainingMode>) {
+                if constexpr (!LFS_BUILD_TRAINER) {
+                    if (mode.params->optimization.headless && !mode.params->render_path) {
+                        std::println(stderr, "Training is not included in this build.");
+                        return 1;
+                    }
+                }
                 LOG_INFO("LichtFeld Studio");
                 LOG_INFO("version {} | tag {}", GIT_TAGGED_VERSION, GIT_COMMIT_HASH_SHORT);
 
-                // Driver-level tuning must precede *any* CUDA call, including the pre-flight
-                // gate and the cudaFree(nullptr) inside analyzeCudaContextDistribution.
-                applyCudaContextTuning();
-
                 const bool interactive =
                     !mode.params->optimization.headless && !mode.params->render_path;
+                // A Vulkan viewer still constructs a CUDA trainer when a dataset opens.
+                // The primary context has to exist before that open.
+#if LFS_HAS_CUDA
+                const bool warm_cuda_context =
+                    lfs::core::gpu_backend_available(lfs::core::GpuBackend::CUDA) &&
+                    (lfs::core::default_gpu_backend() == lfs::core::GpuBackend::CUDA || interactive);
+
+                // Driver-level tuning must precede *any* CUDA call, including the pre-flight
+                // gate and the cudaFree(nullptr) inside analyzeCudaContextDistribution.
+                if (warm_cuda_context) {
+                    applyCudaContextTuning();
+                }
+#endif
+
                 const bool viewer_only = lfs::app::training_params_are_viewer_only(*mode.params);
                 preflightGpuOrExit(interactive, viewer_only);
 
@@ -191,10 +248,11 @@ namespace {
                 // GPU app path. CLI-only modes such as --help, convert, preprocess,
                 // plugin, and mesh2splat must not create a CUDA primary context just
                 // for HUD metrics.
-                if (lfs::core::default_gpu_backend() == lfs::core::GpuBackend::CUDA &&
-                    lfs::core::gpu_backend_available(lfs::core::GpuBackend::CUDA)) {
+#if LFS_HAS_CUDA
+                if (warm_cuda_context) {
                     analyzeCudaContextDistribution();
                 }
+#endif
                 if (mode.params->optimization.debug_python) {
                     lfs::python::start_debugpy(mode.params->optimization.debug_python_port);
                 }
@@ -236,9 +294,15 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
+#ifdef __APPLE__
+    configureHomebrewVulkanDriver();
+#endif
+
     lfs::core::install_crash_handlers();
     lfs::core::record_session_start();
+#if LFS_HAS_CUDA
     lfs::core::initialize_cuda_diagnostics();
+#endif
 
     auto result = lfs::core::args::parse_args(argc, argv);
     if (!result) {

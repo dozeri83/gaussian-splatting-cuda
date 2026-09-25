@@ -1,8 +1,10 @@
+#if LFS_BUILD_TRAINER
+#include "training/trainer.hpp"
+#endif
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "visualizer_impl.hpp"
 #include "core/animatable_property.hpp"
 #include "core/crash_handler.hpp"
 #include "core/cuda_error.hpp"
@@ -18,6 +20,7 @@
 #include "core/memory_pressure.hpp"
 #include "core/path_utils.hpp"
 #include "core/services.hpp"
+#include "core/tensor_backend.hpp"
 #include "gui/error_event_bridge.hpp"
 #include "gui/native_panels.hpp"
 #include "gui/panel_registry.hpp"
@@ -51,6 +54,7 @@
 #include "tools/selection_tool.hpp"
 #include "tools/unified_tool_registry.hpp"
 #include "visualizer/app_store.hpp"
+#include "visualizer_impl.hpp"
 #include "window/vulkan_context.hpp"
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_messagebox.h>
@@ -1902,6 +1906,7 @@ namespace lfs::vis {
         });
 
         const auto sync_viewer_mip_filter_with_training = [this] {
+#if LFS_BUILD_TRAINER
             if (!rendering_manager_ || !trainer_manager_)
                 return;
             const auto* trainer = trainer_manager_->getTrainer();
@@ -1916,6 +1921,7 @@ namespace lfs::vis {
             settings.mip_filter = training_mip_filter;
             rendering_manager_->updateSettings(settings);
             LOG_INFO("Synced viewer mip filter with training: {}", training_mip_filter ? "enabled" : "disabled");
+#endif
         };
 
         // Trainer ready signal
@@ -3971,6 +3977,7 @@ namespace lfs::vis {
     }
 
     std::expected<void, std::string> VisualizerImpl::startTraining() {
+#if LFS_BUILD_TRAINER
         if (!trainer_manager_)
             return std::unexpected("Trainer manager not initialized");
         const auto reject = [this](std::string message) {
@@ -3978,6 +3985,9 @@ namespace lfs::vis {
                 message, lfs::ErrorCode::FailedPrecondition));
             return std::unexpected(std::move(message));
         };
+        if (!lfs::core::gpu_backend_available(lfs::core::GpuBackend::CUDA)) {
+            return reject("Training requires an available CUDA device");
+        }
         if (project_lifecycle_) {
             if (project_lifecycle_->isHydrating()) {
                 return reject("Project is still loading. Retry Start after loading completes.");
@@ -4063,6 +4073,12 @@ namespace lfs::vis {
             return std::unexpected("The training manager rejected the start request");
         }
         return {};
+
+#else
+        if (trainer_manager_)
+            (void)trainer_manager_->rejectStart("Training is not included in this build", lfs::ErrorCode::Unavailable);
+        return std::unexpected("Training is not included in this build");
+#endif
     }
 
     std::optional<int>

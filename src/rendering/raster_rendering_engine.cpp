@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/camera.hpp"
+#include "core/environment_math.hpp"
 #include "core/executable_path.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
@@ -11,16 +12,19 @@
 #include "core/splat_data.hpp"
 #include "core/tensor.hpp"
 #include "environment_image.hpp"
-#include "environment_math.hpp"
 #include "image_layout.hpp"
-#include "point_cloud_raster.cuh"
+#if LFS_HAS_CUDA
+#include "rasterizer/cuda/point_cloud_raster.cuh"
+#endif
 #include "rendering/coordinate_conventions.hpp"
 #include "rendering/rendering.hpp"
 #include "screen_overlay_renderer.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
+#if LFS_HAS_CUDA
 #include <cuda_runtime.h>
+#endif
 #include <filesystem>
 #include <format>
 #include <glm/gtc/constants.hpp>
@@ -30,6 +34,7 @@
 #include <vector>
 
 namespace lfs::rendering {
+    namespace envmath = lfs::core::envmath;
 
     namespace {
         struct RasterImageResult {
@@ -404,6 +409,10 @@ namespace lfs::rendering {
             const Tensor& colors_source,
             const PointCloudRenderRequest& request,
             const Tensor* const deleted_mask_source) {
+#if !LFS_HAS_CUDA
+            return std::unexpected(
+                "CUDA point-cloud rasterization is unavailable in this build");
+#else
             if (request.frame_view.size.x <= 0 || request.frame_view.size.y <= 0) {
                 return std::unexpected("Invalid viewport dimensions");
             }
@@ -599,6 +608,7 @@ namespace lfs::rendering {
                 .valid = true,
                 .far_plane = request.frame_view.far_plane,
                 .orthographic = request.frame_view.orthographic};
+#endif
         }
 
         [[nodiscard]] Result<Tensor> toCpuChwFloatTensor(const Tensor& image) {
