@@ -831,7 +831,9 @@ namespace lfs::vis {
             const VulkanSplitViewParams& split_view_params) {
             RenderingManager::VulkanMeshFrame frame;
             const auto vp_data = frame_ctx.makeViewportData();
-            frame.view_projection = vp_data.getProjectionMatrix() * vp_data.getViewMatrix();
+            frame.scene_view = vp_data.getViewMatrix();
+            frame.scene_projection = vp_data.getProjectionMatrix();
+            frame.view_projection = frame.scene_projection * frame.scene_view;
             frame.camera_position = vp_data.translation;
             frame.items.reserve(frame_ctx.scene_state.meshes.size());
 
@@ -4230,6 +4232,13 @@ namespace lfs::vis {
                                         };
                                         temporal_frame_published = true;
                                     }
+                                    mesh_frame.scene_reprojectable =
+                                        !request.frame_view.orthographic &&
+                                        !request.frame_view.intrinsics_override &&
+                                        !request.equirectangular &&
+                                        request.frame_view.cameraSize() == request.frame_view.size &&
+                                        !pending_split_view.enabled;
+                                    mesh_frame.scene_image_generation = render_result.generation;
                                 }
                                 setVulkanMeshFrame(std::move(mesh_frame));
                             } else {

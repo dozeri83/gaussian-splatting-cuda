@@ -185,7 +185,7 @@ namespace lfs::vis {
         // could claim the arena without waiting.
         [[nodiscard]] bool pollArenaHandoff();
         // While the camera moves during training, the viewer and training take
-        // turns on the shared scratch (see NavigationArenaShare).
+        // turns on the shared scratch (see kTrainingFramesPerNavigationRender).
         void setCameraNavigating(bool navigating);
 
         // Invoked with the completion value immediately after each live-model
@@ -741,7 +741,6 @@ namespace lfs::vis {
 
         std::uint64_t arena_handoff_token_ = 0;
         bool camera_navigating_ = false;
-        NavigationArenaShare navigation_share_;
 
         std::function<void(std::uint64_t)> live_submit_callback_;
 
