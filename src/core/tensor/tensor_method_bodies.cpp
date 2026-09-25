@@ -354,6 +354,7 @@ namespace lfs::core {
                         internal::backend_ops_for(lhs_source).binary(internal::pointwise_program(DataType::Float32, DataType::Float32, op), internal::storage_ref(lhs_source), internal::storage_ref(rhs_operand), internal::storage_ref(out), out.numel(), internal::ExecContext{out.stream()});
                         tensor_ops::record_tensor_kernel_launch(1);
                     } else {
+                        // LFS-CENSUS-OK(unpinned-multi-capture): host tensors; the CPU loop runs synchronously on this thread.
                         apply_binary_cpu(lhs_source.ptr<float>(), rhs_operand.ptr<float>(),
                                          out.ptr<float>(), out.numel(), op);
                     }
