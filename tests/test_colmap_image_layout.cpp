@@ -186,7 +186,8 @@ namespace {
                 {.resize_factor = p.resize_factor,
                  .max_width = p.max_width,
                  .cuda_stream = p.stream,
-                 .output_uint8 = p.output_uint8});
+                 .output_uint8 = p.output_uint8,
+                 .skip_blob_cache = p.skip_blob_cache});
         });
         initialized = true;
     }

@@ -228,8 +228,14 @@ TEST_F(SceneConsolidationExtractTest, SingleVisibleNodeAliasesWithoutAllocatorUs
 }
 
 TEST_F(SceneConsolidationExtractTest, WorkerBuildMatchesSynchronousCombinedModel) {
-    auto first = std::make_shared<SplatData>(bike_.clone());
-    auto second = std::make_shared<SplatData>(bike_.clone());
+    // Scene hands multi-node models above one million visible splats to its
+    // worker, so the synchronous reference must stay below that.
+    const size_t bike_size = static_cast<size_t>(bike_.size());
+    const size_t input_size = std::min(bike_size, size_t{500'000});
+    const auto input = lfs::core::extract_by_mask(
+        bike_, range_mask(bike_size, 0, input_size, bike_.means_raw().device()));
+    auto first = std::make_shared<SplatData>(input.clone());
+    auto second = std::make_shared<SplatData>(input.clone());
     const size_t first_size = static_cast<size_t>(first->size());
 
     std::vector<size_t> allocation_shape_rows;
