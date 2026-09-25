@@ -3802,7 +3802,7 @@ namespace lfs::vis {
             keep_asset_manager_open && gui_manager_
                 ? std::make_optional(
                       gui_manager_->panelLayout()
-                          .getLeftDockWidth())
+                          .getLeftDockPreferredWidth())
                 : std::nullopt;
         project::applyGuiSession(
             *this, *prepared, camera_bookmarks_);

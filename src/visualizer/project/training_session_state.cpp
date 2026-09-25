@@ -36,14 +36,6 @@ namespace lfs::vis {
         return {};
     }
 
-    std::shared_ptr<const lfs::core::Camera> TrainerManager::getCamById(int camId) const {
-        if (scene_) {
-            return scene_->getCameraByUid(camId);
-        }
-        LOG_ERROR("getCamById called but scene is not set");
-        return nullptr;
-    }
-
     float TrainerManager::getElapsedSeconds() const {
         const auto state = getState();
         if (state == TrainingState::Running) {

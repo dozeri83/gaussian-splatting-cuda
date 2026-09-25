@@ -696,6 +696,54 @@ TEST_F(PanelLayoutRenderDemandTest, ToolbarFloatsAtViewportEdgeAtBothScales) {
     lfs::python::set_shared_dpi_scale(previous_dpi);
 }
 
+TEST_F(PanelLayoutRenderDemandTest, PanelsGrowBackWhenTheWindowGrowsAgain) {
+    using namespace lfs::vis::gui;
+
+    registerPanel("lfs.asset_manager", PanelSpace::LeftDock, 100.0f);
+    auto& reg = PanelRegistry::instance();
+    reg.set_panel_enabled("lfs.asset_manager", true);
+    ASSERT_TRUE(reg.set_panel_space("lfs.asset_manager", PanelSpace::LeftDock));
+    const float previous_dpi = lfs::python::get_shared_dpi_scale();
+    lfs::python::set_shared_dpi_scale(1.0f);
+    PanelLayoutManager layout;
+    UIContext ui;
+    PanelDrawContext ctx;
+    ctx.ui = &ui;
+    PanelInputState input;
+    const ScreenState wide{.work_size = {1920.0f, 1200.0f}};
+    const ScreenState narrow{.work_size = {640.0f, 480.0f}};
+    const auto show = [&](const ScreenState& s) {
+        layout.enforceWidthConstraints(true, false, s);
+        layout.renderLeftDock(ctx, true, false, input, s);
+    };
+    layout.setLeftDockWidth(320.0f);
+    layout.setRightPanelWidth(360.0f, wide);
+    show(wide);
+
+    show(narrow);
+    EXPECT_LT(layout.getLeftDockWidth() + layout.getRightPanelWidth(), 640.0f);
+    EXPECT_FLOAT_EQ(layout.captureProjectState().left_dock_width, 320.0f);
+    EXPECT_FLOAT_EQ(layout.captureProjectState().right_panel_width, 360.0f);
+
+    show(wide);
+    EXPECT_FLOAT_EQ(layout.getLeftDockWidth(), 320.0f);
+    EXPECT_FLOAT_EQ(layout.getRightPanelWidth(), 360.0f);
+    lfs::python::set_shared_dpi_scale(previous_dpi);
+}
+
+TEST_F(PanelLayoutRenderDemandTest, SceneTreeKeepsRowsOnShortWindowsAtHighUiScale) {
+    using lfs::vis::gui::PanelLayoutManager;
+    PanelLayoutManager layout;
+    constexpr float dpi = 2.0f;
+    constexpr float avail_h = 684.0f;
+    EXPECT_GE(layout.scenePanelHeight(avail_h, dpi), avail_h * 0.5f)
+        << "the default split left the scene tree without rows";
+    EXPECT_LE(layout.scenePanelHeight(300.0f, dpi), 150.0f) << "the scene took more than half a tiny panel";
+    EXPECT_FLOAT_EQ(layout.scenePanelHeight(1100.0f, 1.0f),
+                    1100.0f * layout.getScenePanelRatio() - PanelLayoutManager::SPLITTER_H * 0.5f)
+        << "the minimum overrode the user's split on a tall panel";
+}
+
 TEST_F(PanelLayoutRenderDemandTest, FloatingToolbarStaysOutsideTheDockResizeBand) {
     using namespace lfs::vis::gui;
 

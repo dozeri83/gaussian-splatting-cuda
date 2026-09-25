@@ -232,73 +232,62 @@ def test_document_sync_binds_toolbar_model_without_task_progress(overlays_module
     assert "show_video_overlay" not in document.model.bound_funcs
     assert "overlay_action" not in document.model.bound_events
 
-def test_empty_state_keeps_folder_omits_wide_text_and_does_not_redraw(
-        overlays_module, monkeypatch):
-    module, *_rest = overlays_module
-    redraw_calls = []
+
+def test_empty_state_hint_follows_the_scene_and_dirties_only_on_change(overlays_module, monkeypatch):
+    module, *_rest, document = overlays_module
+    scene_empty = [True]
+    drag_hovering = [False]
+    monkeypatch.setattr(module.lf.ui, "is_scene_empty", lambda: scene_empty[0])
+    monkeypatch.setattr(module.lf.ui, "is_drag_hovering", lambda: drag_hovering[0])
+
+    module._sync_viewport_overlay_document(document)
+    funcs = document.model.bound_funcs
+    handle = document.model.handle
+    assert funcs["show_empty_state"]() is True
+    assert funcs["empty_state_title"]() == "startup.drop_files_title"
+    assert funcs["empty_state_import_hint"]() == "Or use File > Import"
+
+    dirty_after_first_sync = handle.dirty_all_calls
+    module._sync_viewport_overlay_document(document)
+    assert handle.dirty_all_calls == dirty_after_first_sync, "an idle frame dirtied the overlay model"
+
+    drag_hovering[0] = True
+    module._sync_viewport_overlay_document(document)
+    assert funcs["show_empty_state"]() is False
+    assert handle.dirty_all_calls == dirty_after_first_sync + 1
+
+    drag_hovering[0] = False
+    scene_empty[0] = False
+    module._sync_viewport_overlay_document(document)
+    assert funcs["show_empty_state"]() is False
+
+
+@pytest.mark.parametrize("import_overlay", [
+    {"active": True},
+    {"active": False, "show_completion": True},
+])
+def test_empty_state_hint_stays_hidden_while_import_overlay_is_visible(
+    overlays_module, monkeypatch, import_overlay
+):
+    (
+        module,
+        _hook_calls,
+        _remove_calls,
+        _dismiss_calls,
+        _cancel_calls,
+        import_state,
+        _video_state,
+        document,
+    ) = overlays_module
     monkeypatch.setattr(module.lf.ui, "is_scene_empty", lambda: True)
-    monkeypatch.setattr(module.lf.ui, "request_redraw", lambda **kwargs: redraw_calls.append(kwargs),
-                        raising=False)
-    monkeypatch.setattr(
-        module.lf.ui,
-        "theme",
-        lambda: SimpleNamespace(palette=SimpleNamespace(
-            overlay_icon=(1.0, 1.0, 1.0, 1.0),
-            overlay_text=(0.9, 0.9, 0.9, 1.0),
-            overlay_text_dim=(0.7, 0.7, 0.7, 1.0),
-        )),
-        raising=False,
-    )
+    import_state.update(import_overlay)
 
-    class Layout:
-        text_widths = {
-            "startup.drop_files_title": 100.0,
-            "startup.drop_files_subtitle": 220.0,
-            "Or use File > Import": 180.0,
-        }
+    module._sync_viewport_overlay_document(document)
 
-        def __init__(self):
-            self.lines = []
-            self.rects = []
-            self.text = []
+    assert document.model.bound_funcs["show_empty_state"]() is False
 
-        def get_viewport_pos(self):
-            return (0.0, 0.0)
+    import_state.clear()
+    module._sync_viewport_overlay_document(document)
 
-        def get_viewport_size(self):
-            return (240.0, 300.0)
+    assert document.model.bound_funcs["show_empty_state"]() is True
 
-        def set_next_window_pos(self, _pos):
-            pass
-
-        def set_next_window_size(self, _size):
-            pass
-
-        def begin_window(self, _name, _flags):
-            return True
-
-        def end_window(self):
-            pass
-
-        def draw_window_rect(self, *args):
-            self.rects.append(args)
-
-        def draw_window_line(self, *args):
-            self.lines.append(args)
-
-        def calc_text_size(self, text):
-            return (self.text_widths[text], 16.0)
-
-        def draw_window_text(self, _x, _y, text, _color):
-            self.text.append(text)
-
-    layout = Layout()
-    module._draw_empty_state_overlay(layout)
-
-    assert len(layout.rects) == 1
-    assert len(layout.lines) == 3
-    assert layout.text == [
-        "startup.drop_files_title",
-        "Or use File > Import",
-    ]
-    assert redraw_calls == []

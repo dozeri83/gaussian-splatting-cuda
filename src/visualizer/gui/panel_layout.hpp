@@ -207,6 +207,7 @@ namespace lfs::vis::gui {
 
         float getRightPanelWidth() const { return right_panel_width_; }
         float getScenePanelRatio() const { return scene_panel_ratio_; }
+        [[nodiscard]] float scenePanelHeight(float avail_h, float dpi) const;
         void setScenePanelHeight(float height, float panel_height);
         float getPythonConsoleWidth() const { return python_console_width_; }
         float getBottomDockHeight() const { return bottom_dock_height_; }
@@ -220,6 +221,7 @@ namespace lfs::vis::gui {
         bool bottomDockActiveTabChanged() const { return bottom_dock_active_tab_changed_; }
         PanelDrawBounds bottomDockTabBarRect() const { return bottom_dock_tab_bar_rect_; }
         float getLeftDockWidth() const { return left_dock_width_; }
+        float getLeftDockPreferredWidth() const { return left_dock_preferred_width_; }
         void setLeftDockWidth(float width);
         bool isLeftDockVisible() const { return left_dock_visible_; }
         bool isShowSequencer() const { return show_sequencer_; }
@@ -231,6 +233,9 @@ namespace lfs::vis::gui {
                            std::string& focus_panel_name);
 
         static constexpr float SPLITTER_H = 6.0f;
+        // Scene tabs, filter chips, search and footer take about 130 dp; this keeps
+        // three tree rows visible under them.
+        static constexpr float SCENE_PANEL_MIN_HEIGHT = 200.0f;
         static constexpr float DOCK_GRIP_H = 8.0f;
         static constexpr float TAB_BAR_H = 28.0f;
         static constexpr float STATUS_BAR_HEIGHT = 22.0f;
@@ -256,7 +261,10 @@ namespace lfs::vis::gui {
         [[nodiscard]] float maxRightPanelWidth(bool show_main_panel, bool ui_hidden,
                                                const ScreenState& screen) const;
 
+        // Effective widths are clamped to the window every frame; preferred widths
+        // hold the user's choice so the panels grow back when the window does.
         float right_panel_width_ = 360.0f;
+        float right_panel_preferred_width_ = 360.0f;
         float scene_panel_ratio_ = 0.4f;
 
         float python_console_width_ = -1.0f;
@@ -271,6 +279,7 @@ namespace lfs::vis::gui {
         float bottom_dock_top_y_ = -1.0f;
 
         float left_dock_width_ = 320.0f;
+        float left_dock_preferred_width_ = 320.0f;
         bool left_dock_resizing_ = false;
         bool left_dock_hovering_edge_ = false;
         ResizeDrag left_dock_drag_{};

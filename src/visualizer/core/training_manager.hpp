@@ -216,7 +216,6 @@ namespace lfs::vis {
         }
 
         // Camera access
-        std::shared_ptr<const lfs::core::Camera> getCamById(int camId) const;
         std::vector<std::shared_ptr<lfs::core::Camera>> getAllCamList() const;
         std::expected<lfs::training::CameraMetricsSnapshot, std::string> computeCameraMetricsForCameraId(
             int camera_id,

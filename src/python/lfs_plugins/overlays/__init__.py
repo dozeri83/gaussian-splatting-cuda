@@ -4,6 +4,7 @@ import math
 
 import lichtfeld as lf
 
+from ..ui import RuntimeState
 from ..localization import safe_format
 
 from .. import toolbar as viewport_toolbar
@@ -31,9 +32,6 @@ _PULSE_SPEED = 3.0
 _BOUNCE_SPEED = 4.0
 _BOUNCE_AMOUNT = 5.0
 
-_ICON_SIZE = 48.0
-_EMPTY_STATE_TEXT_SIDE_MARGIN = 16.0
-_MIN_VIEWPORT_SIZE = 200.0
 _OVERLAY_FLAGS = (
     lf.ui.UILayout.WindowFlags.NoTitleBar
     | lf.ui.UILayout.WindowFlags.NoResize
@@ -57,6 +55,20 @@ def _viewport_bottom_inset(layout, base_inset):
     return bottom_inset
 
 
+def _empty_state_visible(import_visible):
+    return (
+        not import_visible
+        and lf.ui.is_scene_empty()
+        and not lf.ui.is_drag_hovering()
+        and not lf.ui.is_startup_visible()
+    )
+
+
+def _empty_state_import_hint():
+    import_path = lf.ui.tr("menu.file") + " > " + lf.ui.tr("menu.file.import")
+    return safe_format(lf.ui.tr("startup.drop_files_hint"), path=import_path)
+
+
 def _get_import_state():
     native_state = _native_store_value("import_overlay_state", None)
     if isinstance(native_state, dict):
@@ -75,6 +87,7 @@ class _OverlayDocumentController:
 
     def reset(self):
         self._handle = None
+        self._empty_state_signature = None
         self.gallery_transfers.reset()
         viewport_toolbar.reset_overlay_state()
 
@@ -88,10 +101,26 @@ class _OverlayDocumentController:
             return []
 
         dirty_sources = []
+        status_dirty = False
+
+        import_state = _get_import_state()
+        import_visible = import_state.get("active", False) or import_state.get("show_completion", False)
+        empty_state_signature = (
+            RuntimeState.language_generation.value,
+            _empty_state_visible(import_visible),
+        )
+        if empty_state_signature != self._empty_state_signature:
+            self._empty_state_signature = empty_state_signature
+            dirty_sources.append("empty_state")
+            status_dirty = True
+
         toolbar_sources = viewport_toolbar.update_overlay(doc) or []
         dirty_sources.extend(f"toolbar.{source}" for source in toolbar_sources)
         if self.gallery_transfers.update():
             dirty_sources.append("gallery_transfers")
+            status_dirty = True
+
+        if status_dirty:
             self._handle.dirty_all()
         return dirty_sources
 
@@ -114,6 +143,12 @@ class _OverlayDocumentController:
         if model is None:
             return False
 
+        model.bind_func("show_empty_state",
+                        lambda: self._empty_state_signature is not None and self._empty_state_signature[1])
+        model.bind_func("empty_state_title", lambda: lf.ui.tr("startup.drop_files_title"))
+        model.bind_func("empty_state_subtitle", lambda: lf.ui.tr("startup.drop_files_subtitle"))
+        model.bind_func("empty_state_import_hint", _empty_state_import_hint)
+
         viewport_toolbar.bind_overlay_model(model)
         self.gallery_transfers.bind_model(model)
         self._handle = model.get_handle()
@@ -122,88 +157,6 @@ class _OverlayDocumentController:
         body.set_attribute(_MODEL_MARKER, "1")
         self._handle.dirty_all()
         return True
-
-
-def _draw_empty_state_overlay(layout):
-    if not lf.ui.is_scene_empty() or lf.ui.is_drag_hovering() or lf.ui.is_startup_visible():
-        return
-    import_state = _get_import_state()
-    if import_state.get("active", False) or import_state.get("show_completion", False):
-        return
-
-    vp_x, vp_y = layout.get_viewport_pos()
-    vp_w, vp_h = layout.get_viewport_size()
-    if vp_w < _MIN_VIEWPORT_SIZE or vp_h < _MIN_VIEWPORT_SIZE:
-        return
-
-    layout.set_next_window_pos((vp_x, vp_y))
-    layout.set_next_window_size((vp_w, vp_h))
-
-    if not layout.begin_window("##EmptyStateOverlay", _OVERLAY_FLAGS):
-        layout.end_window()
-        return
-
-    theme = lf.ui.theme()
-    icon_color = theme.palette.overlay_icon
-    title_color = theme.palette.overlay_text
-    subtitle_color = theme.palette.overlay_text_dim
-    hint_color = (subtitle_color[0], subtitle_color[1], subtitle_color[2], 0.5)
-
-    center_x = vp_x + vp_w * 0.5
-    center_y = vp_y + vp_h * 0.5
-
-    icon_y = center_y - 50.0
-    layout.draw_window_rect(
-        center_x - _ICON_SIZE * 0.5,
-        icon_y - _ICON_SIZE * 0.3,
-        center_x + _ICON_SIZE * 0.5,
-        icon_y + _ICON_SIZE * 0.4,
-        icon_color,
-        2.0,
-    )
-    layout.draw_window_line(
-        center_x - _ICON_SIZE * 0.5,
-        icon_y - _ICON_SIZE * 0.3,
-        center_x - _ICON_SIZE * 0.2,
-        icon_y - _ICON_SIZE * 0.5,
-        icon_color,
-        2.0,
-    )
-    layout.draw_window_line(
-        center_x - _ICON_SIZE * 0.2,
-        icon_y - _ICON_SIZE * 0.5,
-        center_x + _ICON_SIZE * 0.1,
-        icon_y - _ICON_SIZE * 0.5,
-        icon_color,
-        2.0,
-    )
-    layout.draw_window_line(
-        center_x + _ICON_SIZE * 0.1,
-        icon_y - _ICON_SIZE * 0.5,
-        center_x + _ICON_SIZE * 0.2,
-        icon_y - _ICON_SIZE * 0.3,
-        icon_color,
-        2.0,
-    )
-
-    title = lf.ui.tr("startup.drop_files_title")
-    subtitle = lf.ui.tr("startup.drop_files_subtitle")
-    import_path = lf.ui.tr("menu.file") + " > " + lf.ui.tr("menu.file.import")
-    hint = safe_format(lf.ui.tr("startup.drop_files_hint"), path=import_path)
-
-    title_w, _ = layout.calc_text_size(title)
-    subtitle_w, _ = layout.calc_text_size(subtitle)
-    hint_w, _ = layout.calc_text_size(hint)
-
-    available_text_width = vp_w - 2.0 * _EMPTY_STATE_TEXT_SIDE_MARGIN
-    if title_w <= available_text_width:
-        layout.draw_window_text(center_x - title_w * 0.5, center_y + 10.0, title, title_color)
-    if subtitle_w <= available_text_width:
-        layout.draw_window_text(center_x - subtitle_w * 0.5, center_y + 40.0, subtitle, subtitle_color)
-    if hint_w <= available_text_width:
-        layout.draw_window_text(center_x - hint_w * 0.5, center_y + 70.0, hint, hint_color)
-
-    layout.end_window()
 
 
 def _draw_drag_drop_overlay(layout):
@@ -333,7 +286,6 @@ def show_gallery_transfers():
 
 
 def _draw_viewport_overlay(layout):
-    _draw_empty_state_overlay(layout)
     _draw_drag_drop_overlay(layout)
 
 
