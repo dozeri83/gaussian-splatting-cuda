@@ -8,8 +8,8 @@
 #include <functional>
 #include <mutex>
 #include <string_view>
-#include <typeindex>
 #include <type_traits>
+#include <typeindex>
 #include <unordered_map>
 #include <vector>
 

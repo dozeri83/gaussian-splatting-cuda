@@ -3,8 +3,8 @@
 #pragma once
 #include "core/tensor_image.hpp"
 
-#include <algorithm>
 #include "core/tensor/internal/private_access.hpp"
+#include <algorithm>
 #include <cmath>
 namespace lfs::core::internal::image_math {
     // COLMAP sensor/models.h (BSD-3 licensed formulas)

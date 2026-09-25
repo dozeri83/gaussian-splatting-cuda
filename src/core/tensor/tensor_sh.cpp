@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #include "core/tensor_sh.hpp"
 #include "core/cuda/sh_layout.cuh"
+#include "core/detail/tensor_half.hpp"
 #include "core/sh_value_quant.hpp"
 #include "internal/sh_codec.hpp"
 #include "internal/tensor_impl.hpp"
-#include "core/detail/tensor_half.hpp"
 #include <limits>
 #include <tbb/parallel_for.h>
 

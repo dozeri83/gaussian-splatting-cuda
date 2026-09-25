@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
-#include "core/error.hpp"
 #include "core/cuda_types.hpp"
+#include "core/error.hpp"
 #include "core/gpu_backend_fwd.hpp"
 #include "core/tensor.hpp"
 #include "core/tensor_vulkan_interop.hpp"

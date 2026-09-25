@@ -5,17 +5,19 @@
 #pragma once
 
 #include "core/camera.hpp"
+#include "core/camera_metrics.hpp"
 #include "core/error_latch.hpp"
 #include "core/export.hpp"
 #include "core/parameters.hpp"
 #include "core/splat_exportable_storage.hpp"
 #include "io/session_chapters.hpp"
-#include "core/camera_metrics.hpp"
 #if LFS_BUILD_TRAINER
 #include "training/trainer.hpp"
 #endif
 #include <condition_variable>
-namespace lfs::training { class Trainer; }
+namespace lfs::training {
+    class Trainer;
+}
 #include "core/training_state.hpp"
 #include <atomic>
 #include <chrono>

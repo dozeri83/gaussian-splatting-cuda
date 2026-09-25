@@ -3,8 +3,8 @@
 #pragma once
 
 #include "core/assert.hpp"
-#include "core/cuda_types.hpp"
 #include "core/cuda_safe_format.hpp"
+#include "core/cuda_types.hpp"
 #include "core/detail/tensor_half.hpp"
 #include "core/gpu_backend_fwd.hpp"
 #include <algorithm>
@@ -50,7 +50,6 @@
 namespace lfs::core::tensor_ops {
     LFS_CORE_API void record_tensor_kernel_launch(uint64_t n) noexcept;
 }
-
 
 namespace lfs::core {
 

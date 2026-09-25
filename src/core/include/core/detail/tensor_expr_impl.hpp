@@ -7,12 +7,12 @@
 // It should be included at the END of tensor.hpp, after Tensor class is fully defined
 
 #include "core/tensor_cuda_interop.hpp"
-#include "tensor_half.hpp"
 #include "lazy_config.hpp"
 #include "lazy_executor.hpp"
 #include "lazy_ir.hpp"
 #include "tensor_expr.hpp"
 #include "tensor_functors.hpp" // For ops::compose
+#include "tensor_half.hpp"
 #include <limits>
 #include <optional>
 #include <typeinfo>

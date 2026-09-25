@@ -1,9 +1,9 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "core/device_fault.hpp"
 #include "core/cuda_error.hpp"
 #include "core/detail/tensor_half.hpp"
+#include "core/device_fault.hpp"
 #include "core/logger.hpp"
 #include "core/tensor_cuda_interop.hpp"
 #include "internal/tensor_impl.hpp"
@@ -764,12 +764,12 @@ namespace lfs::core {
             // IMPORTANT: Use sequential execution to avoid TBB threading issues with CUDA
             // TBB worker threads don't have CUDA device context, causing cudaErrorInvalidDevice
             std::transform(
-                           idx, idx + indices_int32.numel(), dst,
-                           [src, total](int pos) {
-                               if (pos < 0)
-                                   pos += total;
-                               return (pos >= 0 && pos < static_cast<int>(total)) ? src[pos] : 0.0f;
-                           });
+                idx, idx + indices_int32.numel(), dst,
+                [src, total](int pos) {
+                    if (pos < 0)
+                        pos += total;
+                    return (pos >= 0 && pos < static_cast<int>(total)) ? src[pos] : 0.0f;
+                });
         }
         return result;
     }
@@ -1588,16 +1588,16 @@ namespace lfs::core {
                     // Element-wise assignment
                     size_t num_elements = numel();
                     std::for_each(
-                                  std::views::iota(size_t(0), idx.numel()).begin(),
-                                  std::views::iota(size_t(0), idx.numel()).end(),
-                                  [data, indices, values, num_elements](size_t i) {
-                                      IndexT pos = indices[i];
-                                      if (pos < 0)
-                                          pos += num_elements;
-                                      if (pos >= 0 && pos < static_cast<IndexT>(num_elements)) {
-                                          data[pos] = values[i];
-                                      }
-                                  });
+                        std::views::iota(size_t(0), idx.numel()).begin(),
+                        std::views::iota(size_t(0), idx.numel()).end(),
+                        [data, indices, values, num_elements](size_t i) {
+                            IndexT pos = indices[i];
+                            if (pos < 0)
+                                pos += num_elements;
+                            if (pos >= 0 && pos < static_cast<IndexT>(num_elements)) {
+                                data[pos] = values[i];
+                            }
+                        });
                 }
             }
         };

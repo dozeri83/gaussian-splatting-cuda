@@ -1,12 +1,12 @@
 /* SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "vulkan_ops.hpp"
+#include "core/tensor.hpp"
 #include "core/tensor/backend/vulkan/vk_context.hpp"
 #include "core/tensor/backend/vulkan/vk_ops_common.hpp"
 #include "core/tensor/backend/vulkan/vk_pipelines.hpp"
 #include "core/tensor/backend/vulkan/vk_recorder.hpp"
-#include "core/tensor.hpp"
+#include "vulkan_ops.hpp"
 
 #include <algorithm>
 #include <array>

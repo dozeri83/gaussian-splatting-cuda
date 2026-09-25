@@ -8,8 +8,8 @@
 // graph-capture Unsupported helpers are gated by !__CUDACC__ (phase-6c P2).
 // Frozen layout and protocol: .codex_tmp/phase-6c-device-fault-spec.md §0.1 / §1 / §9.
 
-#include "core/export.hpp"
 #include "core/cuda_types.hpp"
+#include "core/export.hpp"
 
 #include <cstddef>
 #include <cstdint>

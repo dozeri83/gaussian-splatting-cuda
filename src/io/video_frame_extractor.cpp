@@ -1778,9 +1778,9 @@ namespace lfs::io {
                             }
                         } else
 #endif
-                        if (write_image_file(filename, hw_rot_w, hw_rot_h,
-                                                    cpu_contiguous_buffer, params.format,
-                                                    params.jpg_quality)) {
+                            if (write_image_file(filename, hw_rot_w, hw_rot_h,
+                                                 cpu_contiguous_buffer, params.format,
+                                                 params.jpg_quality)) {
                             ++written_count;
                             if (params.generate_metadata) {
                                 saved_frames.push_back({lfs::core::path_to_utf8(filename.filename()),
@@ -1901,9 +1901,9 @@ namespace lfs::io {
                         }
                     } else
 #endif
-                    if (write_image_file(filename, sw_rot_w, sw_rot_h,
-                                                cpu_contiguous_buffer, params.format,
-                                                params.jpg_quality)) {
+                        if (write_image_file(filename, sw_rot_w, sw_rot_h,
+                                             cpu_contiguous_buffer, params.format,
+                                             params.jpg_quality)) {
                         ++written_count;
                         if (params.generate_metadata) {
                             saved_frames.push_back({lfs::core::path_to_utf8(filename.filename()),
