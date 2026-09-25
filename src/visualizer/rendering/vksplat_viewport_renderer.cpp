@@ -1944,6 +1944,16 @@ namespace lfs::vis {
 #endif
     }
 
+    bool VksplatViewportRenderer::waitForArenaHandoff(const std::chrono::milliseconds timeout) {
+#if LFS_BUILD_TRAINER
+        return waitForViewerArenaWindow(lfs::core::GlobalArenaManager::instance().get_arena(),
+                                        arena_handoff_token_, timeout, kNavigationTrainingGrace);
+#else
+        (void)timeout;
+        return true;
+#endif
+    }
+
     void VksplatViewportRenderer::renewArenaHandoff() {
 #if LFS_BUILD_TRAINER
         if (arena_handoff_token_ == 0) {

@@ -831,9 +831,7 @@ namespace lfs::vis {
             const VulkanSplitViewParams& split_view_params) {
             RenderingManager::VulkanMeshFrame frame;
             const auto vp_data = frame_ctx.makeViewportData();
-            frame.scene_view = vp_data.getViewMatrix();
-            frame.scene_projection = vp_data.getProjectionMatrix();
-            frame.view_projection = frame.scene_projection * frame.scene_view;
+            frame.view_projection = vp_data.getProjectionMatrix() * vp_data.getViewMatrix();
             frame.camera_position = vp_data.translation;
             frame.items.reserve(frame_ctx.scene_state.meshes.size());
 
@@ -1869,6 +1867,11 @@ namespace lfs::vis {
         // layout only after matches_viewport_extent reports a fresh output.
         // First frame / no cache still falls back to one blocking acquire below.
         const bool training_try_lock = is_training;
+        if (is_training && vksplat_viewport_renderer_ &&
+            (dirty_mask_.load(std::memory_order_relaxed) & DirtyFlag::CAMERA) != 0) {
+            // No lock is held yet, so a refining trainer can still take the exclusive one.
+            (void)vksplat_viewport_renderer_->waitForArenaHandoff(kNavigationArenaWait);
+        }
         auto render_lock = acquireLiveModelRenderLock(scene_manager, training_try_lock);
         bool render_lock_contended = training_try_lock && !render_lock.has_value() &&
                                      scene_manager && scene_manager->getTrainerManager() &&
@@ -4232,13 +4235,6 @@ namespace lfs::vis {
                                         };
                                         temporal_frame_published = true;
                                     }
-                                    mesh_frame.scene_reprojectable =
-                                        !request.frame_view.orthographic &&
-                                        !request.frame_view.intrinsics_override &&
-                                        !request.equirectangular &&
-                                        request.frame_view.cameraSize() == request.frame_view.size &&
-                                        !pending_split_view.enabled;
-                                    mesh_frame.scene_image_generation = render_result.generation;
                                 }
                                 setVulkanMeshFrame(std::move(mesh_frame));
                             } else {
