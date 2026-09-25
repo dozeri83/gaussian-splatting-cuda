@@ -5,7 +5,7 @@
 #include "core/cuda/sh_layout.cuh"
 #include "core/cuda_error.hpp"
 #include "core/logger.hpp"
-#include "kmeans.hpp"
+#include "core/tensor.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cuda_fp16.h>
@@ -23,10 +23,14 @@
 #include <unordered_map>
 #include <vector>
 
-namespace lfs::io {
+namespace lfs::core::export_cuda {
 
     using lfs::core::DataType;
     using lfs::core::Device;
+    using lfs::core::Tensor;
+
+    void assign_sh3_labels(const Tensor& shN_swizzled, const Tensor& centroids,
+                           const Tensor& centroid_norms, Tensor& labels, bool fast, bool have_labels);
 
     namespace {
 
@@ -1536,6 +1540,7 @@ namespace lfs::io {
             auto* half_centroids = half_points + np * 48;
             prepare_half_sh_kernel<<<(std::max(np, kp) * 48 + 255) / 256, 256>>>(sh, centroids.ptr<float>(), half_points, half_centroids, n, k);
             LFS_CUDA_LAUNCH_CHECK(nullptr, "io.kmeans.prepare_half_sh");
+            // LFS-CENSUS-OK(unpinned-multi-capture): every operand is freed stream-ordered on the legacy stream this launch uses.
             assign_sh3_screened_kernel<<<(n + 127) / 128, 512>>>(
                 sh, centroids.ptr<float>(), centroid_norms.ptr<float>(), labels.ptr<int>(), n, k, half_points, half_centroids, have_labels);
             LFS_CUDA_LAUNCH_CHECK(nullptr, "io.kmeans.assign_sh3_labels");
@@ -1588,4 +1593,4 @@ namespace lfs::io {
         }
     }
 
-} // namespace lfs::io
+} // namespace lfs::core::export_cuda
