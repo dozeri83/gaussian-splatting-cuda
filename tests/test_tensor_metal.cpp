@@ -1090,6 +1090,162 @@ namespace {
         expect_same_on_both([&] { return nn::residual_scale(gpu(rows), gpu(rows), gpu(gamma)); }, 1.0e-6f, 1.0e-6f);
     }
 
+    // Metal's dedicated linear, attention and norm kernels at partial tiles,
+    // odd head dims, broadcast masks and half precision.
+    TEST_F(TensorMetal, NeuralNetworkKernelEdgesMatchVulkan) {
+        namespace nn = lfs::core::nn;
+        const auto gpu = [](const Tensor& host) { return host.to(Device::GPU); };
+        const auto half = [&](const Tensor& host) { return gpu(host).to(DataType::Float16); };
+        const auto shaped = [](const TensorShape& shape, const unsigned seed) {
+            return random_tensor(shape.elements(), -1.0f, 1.0f, seed).reshape(shape);
+        };
+        constexpr float tolerance = 1.0e-4f, half_tolerance = 2.0e-2f;
+
+        // Batched and shared weights, stored [k][n] and [n][k], with k off
+        // every tile multiple.
+        const Tensor a = shaped({3, 65, 37}, 201), shared = shaped({37, 70}, 202), batched = shaped({3, 70, 37}, 203);
+        const Tensor bias = shaped({70}, 204);
+        for (const auto activation : {nn::Activation::None, nn::Activation::Relu, nn::Activation::GeluErf,
+                                      nn::Activation::Silu}) {
+            SCOPED_TRACE(static_cast<int>(activation));
+            expect_same_on_both([&] {
+                const Tensor gb = gpu(bias);
+                return nn::gemm(gpu(a), gpu(shared), false, false, &gb, activation);
+            },
+                                tolerance, tolerance);
+        }
+        expect_same_on_both([&] { return nn::bmm(gpu(a), gpu(batched), false, true); }, tolerance, tolerance);
+        expect_same_on_both([&] { return nn::bmm(half(a), half(batched), false, true).to(DataType::Float32); },
+                            half_tolerance, half_tolerance);
+        const Tensor single = shaped({1, 1, 5}, 205), tiny = shaped({3, 5}, 206);
+        expect_same_on_both([&] { return nn::linear(gpu(single), gpu(tiny)); }, tolerance, tolerance);
+
+        // Head dims of 5, 72 and 128; keys and queries off the 8, 16 and 32 blocks.
+        for (const int dim : {5, 72, 128}) {
+            SCOPED_TRACE(dim);
+            const Tensor q = shaped({2, 2, 45, static_cast<size_t>(dim)}, 207);
+            const Tensor k = shaped({2, 2, 77, static_cast<size_t>(dim)}, 208);
+            const Tensor v = shaped({2, 2, 77, static_cast<size_t>(dim)}, 209);
+            expect_same_on_both([&] { return nn::attention(gpu(q), gpu(k), gpu(v)); }, tolerance, tolerance);
+            expect_same_on_both([&] { return nn::attention(half(q), half(k), half(v)).to(DataType::Float32); },
+                                half_tolerance, half_tolerance);
+        }
+
+        // Masks broadcast over batch and heads, and over keys of rank-2 masks.
+        const Tensor q = shaped({2, 3, 19, 16}, 210), k = shaped({2, 3, 40, 16}, 211), v = shaped({2, 3, 40, 16}, 212);
+        const Tensor full_mask = shaped({1, 3, 19, 40}, 213), row_mask = shaped({19, 40}, 214);
+        for (const Tensor* const mask : {static_cast<const Tensor*>(&full_mask), &row_mask}) {
+            SCOPED_TRACE(mask->ndim());
+            expect_same_on_both([&] {
+                const Tensor gm = gpu(*mask);
+                return nn::attention(gpu(q), gpu(k), gpu(v), &gm, 0.3f);
+            },
+                                tolerance, tolerance);
+            expect_same_on_both([&] {
+                const Tensor gm = half(*mask);
+                return nn::attention(half(q), half(k), half(v), &gm, 0.3f).to(DataType::Float32);
+            },
+                                half_tolerance, half_tolerance);
+        }
+
+        // Few queries over many keys split the keys; with a mask, whole splits
+        // of a row can be masked out.
+        const Tensor few = shaped({2, 2, 5, 40}, 227), many_keys = shaped({2, 2, 1000, 40}, 228);
+        const Tensor many_values = shaped({2, 2, 1000, 40}, 229);
+        auto split_mask = shaped({1, 1, 5, 1000}, 230);
+        split_mask.slice(2, 1, 2).slice(3, 0, 700).fill_(-std::numeric_limits<float>::infinity());
+        expect_same_on_both([&] { return nn::attention(gpu(few), gpu(many_keys), gpu(many_values)); }, tolerance,
+                            tolerance);
+        expect_same_on_both([&] {
+            const Tensor gm = half(split_mask);
+            return nn::attention(half(few), half(many_keys), half(many_values), &gm).to(DataType::Float32);
+        },
+                            half_tolerance, half_tolerance);
+
+        // A query whose keys are all masked out attends to nothing, as on CUDA.
+        auto blocked = Tensor::zeros({1, 1, 19, 40}, Device::CPU);
+        blocked.slice(2, 4, 5).fill_(-std::numeric_limits<float>::infinity());
+        const auto attended = [&] {
+            const Tensor gm = to_metal(blocked);
+            GpuBackendScope scope(GpuBackend::Metal);
+            return nn::attention(gpu(q), gpu(k), gpu(v), &gm).cpu();
+        }();
+        EXPECT_EQ(attended.slice(2, 4, 5).abs().max_scalar(), 0.0f);
+        EXPECT_GT(attended.slice(2, 5, 6).abs().max_scalar(), 0.0f);
+        auto blocked_split = Tensor::zeros({1, 1, 5, 1000}, Device::CPU);
+        blocked_split.slice(2, 3, 4).fill_(-std::numeric_limits<float>::infinity());
+        const auto attended_split = [&] {
+            const Tensor gm = to_metal(blocked_split);
+            GpuBackendScope scope(GpuBackend::Metal);
+            return nn::attention(gpu(few), gpu(many_keys), gpu(many_values), &gm).cpu();
+        }();
+        EXPECT_EQ(attended_split.slice(2, 3, 4).abs().max_scalar(), 0.0f);
+        EXPECT_GT(attended_split.slice(2, 4, 5).abs().max_scalar(), 0.0f);
+
+        // Convolutions over batches: grouped 1x1, a 3x3 with more output
+        // channels than one tile whose patches exceed one 64 MiB chunk, and
+        // implicit-GEMM ones with fewer.
+        const Tensor images = shaped({2, 8, 13, 11}, 218), pointwise = shaped({6, 4, 1, 1}, 219);
+        const Tensor pointwise_bias = shaped({6}, 220);
+        expect_same_on_both([&] {
+            const Tensor gb = gpu(pointwise_bias);
+            return nn::conv2d(gpu(images), gpu(pointwise), &gb, {.groups = 2, .activation = nn::Activation::Relu});
+        },
+                            tolerance, tolerance);
+        const Tensor large = shaped({2, 32, 200, 200}, 221), kernel = shaped({72, 32, 3, 3}, 222);
+        const Tensor kernel_bias = shaped({72}, 223);
+        expect_same_on_both([&] {
+            const Tensor gb = gpu(kernel_bias);
+            return nn::conv2d(gpu(large), gpu(kernel), &gb, {.pad_h = 1, .pad_w = 1});
+        },
+                            tolerance, tolerance);
+        expect_same_on_both([&] {
+            const Tensor gb = half(kernel_bias.slice(0, 0, 40));
+            return nn::conv2d(half(images), half(kernel.slice(0, 0, 40).slice(1, 0, 8)), &gb,
+                              {.stride_h = 2, .stride_w = 2, .pad_h = 1, .pad_w = 1})
+                .to(DataType::Float32);
+        },
+                            half_tolerance, half_tolerance);
+
+        // Transposed convolutions: grouped, padded and dilated, and SAM2's
+        // 2x2 stride-2 upscaling.
+        const Tensor up_grouped = shaped({8, 3, 3, 3}, 224), up_bias = shaped({6}, 225);
+        expect_same_on_both([&] {
+            const Tensor gb = gpu(up_bias);
+            return nn::conv_transpose2d(gpu(images), gpu(up_grouped), &gb,
+                                        {.stride_h = 2, .stride_w = 2, .pad_h = 1, .pad_w = 1, .dilation_h = 2,
+                                         .groups = 2, .output_pad_h = 1, .activation = nn::Activation::GeluTanh});
+        },
+                            tolerance, tolerance);
+        const Tensor upscale = shaped({8, 5, 2, 2}, 226);
+        expect_same_on_both([&] {
+            return nn::conv_transpose2d(half(images), half(upscale), nullptr, {.stride_h = 2, .stride_w = 2})
+                .to(DataType::Float32);
+        },
+                            half_tolerance, half_tolerance);
+
+        // The portable inference kernels read and write Float16 on Metal.
+        for (const auto mode : {nn::ResizeMode::Nearest, nn::ResizeMode::Bilinear, nn::ResizeMode::Cubic}) {
+            SCOPED_TRACE(static_cast<int>(mode));
+            expect_same_on_both([&] {
+                return nn::resize2d(half(images), 29, 17, mode, nn::CoordTransform::HalfPixel).to(DataType::Float32);
+            },
+                                half_tolerance, half_tolerance);
+        }
+        expect_same_on_both([&] { return nn::max_pool2d(half(images), 3, 3, 2, 2, 1, 1).to(DataType::Float32); });
+        expect_same_on_both([&] { return nn::gelu(half(images)).to(DataType::Float32); }, half_tolerance,
+                            half_tolerance);
+
+        // Rows past a threadgroup's eight, and widths off the SIMD width.
+        const Tensor rows = shaped({13, 3, 77}, 215), gamma = shaped({77}, 216), beta = shaped({77}, 217);
+        expect_same_on_both([&] { return nn::layer_norm(gpu(rows), gpu(gamma), gpu(beta)); }, 1.0e-5f, 1.0e-5f);
+        expect_same_on_both([&] { return nn::rms_norm(gpu(rows), gpu(gamma), 1.0e-3f); }, 1.0e-5f, 1.0e-5f);
+        expect_same_on_both([&] {
+            return nn::layer_norm(half(rows), half(gamma), half(beta)).to(DataType::Float32);
+        },
+                            half_tolerance, half_tolerance);
+    }
+
     TEST_F(TensorMetal, SplatTransformMatchesVulkan) {
         constexpr size_t count = 5000;
         const Tensor scales = random_tensor(count * 3, -6.0f, 1.0f, 75).reshape({count, 3});

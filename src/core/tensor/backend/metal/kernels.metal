@@ -24,6 +24,8 @@ constant uint kReduce [[function_constant(6)]];
 constant uint kScatter [[function_constant(7)]];
 constant uint kTransposeB [[function_constant(14)]];
 constant uint kBiasRelu [[function_constant(15)]];
+// Matrix-unit GEMMs compute 64x64 tiles instead of 32x32 ones.
+constant uint kWideTile [[function_constant(27)]];
 
 constant uint kReduceThreads = 256;
 
@@ -692,13 +694,15 @@ kernel void copy_bytes(device const uchar* source_buffer [[buffer(0)]],
 
 // ---------------------------------------------------------------------------
 // Strided gather and scatter over up to eight dimensions, and broadcast
-// selection. Elements move as kElementSize bytes; the one converting form is
-// the Int32 to Float32 scatter.
+// selection. Elements move as kElementSize bytes, up to 16-byte chunks of
+// several elements; the one converting form is the Int32 to Float32 scatter.
 
 static void copy_element(device const uchar* source, ulong source_index,
                          device uchar* destination, ulong destination_index) {
     if (kInputDType != kOutputDType)
         ((device float*)destination)[destination_index] = float(((device const int*)source)[source_index]);
+    else if (kElementSize == 16)
+        ((device uint4*)destination)[destination_index] = ((device const uint4*)source)[source_index];
     else if (kElementSize == 8)
         ((device ulong*)destination)[destination_index] = ((device const ulong*)source)[source_index];
     else if (kElementSize == 4)
@@ -905,7 +909,7 @@ kernel void transpose_2d(device const uchar* input_buffer [[buffer(0)]],
 // elements into output[group]; 2 segmented, one threadgroup per contiguous
 // segment of reduce elements; 3 strided, one thread per (outer, inner)
 // output over the reduce range of its split (grid y), writing
-// output[split][outer][inner].
+// output[split][outer][inner]; 4 rows, one SIMD group per contiguous segment.
 
 constant uint kReduceMode [[function_constant(16)]];
 
@@ -1087,6 +1091,25 @@ kernel void reduce(device const uchar* input_buffer [[buffer(0)]],
     threadgroup long shared_integers[kReduceThreads / 32];
     device const uchar* input = input_buffer + params.input_offset;
     device uchar* output = output_buffer + params.output_offset;
+    if (kReduceMode == 4) {
+        const uint row = group.x * (kReduceThreads / 32) + simdgroup;
+        if (row >= params.outer)
+            return;
+        const ulong base = ulong(row) * params.reduce;
+        Accumulator accumulator = start_accumulator();
+        for (uint element = lane; element < params.reduce; element += 32)
+            accumulate(accumulator, input, base + element, params);
+        if (kFloatAccumulator) {
+            const float2 total = reduce_simdgroup(float2(accumulator.value, accumulator.compensation));
+            accumulator.value = total.x;
+            accumulator.compensation = total.y;
+        } else {
+            accumulator.integer = reduce_simdgroup(accumulator.integer);
+        }
+        if (lane == 0)
+            store_reduction(output, row, accumulator, params);
+        return;
+    }
     if (kReduceMode == 3) {
         const uint outputs = params.outer * params.inner;
         const uint output_index = group.x * kReduceThreads + thread_index;
@@ -1096,6 +1119,8 @@ kernel void reduce(device const uchar* input_buffer [[buffer(0)]],
         const ulong base = ulong(outer_index) * params.reduce * params.inner + (output_index - outer_index * params.inner);
         const uint end = min(params.reduce, (group.y + 1) * params.split_chunk);
         Accumulator accumulator = start_accumulator();
+        // Unrolled so the strided loads issue ahead of the in-order combines.
+#pragma unroll(8)
         for (uint element = group.y * params.split_chunk; element < end; ++element)
             accumulate(accumulator, input, base + ulong(element) * params.inner, params);
         store_reduction(output, ulong(group.y) * outputs + output_index, accumulator, params);
@@ -1580,6 +1605,17 @@ static uint sortable_key(float value, bool descending) {
     return descending ? ~key : key;
 }
 
+// Decodes a sort key into its value. Zeros, whose sign the key drops, and
+// NaNs, whose payload it drops, return false and are read back instead.
+static bool value_from_key(uint key, bool descending, thread float& value) {
+    if (descending)
+        key = ~key;
+    if (key == 0x80000000u || key == 0xffffffffu)
+        return false;
+    value = as_type<float>((key & 0x80000000u) != 0u ? key & 0x7fffffffu : ~key);
+    return true;
+}
+
 static ulong sort_line_base(uint line, constant SortParams& params) {
     const uint outer_index = line / params.inner;
     return ulong(outer_index) * params.dim_size * params.inner + (line - outer_index * params.inner);
@@ -1657,10 +1693,10 @@ static uint read_packed(uint4 low, uint4 high, uint digit) {
 }
 
 // Least-significant-digit radix sort over 4-bit digits for longer lines.
-// kOp is the phase: 0 extract keys and positions, 1 block histograms, 2 an
-// exclusive digit-major scan per line, 3 stable scatter from A to B or B to A
-// by pass parity, 4 gather values by position into keys B, 5 write values
-// and positions.
+// kOp is the phase: 0 extract keys and positions, 1 block histograms, 3
+// stable scatter from A to B or B to A by pass parity, 4 decode the sorted
+// keys into values in keys B, 5 write values and positions. Between 1 and 3
+// the host scans each line's digit-major histogram inclusively.
 kernel void radix_sort(device uchar* values_buffer [[buffer(0)]],
                        device uchar* indices_buffer [[buffer(1)]],
                        device uchar* scratch [[buffer(2)]],
@@ -1669,9 +1705,7 @@ kernel void radix_sort(device uchar* values_buffer [[buffer(0)]],
                        uint group [[threadgroup_position_in_grid]],
                        uint position [[thread_position_in_grid]]) {
     threadgroup atomic_uint shared_histogram[kRadixDigits];
-    threadgroup uint shared_scan[kReduceThreads];
-    threadgroup uint4 shared_low[kReduceThreads];
-    threadgroup uint4 shared_high[kReduceThreads];
+    threadgroup uint4 simd_low[kReduceThreads / 32], simd_high[kReduceThreads / 32];
     device float* values = (device float*)(values_buffer + params.values_offset);
     device uint* keys_a = (device uint*)(scratch + params.keys_a_offset);
     device uint* keys_b = (device uint*)(scratch + params.keys_b_offset);
@@ -1688,33 +1722,14 @@ kernel void radix_sort(device uchar* values_buffer [[buffer(0)]],
             keys_a[position] = sortable_key(values[base + ulong(element) * params.inner], params.descending != 0);
             positions_a[position] = element;
         } else if (kOp == 4) {
-            keys_b[position] = as_type<uint>(values[base + ulong(positions_a[position]) * params.inner]);
+            float value;
+            if (!value_from_key(keys_a[position], params.descending != 0, value))
+                value = values[base + ulong(positions_a[position]) * params.inner];
+            keys_b[position] = as_type<uint>(value);
         } else {
             values[base + ulong(element) * params.inner] = as_type<float>(keys_b[position]);
             ((device long*)(indices_buffer + params.indices_offset))[base + ulong(element) * params.inner] =
                 long(positions_a[position]);
-        }
-        return;
-    }
-    if (kOp == 2) {
-        const uint entries = kRadixDigits * params.blocks_per_line;
-        device uint* line_histogram = histogram + ulong(group) * entries;
-        uint carry = 0;
-        for (uint chunk = 0; chunk < entries; chunk += kReduceThreads) {
-            const uint entry = chunk + thread_index;
-            const uint count = entry < entries ? line_histogram[entry] : 0u;
-            shared_scan[thread_index] = count;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint offset = 1; offset < kReduceThreads; offset <<= 1) {
-                const uint partial = thread_index >= offset ? shared_scan[thread_index - offset] : 0u;
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                shared_scan[thread_index] += partial;
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            if (entry < entries)
-                line_histogram[entry] = carry + shared_scan[thread_index] - count;
-            carry += shared_scan[kReduceThreads - 1];
-            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
         return;
     }
@@ -1732,7 +1747,8 @@ kernel void radix_sort(device uchar* values_buffer [[buffer(0)]],
         digits[slot] = kRadixDigits;
         if (element < params.dim_size) {
             keys[slot] = from_a ? keys_a[line_offset + element] : keys_b[line_offset + element];
-            origins[slot] = from_a ? positions_a[line_offset + element] : positions_b[line_offset + element];
+            if (kOp == 3)
+                origins[slot] = from_a ? positions_a[line_offset + element] : positions_b[line_offset + element];
             digits[slot] = (keys[slot] >> params.shift) & (kRadixDigits - 1u);
             add_packed(low, high, digits[slot], 1u);
         }
@@ -1752,20 +1768,21 @@ kernel void radix_sort(device uchar* values_buffer [[buffer(0)]],
                 atomic_load_explicit(&shared_histogram[thread_index], memory_order_relaxed);
         return;
     }
-    // Ranks within the block come from a prefix over the packed counters.
-    shared_low[thread_index] = low;
-    shared_high[thread_index] = high;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint offset = 1; offset < kReduceThreads; offset <<= 1) {
-        const uint4 partial_low = thread_index >= offset ? shared_low[thread_index - offset] : uint4(0);
-        const uint4 partial_high = thread_index >= offset ? shared_high[thread_index - offset] : uint4(0);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        shared_low[thread_index] += partial_low;
-        shared_high[thread_index] += partial_high;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Ranks within the block come from a prefix over the packed counters:
+    // within each SIMD group, then across the groups' totals.
+    uint4 exclusive_low = simd_prefix_exclusive_sum(low), exclusive_high = simd_prefix_exclusive_sum(high);
+    const uint simd = thread_index / 32, lane = thread_index % 32;
+    if (lane == 31) {
+        simd_low[simd] = exclusive_low + low;
+        simd_high[simd] = exclusive_high + high;
     }
-    const uint4 exclusive_low = shared_low[thread_index] - low;
-    const uint4 exclusive_high = shared_high[thread_index] - high;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint earlier = 0; earlier < simd; ++earlier) {
+        exclusive_low += simd_low[earlier];
+        exclusive_high += simd_high[earlier];
+    }
+    // The line's histogram holds inclusive sums; the exclusive one is the entry before.
+    const ulong line_base = ulong(line) * kRadixDigits * params.blocks_per_line;
     uint4 seen_low = uint4(0), seen_high = uint4(0);
     for (uint slot = 0; slot < kRadixPerThread; ++slot) {
         if (digits[slot] == kRadixDigits)
@@ -1773,8 +1790,8 @@ kernel void radix_sort(device uchar* values_buffer [[buffer(0)]],
         const uint rank = read_packed(exclusive_low, exclusive_high, digits[slot]) +
                           read_packed(seen_low, seen_high, digits[slot]);
         add_packed(seen_low, seen_high, digits[slot], 1u);
-        const ulong destination =
-            line_offset + histogram[(ulong(line) * kRadixDigits + digits[slot]) * params.blocks_per_line + block] + rank;
+        const uint entry = digits[slot] * params.blocks_per_line + block;
+        const ulong destination = line_offset + (entry == 0 ? 0u : histogram[line_base + entry - 1]) + rank;
         if (from_a) {
             keys_b[destination] = keys[slot];
             positions_b[destination] = origins[slot];
@@ -3207,16 +3224,17 @@ struct InferenceGeometry {
     float u0, u1, v0, v1;
 };
 
+// Operands are Float32 or Float16 (kInputDType, kOutputDType); the math is FP32.
 struct InferenceParams {
-    device const float* input;
-    device float* output;
+    device const uchar* input;
+    device uchar* output;
     uint total, step;
     InferenceGeometry p;
 };
 
 static float inference_sample(constant InferenceParams& params, int plane, int y, int x) {
     constant InferenceGeometry& p = params.p;
-    return params.input[(plane * p.height + clamp(y, 0, p.height - 1)) * p.width + clamp(x, 0, p.width - 1)];
+    return load_float(params.input, (plane * p.height + clamp(y, 0, p.height - 1)) * p.width + clamp(x, 0, p.width - 1));
 }
 
 static float resize_coordinate(int i, int in_size, int out_size, int mode) {
@@ -3247,6 +3265,19 @@ static float erf_approximation(float x) {
     return x < 0.0f ? -r : r;
 }
 
+// An nn::Activation of x, as the Vulkan kernels evaluate it in fp32.
+static float nn_activation(float x, int activation) {
+    if (activation == 1)
+        return max(x, 0.0f);
+    if (activation == 2)
+        return 0.5f * x * (1.0f + tanh(0.7978845608028654f * (x + 0.044715f * x * x * x)));
+    if (activation == 3)
+        return 0.5f * x * (1.0f + erf_approximation(x * 0.7071067811865475f));
+    if (activation == 4)
+        return x / (1.0f + exp(-x));
+    return x;
+}
+
 kernel void inference(constant InferenceParams& params [[buffer(0)]], uint i [[thread_position_in_grid]]) {
     if (i >= params.total)
         return;
@@ -3271,7 +3302,8 @@ kernel void inference(constant InferenceParams& params [[buffer(0)]], uint i [[t
                 iy /= p.stride_h;
                 ix /= p.stride_w;
                 if (iy < p.height && ix < p.width)
-                    value += params.input[((c * p.kernel_h + ky) * p.kernel_w + kx) * p.height * p.width + iy * p.width + ix];
+                    value += load_float(params.input, ((c * p.kernel_h + ky) * p.kernel_w + kx) * p.height * p.width +
+                                                          iy * p.width + ix);
             }
         }
     } else if (kOp == 2) {
@@ -3313,17 +3345,7 @@ kernel void inference(constant InferenceParams& params [[buffer(0)]], uint i [[t
         if (p.mode != 0)
             value /= max(1, p.include_pad != 0 ? p.kernel_h * p.kernel_w : count);
     } else if (kOp == 4) {
-        const float x = params.input[index];
-        if (p.mode == 1)
-            value = max(x, 0.0f);
-        else if (p.mode == 2)
-            value = 0.5f * x * (1.0f + tanh(0.7978845608028654f * (x + 0.044715f * x * x * x)));
-        else if (p.mode == 3)
-            value = 0.5f * x * (1.0f + erf_approximation(x * 0.7071067811865475f));
-        else if (p.mode == 4)
-            value = x / (1.0f + exp(-x));
-        else
-            value = x;
+        value = nn_activation(load_float(params.input, index), p.mode);
     } else {
         const int pixel = index % (p.height * p.width);
         if (index < p.height * p.width)
@@ -3331,7 +3353,7 @@ kernel void inference(constant InferenceParams& params [[buffer(0)]], uint i [[t
         else
             value = p.height == 1 ? p.v0 : p.v0 + (p.v1 - p.v0) * (pixel / p.width) / (p.height - 1);
     }
-    params.output[i] = value;
+    store_float(params.output, i, value);
 }
 
 // ---------------------------------------------------------------------------
@@ -3339,9 +3361,8 @@ kernel void inference(constant InferenceParams& params [[buffer(0)]], uint i [[t
 // C[m][n] = A[m][k] * B, with B stored as [k][n] or, with kTransposeB, as
 // [n][k]; batches are packed. kBiasRelu applies max(value + bias[row], 0) to
 // the tile in registers before it is stored. A threadgroup of four SIMD
-// groups computes one 32x32 tile, and the matmul checks the matrix edges.
-
-constant int kGemmTile = 32;
+// groups computes one 32x32 tile, or 64x64 with kWideTile, and the matmul
+// checks the matrix edges.
 
 struct GemmParams {
     ulong lhs_offset;
@@ -3359,7 +3380,7 @@ struct GemmParams {
 
 using Matrix = tensor<device float, dextents<int32_t, 2>, tensor_inline>;
 
-template <bool TransposeB>
+template <bool TransposeB, int Tile>
 static void gemm_tile(device float* lhs, device float* rhs, device float* output, device const float* bias,
                       constant GemmParams& params, uint2 group) {
     const int m = int(params.m), n = int(params.n), k = int(params.k);
@@ -3367,10 +3388,10 @@ static void gemm_tile(device float* lhs, device float* rhs, device float* output
     Matrix a(lhs, dextents<int32_t, 2>(k, m));
     Matrix b(rhs, TransposeB ? dextents<int32_t, 2>(k, n) : dextents<int32_t, 2>(n, k));
     Matrix c(output, dextents<int32_t, 2>(n, m));
-    constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor(
-        kGemmTile, kGemmTile, static_cast<int>(dynamic_extent), false, TransposeB);
+    constexpr auto descriptor =
+        mpp::tensor_ops::matmul2d_descriptor(Tile, Tile, static_cast<int>(dynamic_extent), false, TransposeB);
     mpp::tensor_ops::matmul2d<descriptor, execution_simdgroups<4>> matmul;
-    const int row = int(group.y) * kGemmTile, column = int(group.x) * kGemmTile;
+    const int row = int(group.y) * Tile, column = int(group.x) * Tile;
     auto a_tile = a.slice(0, row);
     auto b_tile = TransposeB ? b.slice(0, column) : b.slice(column, 0);
     auto c_tile = c.slice(column, row);
@@ -3404,10 +3425,14 @@ kernel void gemm(device const uchar* lhs_buffer [[buffer(0)]],
     device float* rhs = (device float*)(rhs_buffer + params.rhs_offset) + group.z * params.rhs_stride;
     device float* output = (device float*)(output_buffer + params.output_offset) + group.z * params.output_stride;
     device const float* bias = kBiasRelu != 0 ? (device const float*)(bias_buffer + params.bias_offset) : nullptr;
-    if (kTransposeB != 0)
-        gemm_tile<true>(lhs, rhs, output, bias, params, group.xy);
+    if (kTransposeB != 0 && kWideTile != 0)
+        gemm_tile<true, 64>(lhs, rhs, output, bias, params, group.xy);
+    else if (kTransposeB != 0)
+        gemm_tile<true, 32>(lhs, rhs, output, bias, params, group.xy);
+    else if (kWideTile != 0)
+        gemm_tile<false, 64>(lhs, rhs, output, bias, params, group.xy);
     else
-        gemm_tile<false>(lhs, rhs, output, bias, params, group.xy);
+        gemm_tile<false, 32>(lhs, rhs, output, bias, params, group.xy);
 }
 
 // ---------------------------------------------------------------------------
