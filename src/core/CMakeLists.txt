@@ -49,6 +49,7 @@ set(TENSOR_SOURCES
         tensor/tensor_gpu_elapsed.cpp
         tensor/tensor_backend_selftest.cpp
         tensor/backend/backend_registry.cpp
+        tensor/backend/portable_nn_ops.cpp
         tensor/backend/facade_trace.cpp
         tensor/backend/cuda/cuda_ops_pointwise.cpp
         tensor/backend/cuda/cuda_ops_expression.cpp
@@ -185,6 +186,9 @@ if(APPLE)
         tensor/backend/metal/metal_ops.mm
         ${_lfs_metal_kernels_cpp}
     )
+    if(LFS_TENSOR_VULKAN)
+        list(APPEND TENSOR_SOURCES tensor/backend/metal/metal_vulkan_interop.mm)
+    endif()
 endif()
 
 # Core module sources
@@ -265,7 +269,7 @@ add_library(lfs_core SHARED ${CORE_SOURCES} ${TENSOR_SOURCES})
 
 if(LFS_TENSOR_VULKAN)
     add_dependencies(lfs_core lfs_tensor_vulkan_shaders)
-    target_sources(lfs_core PRIVATE ${LFS_TENSOR_SHADER_TABLE} tensor/backend/vulkan/nn_ops.cpp)
+    target_sources(lfs_core PRIVATE ${LFS_TENSOR_SHADER_TABLE})
     target_compile_definitions(lfs_core PRIVATE LFS_TENSOR_VULKAN=1)
 endif()
 if(APPLE)

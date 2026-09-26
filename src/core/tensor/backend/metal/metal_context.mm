@@ -8,6 +8,7 @@
 #include "core/assert.hpp"
 #include "core/error.hpp"
 #include "core/gpu_device_info.hpp"
+#include "core/memory_pressure.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -330,6 +331,20 @@ namespace lfs::core::internal::metal {
         return submitted_.load(std::memory_order_acquire);
     }
 
+    uint64_t Context::signal(id<MTLSharedEvent> const event) {
+        std::lock_guard lock(encode_mutex_);
+        commit_locked();
+        const uint64_t serial = submitted_.load(std::memory_order_acquire);
+        [queue_ signalEvent:event value:serial];
+        return serial;
+    }
+
+    void Context::queue_wait(id<MTLSharedEvent> const event, const uint64_t value) {
+        std::lock_guard lock(encode_mutex_);
+        commit_locked();
+        [queue_ waitForEvent:event value:value];
+    }
+
     void Context::wait(const uint64_t serial) {
         if (serial == 0)
             return;
@@ -427,8 +442,15 @@ namespace lfs::core::internal::metal {
                 evict_locked(0);
                 buffer = [device_ newBufferWithLength:capacity options:MTLResourceStorageModeShared];
             }
+            // The typed failure of the other backends, so callers that retry or
+            // report on MemoryAllocationError see one contract.
             if (!buffer)
-                throw TensorError(std::format("Metal tensor allocation of {} bytes failed", capacity));
+                throw MemoryAllocationError(AllocationFailure{
+                    .domain = MemoryDomain::MetalDevice,
+                    .requested_bytes = capacity,
+                    .label = "tensor.storage",
+                    .operation = "tensor.allocate",
+                });
             [residency_ addAllocation:buffer];
             [residency_ commit];
             block.buffer = buffer;
@@ -617,9 +639,14 @@ namespace lfs::core::internal {
     std::optional<GpuDeviceInfo> metal_device_info() {
         if (@available(macOS 26.0, *)) {
             if (const auto context = metal::live_context()) {
+                // The working set is the process's budget of the unified memory.
+                const auto budget = static_cast<size_t>(context->device().recommendedMaxWorkingSetSize);
                 return GpuDeviceInfo{
                     .name = context->device().name.UTF8String,
-                    .total_memory_bytes = static_cast<size_t>(context->device().recommendedMaxWorkingSetSize),
+                    .total_memory_bytes = budget,
+                    .supports_process_memory_budget = true,
+                    .process_memory_budget_bytes = budget,
+                    .process_memory_used_bytes = static_cast<size_t>(context->device().currentAllocatedSize),
                 };
             }
         }

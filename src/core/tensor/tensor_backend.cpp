@@ -126,8 +126,13 @@ namespace lfs::core {
         internal::TensorVulkanInteropBackend& backend(GpuBackend backend) {
             std::lock_guard lock(mutex);
             auto& result = backends[static_cast<size_t>(backend)];
-            if (!result && backend == GpuBackend::Metal)
-                throw TensorError("Metal tensors cannot be shared with the Vulkan viewer yet");
+            if (!result && backend == GpuBackend::Metal) {
+#if defined(LFS_TENSOR_METAL) && defined(LFS_TENSOR_VULKAN)
+                result = internal::make_metal_vulkan_interop(device);
+#else
+                throw TensorError("Metal tensor interop is unavailable in this build");
+#endif
+            }
             if (!result) {
 #ifdef LFS_TENSOR_VULKAN
 #if LFS_HAS_CUDA
@@ -305,6 +310,24 @@ namespace lfs::core {
             return kConfiguredBase - static_cast<int>(backend);
         }
 
+        // Without a configuration: CUDA where it is built, else Metal where the
+        // GPU supports it, else Vulkan.
+        GpuBackend automatic_backend() {
+            if (LFS_HAS_CUDA)
+                return GpuBackend::CUDA;
+#ifdef LFS_TENSOR_METAL
+            if (internal::metal_backend_available())
+                return GpuBackend::Metal;
+#endif
+            return GpuBackend::Vulkan;
+        }
+
+        GpuBackend backend_of_state(const int state) {
+            if (is_resolved(state))
+                return static_cast<GpuBackend>(state);
+            return state == kUnconfigured ? automatic_backend() : configured_backend(state);
+        }
+
         [[noreturn]] void throw_backend_unavailable(const GpuBackend backend) {
 #ifdef LFS_TENSOR_VULKAN
             if (backend == GpuBackend::Vulkan && internal::vulkan_backend_lost()) {
@@ -356,19 +379,18 @@ namespace lfs::core {
     GpuBackend default_gpu_backend() {
         for (;;) {
             int state = process_backend_state.load(std::memory_order_acquire);
-            if (is_resolved(state)) {
-                return static_cast<GpuBackend>(state);
-            }
-
-            const GpuBackend selected = state == kUnconfigured
-                                            ? (LFS_HAS_CUDA ? GpuBackend::CUDA : GpuBackend::Vulkan)
-                                            : configured_backend(state);
-            if (process_backend_state.compare_exchange_weak(
+            const GpuBackend selected = backend_of_state(state);
+            if (is_resolved(state) ||
+                process_backend_state.compare_exchange_weak(
                     state, static_cast<int>(selected),
                     std::memory_order_acq_rel, std::memory_order_acquire)) {
                 return selected;
             }
         }
+    }
+
+    GpuBackend configured_gpu_backend() {
+        return backend_of_state(process_backend_state.load(std::memory_order_acquire));
     }
 
     lfs::Status set_default_gpu_backend(const GpuBackend backend) {
@@ -784,6 +806,15 @@ namespace lfs::core {
         result.impl_->value = value;
         result.impl_->point = {result.impl_->context->timeline(), value, result.impl_->context};
 #endif
+        return result;
+    }
+
+    TensorCompletion TensorCompletionAccess::metal(const uint64_t serial, VulkanTimelinePoint point) {
+        TensorCompletion result;
+        result.impl_ = std::make_shared<TensorCompletion::Impl>();
+        result.impl_->settle_on_release = false;
+        result.impl_->metal_value = serial;
+        result.impl_->point = std::move(point);
         return result;
     }
 

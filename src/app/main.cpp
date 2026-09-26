@@ -189,7 +189,9 @@ namespace {
 #endif
                 return 0;
             } else if constexpr (std::is_same_v<T, lfs::io::args::TensorBackendSelftestMode>) {
-                const char* name = mode.backend == lfs::core::GpuBackend::Vulkan ? "vulkan" : "cuda";
+                const char* name = mode.backend == lfs::core::GpuBackend::Vulkan  ? "vulkan"
+                                   : mode.backend == lfs::core::GpuBackend::Metal ? "metal"
+                                                                                  : "cuda";
                 const lfs::Status status = lfs::core::tensor_backend_selftest(mode.backend);
                 if (status) {
                     std::println("tensor backend selftest {}: ok", name);
@@ -319,7 +321,10 @@ int main(int argc, char* argv[]) {
                                         ? lfs::vis::TensorPreferenceState{}
                                         : lfs::vis::UserPreferences::instance().tensorBackend();
     const auto options_status = lfs::core::set_tensor_backend_options(tensor_preferences.options);
-    const auto backend_status = lfs::core::set_default_gpu_backend(tensor_preferences.backend);
+    // An automatic preference leaves the choice to default_gpu_backend().
+    const auto backend_status = tensor_preferences.backend
+                                    ? lfs::core::set_default_gpu_backend(*tensor_preferences.backend)
+                                    : lfs::Status{};
     if (!options_status || !backend_status) {
         std::println(stderr, "Could not apply tensor backend preferences before startup");
         return 1;
