@@ -22,6 +22,9 @@ namespace lfs::io {
     }
 
     inline constexpr size_t MAX_METADATA_BYTES = 16ULL * 1024 * 1024;
+    // A streamed-SOG lod-meta.json grows with its leaf count (~0.5 KiB per
+    // leaf), so it gets its own cap: 512 MiB is roughly one million leaves.
+    inline constexpr size_t MAX_SSOG_MANIFEST_BYTES = 512ULL * 1024 * 1024;
     inline constexpr size_t MAX_ENCODED_IMAGE_BYTES = 512ULL * 1024 * 1024;
     inline constexpr size_t MAX_ARCHIVE_BYTES = 4ULL * 1024 * 1024 * 1024;
 
