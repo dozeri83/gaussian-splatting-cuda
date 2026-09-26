@@ -3,6 +3,7 @@
 #pragma once
 #include "core/tensor/internal/private_access.hpp"
 
+#include "../../internal/expression_runtime.hpp"
 #include "../../internal/tensor_impl.hpp"
 #include "../gpu_backend_ops.hpp"
 
@@ -44,19 +45,21 @@ namespace lfs::core::internal {
     uint64_t metal_completed_serial();
     void metal_wait(uint64_t serial);
 
+    ExpressionCacheStats metal_expression_cache_stats();
+
 } // namespace lfs::core::internal
 
 #ifdef __OBJC__
 namespace lfs::core::internal::metal {
 
+    inline constexpr NSUInteger kThreadgroupWidth = 256;
+    // Element code of float2 (sum, compensation) reduction partials, next to
+    // the DataType codes; kernels.metal knows it as LFS_DT_Pair.
+    inline constexpr uint32_t kPairDType = 255;
+
     // The backend is built on Metal 4, so everything below needs macOS 26;
     // metal_backend_available() gates every path into it.
     API_AVAILABLE_BEGIN(macos(26.0))
-
-    // Scalar reduction ids, defined for kernels.metal as LFS_REDUCE_*.
-    inline constexpr uint32_t kReduceSum = 0, kReduceMean = 1, kReduceMax = 2, kReduceMin = 3;
-
-    inline constexpr NSUInteger kThreadgroupWidth = 256;
 
     struct Located {
         id<MTLBuffer> buffer;
@@ -94,6 +97,10 @@ namespace lfs::core::internal::metal {
         id<MTLComputePipelineState> pipeline(
             const char* function,
             std::initializer_list<std::pair<uint32_t, uint32_t>> constants = {});
+        // Pipelines of fused expressions, compiled from generated MSL.
+        id<MTLComputePipelineState> expression_pipeline(const ExpressionProgram& program,
+                                                        const ExpressionSignature& signature);
+        ExpressionCache& expressions() { return expressions_; }
 
         // Encodes one dispatch into the open batch, ordered after every earlier
         // dispatch, and stamps every storage it uses with the batch serial,
@@ -124,8 +131,13 @@ namespace lfs::core::internal::metal {
         static constexpr uint32_t kBatchDispatches = 64;
         // where_select binds four buffers and its parameters.
         static constexpr NSUInteger kArgumentSlots = 5;
+        // Kernels record the first out-of-range index of their batch in the
+        // fault record bound after the argument slots; the first wait after
+        // the batch completed raises it as a BoundsViolation.
+        static constexpr NSUInteger kFaultSlot = kArgumentSlots;
         static constexpr size_t kParamsAlignment = 256;
-        static constexpr size_t kMaxParamsBytes = 512;
+        // Fused expressions pass up to ExpressionLayout::max_words argument words.
+        static constexpr size_t kMaxParamsBytes = ExpressionLayout::max_words * sizeof(uint32_t);
         // Batches in flight before recording waits for the oldest.
         static constexpr size_t kMaxFrames = 64;
 
@@ -142,9 +154,12 @@ namespace lfs::core::internal::metal {
 
         // A batch records into a frame, its command memory and the parameter
         // blocks of its dispatches, which are reused once the batch completes.
+        // Command buffers do not retain pipelines, and the expression cache may
+        // evict one while its batch runs, so the frame holds them.
         struct Frame {
             id<MTL4CommandAllocator> allocator;
             id<MTLBuffer> params;
+            std::vector<id<MTLComputePipelineState>> pipelines;
             uint64_t serial = 0;
         };
 
@@ -156,7 +171,7 @@ namespace lfs::core::internal::metal {
 
         struct PipelineKey {
             std::string_view function;
-            std::array<uint32_t, 16> values{};
+            std::array<uint32_t, 32> values{};
             uint32_t defined = 0;
             bool operator==(const PipelineKey&) const = default;
         };
@@ -176,7 +191,9 @@ namespace lfs::core::internal::metal {
         void commit_locked();
         void wait_signaled(uint64_t serial);
         void check_failures() const;
-        void trim_locked();
+        void check_fault();
+        void consume_fault_locked(size_t slot);
+        void evict_locked(size_t limit);
 
         id<MTLDevice> device_;
         id<MTLLibrary> library_;
@@ -184,6 +201,7 @@ namespace lfs::core::internal::metal {
 
         std::mutex pipeline_mutex_;
         std::unordered_map<PipelineKey, id<MTLComputePipelineState>, PipelineKeyHash> pipelines_;
+        ExpressionCache expressions_;
 
         // Batches are recorded into one command buffer, reused after each commit.
         std::mutex encode_mutex_;
@@ -205,11 +223,21 @@ namespace lfs::core::internal::metal {
         id<MTLSharedEvent> event_;
         std::shared_ptr<Failure> failure_;
 
+        // One record per batch in flight, so a record is read only after its
+        // batch completed and before a later batch reuses it.
+        std::mutex fault_mutex_;
+        id<MTLBuffer> fault_;
+        std::array<uint64_t, kMaxFrames> fault_serials_{};
+        std::array<uint32_t, 4> fault_record_{};
+
         // Every buffer the context creates stays resident for the queue.
         std::mutex memory_mutex_;
         id<MTLResidencySet> residency_;
         std::map<uint64_t, Block> live_;
-        std::unordered_map<size_t, std::vector<Block>> free_;
+        // Released blocks by capacity, kept for reuse up to cache_limit_ bytes.
+        std::map<size_t, std::vector<Block>> free_;
+        size_t cached_bytes_ = 0;
+        size_t cache_limit_ = 0;
     };
 
     std::shared_ptr<Context> acquire_context();

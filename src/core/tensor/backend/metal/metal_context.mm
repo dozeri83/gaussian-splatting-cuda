@@ -3,7 +3,10 @@
 
 #include "metal_context.hpp"
 
+#include "../../internal/expression_emitter.hpp"
+#include "../../internal/point_filter.hpp"
 #include "core/assert.hpp"
+#include "core/error.hpp"
 #include "core/gpu_device_info.hpp"
 
 #include <algorithm>
@@ -35,15 +38,32 @@ namespace lfs::core::internal::metal {
                                               {"UInt32", DataType::UInt32}}) {
                 source += std::format("#define LFS_DT_{} {}\n", name, static_cast<unsigned>(dtype));
             }
-            source += std::format("#define LFS_REDUCE_SUM {}\n#define LFS_REDUCE_MEAN {}\n"
-                                  "#define LFS_REDUCE_MAX {}\n#define LFS_REDUCE_MIN {}\n",
-                                  kReduceSum, kReduceMean, kReduceMax, kReduceMin);
+            source += std::format("#define LFS_DT_Pair {}\n", kPairDType);
+            for (const auto& [name, op] : {std::pair{"SUM", ReduceOp::Sum},
+                                           {"MEAN", ReduceOp::Mean},
+                                           {"MAX", ReduceOp::Max},
+                                           {"MIN", ReduceOp::Min},
+                                           {"PROD", ReduceOp::Prod},
+                                           {"ANY", ReduceOp::Any},
+                                           {"ALL", ReduceOp::All}}) {
+                source += std::format("#define LFS_REDUCE_{} {}\n", name, static_cast<unsigned>(op));
+            }
+            for (const auto& [name, flag] : {std::pair{"NODES", LFS_FILTER_NODES},
+                                             {"BOX", LFS_FILTER_BOX},
+                                             {"ELLIPSOID", LFS_FILTER_ELLIPSOID},
+                                             {"WINDOW", LFS_FILTER_WINDOW},
+                                             {"INVERSE_BOX", LFS_FILTER_INVERSE_BOX},
+                                             {"INVERSE_ELLIPSOID", LFS_FILTER_INVERSE_ELLIPSOID},
+                                             {"GEOMETRY", LFS_FILTER_GEOMETRY}}) {
+                source += std::format("#define LFS_FILTER_{} {}u\n", name, flag);
+            }
             return source + kKernelSource;
         }
 
         // Power-of-two size classes keep reuse simple; large blocks round to 2 MiB.
+        constexpr size_t kLargeBlock = size_t{64} << 20;
+
         size_t size_class(const size_t bytes) {
-            constexpr size_t kLargeBlock = size_t{64} << 20;
             constexpr size_t kLargeGranule = size_t{2} << 20;
             if (bytes <= 256)
                 return 256;
@@ -63,7 +83,7 @@ namespace lfs::core::internal::metal {
             throw TensorError("No Metal 4 device is available");
         NSError* error = nil;
         MTL4ArgumentTableDescriptor* const arguments = [MTL4ArgumentTableDescriptor new];
-        arguments.maxBufferBindCount = kArgumentSlots;
+        arguments.maxBufferBindCount = kFaultSlot + 1;
         queue_ = [device_ newMTL4CommandQueue];
         command_buffer_ = [device_ newCommandBuffer];
         arguments_ = [device_ newArgumentTableWithDescriptor:arguments error:&error];
@@ -72,6 +92,15 @@ namespace lfs::core::internal::metal {
         if (!queue_ || !command_buffer_ || !arguments_ || !residency_ || !event_)
             throw TensorError(std::format("Metal 4 queue setup failed: {}",
                                           error ? error.localizedDescription.UTF8String : "unknown error"));
+        fault_ = [device_ newBufferWithLength:kMaxFrames * sizeof(fault_record_) options:MTLResourceStorageModeShared];
+        if (!fault_)
+            throw TensorError("Metal fault record allocation failed");
+        std::memset(fault_.contents, 0, fault_.length);
+        [residency_ addAllocation:fault_];
+        // The cache holds at most a sixteenth of the process budget; the rest
+        // goes back to the system as its last batch completes.
+        cache_limit_ = static_cast<size_t>(device_.recommendedMaxWorkingSetSize) / 16;
+        [residency_ commit];
         [queue_ addResidencySet:residency_];
         context_id_ = next_context_id.fetch_add(1);
 
@@ -147,6 +176,7 @@ namespace lfs::core::internal::metal {
                            beforeEncoderStages:MTLStageDispatch
                              visibilityOptions:MTL4VisibilityOptionDevice];
         [encoder setComputePipelineState:dispatch.pipeline];
+        frames_[frame_].pipelines.push_back(dispatch.pipeline);
         NSUInteger slot = 0;
         for (const uint64_t address : dispatch.buffers)
             [arguments_ setAddress:address atIndex:slot++];
@@ -161,6 +191,9 @@ namespace lfs::core::internal::metal {
             const NSUInteger width = std::min(dispatch.pipeline.maxTotalThreadsPerThreadgroup, kThreadgroupWidth);
             [encoder dispatchThreads:dispatch.grid threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
         } else {
+            LFS_ASSERT_MSG(dispatch.group_size.width * dispatch.group_size.height * dispatch.group_size.depth <=
+                               dispatch.pipeline.maxTotalThreadsPerThreadgroup,
+                           "Metal threadgroup exceeds its pipeline's limit");
             [encoder dispatchThreadgroups:dispatch.grid threadsPerThreadgroup:dispatch.group_size];
         }
         for (const StorageRef& use : uses) {
@@ -172,6 +205,41 @@ namespace lfs::core::internal::metal {
             commit_locked();
     }
 
+    namespace {
+        struct MetalExpression final : CompiledExpression {
+            id<MTLComputePipelineState> pipeline;
+        };
+    } // namespace
+
+    id<MTLComputePipelineState> Context::expression_pipeline(const ExpressionProgram& program,
+                                                             const ExpressionSignature& signature) {
+        const std::string key = std::format("metal-msl:{}:{}", device_.registryID, expression_key(program, signature));
+        const auto compile = [&] {
+            const std::string source = expression_msl(program, signature);
+            return std::vector<char>(source.begin(), source.end());
+        };
+        const auto load = [&](const std::span<const char> artifact) -> std::shared_ptr<CompiledExpression> {
+            MTLCompileOptions* const options = [MTLCompileOptions new];
+            options.mathMode = MTLMathModeSafe;
+            options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
+            NSString* const source = [[NSString alloc] initWithBytes:artifact.data()
+                                                              length:artifact.size()
+                                                            encoding:NSUTF8StringEncoding];
+            NSError* error = nil;
+            id<MTLLibrary> const library = [device_ newLibraryWithSource:source options:options error:&error];
+            id<MTLFunction> const function = [library newFunctionWithName:@"lfs_expression"];
+            id<MTLComputePipelineState> const state =
+                function ? [device_ newComputePipelineStateWithFunction:function error:&error] : nil;
+            if (!state)
+                throw TensorError(std::format("Metal expression kernel failed to compile: {}",
+                                              error ? error.localizedDescription.UTF8String : "unknown error"));
+            auto kernel = std::make_shared<MetalExpression>();
+            kernel->pipeline = state;
+            return kernel;
+        };
+        return std::static_pointer_cast<MetalExpression>(expressions_.get(key, compile, load))->pipeline;
+    }
+
     id<MTL4ComputeCommandEncoder> Context::open_encoder_locked() {
         if (!encoder_)
             prepare_locked();
@@ -179,6 +247,15 @@ namespace lfs::core::internal::metal {
             open_serial_ = submitted_.load(std::memory_order_relaxed) + 1;
             newest_serial_.store(open_serial_, std::memory_order_release);
             frames_[frame_].serial = open_serial_;
+            // At most kMaxFrames batches are in flight, so the batch that last
+            // used this record has completed.
+            const size_t slot = open_serial_ % kMaxFrames;
+            {
+                std::lock_guard lock(fault_mutex_);
+                consume_fault_locked(slot);
+                fault_serials_[slot] = open_serial_;
+            }
+            [arguments_ setAddress:fault_.gpuAddress + slot * sizeof(fault_record_) atIndex:kFaultSlot];
         }
         return encoder_;
     }
@@ -186,6 +263,7 @@ namespace lfs::core::internal::metal {
     void Context::prepare_locked() {
         frame_ = acquire_frame_locked();
         [frames_[frame_].allocator reset];
+        frames_[frame_].pipelines.clear();
         params_used_ = 0;
         [command_buffer_ beginCommandBufferWithAllocator:frames_[frame_].allocator];
         encoder_ = [command_buffer_ computeCommandEncoder];
@@ -272,6 +350,54 @@ namespace lfs::core::internal::metal {
         while (completed() < serial && ![event_ waitUntilSignaledValue:serial timeoutMS:100])
             check_failures();
         check_failures();
+        check_fault();
+    }
+
+    // Keeps the first fault of a completed batch and clears its record.
+    void Context::consume_fault_locked(const size_t slot) {
+        auto* const words = static_cast<uint32_t*>(fault_.contents) + slot * fault_record_.size();
+        if (words[0] == 0)
+            return;
+        if (fault_record_[0] == 0)
+            std::memcpy(fault_record_.data(), words, sizeof(fault_record_));
+        std::memset(words, 0, sizeof(fault_record_));
+    }
+
+    void Context::check_fault() {
+        std::array<uint32_t, 4> record{};
+        {
+            std::lock_guard lock(fault_mutex_);
+            // Oldest batch first, so the first fault in submission order wins,
+            // such as a failed index cast before the scatter that uses it.
+            const uint64_t done = completed();
+            for (uint64_t serial = done >= kMaxFrames ? done - kMaxFrames + 1 : 1; serial <= done; ++serial) {
+                const size_t slot = serial % kMaxFrames;
+                if (fault_serials_[slot] == serial)
+                    consume_fault_locked(slot);
+            }
+            record = std::exchange(fault_record_, {});
+        }
+        if (record[0] == 0)
+            return;
+        // Code 2 stores the signed index in words 1-2 and the extent in word 3.
+        const bool wide = record[0] == 2;
+        const int64_t value = wide ? std::bit_cast<int64_t>((uint64_t{record[2]} << 32) | record[1])
+                                   : int64_t{std::bit_cast<int32_t>(record[1])};
+        const uint32_t bound = wide ? record[3] : record[2];
+        const uint32_t op_id = wide ? 0 : record[3];
+        throw lfs::Exception(lfs::make_error(lfs::ErrorInit{
+            .code = ErrorCode::BoundsViolation,
+            .domain = lfs::ErrorDomain::Tensor,
+            .user_message = "A tensor index was out of range on the Metal backend",
+            .detail = std::format("device fault code {}: index {} is outside the extent {} (operation {})",
+                                  record[0], value, bound, op_id),
+            .detection = LFS_SOURCE_SITE_CURRENT(),
+            .fields = lfs::SmallFields{}
+                          .add("op_id", static_cast<std::int64_t>(op_id))
+                          .add("value", value)
+                          .add("bound", static_cast<std::int64_t>(bound))
+                          .add("fault_code", static_cast<std::int64_t>(record[0])),
+        }));
     }
 
     uint64_t Context::completed() const {
@@ -286,13 +412,19 @@ namespace lfs::core::internal::metal {
         const size_t capacity = size_class(bytes);
         std::lock_guard lock(memory_mutex_);
         Block block;
-        if (auto found = free_.find(capacity); found != free_.end() && !found->second.empty()) {
+        // Large requests vary in size, so they also take a cached block up to a
+        // quarter larger.
+        const size_t reach = capacity > kLargeBlock ? capacity + capacity / 4 : capacity;
+        if (auto found = free_.lower_bound(capacity); found != free_.end() && found->first <= reach) {
             block = std::move(found->second.back());
             found->second.pop_back();
+            if (found->second.empty())
+                free_.erase(found);
+            cached_bytes_ -= block.capacity;
         } else {
             id<MTLBuffer> buffer = [device_ newBufferWithLength:capacity options:MTLResourceStorageModeShared];
             if (!buffer) {
-                trim_locked();
+                evict_locked(0);
                 buffer = [device_ newBufferWithLength:capacity options:MTLResourceStorageModeShared];
             }
             if (!buffer)
@@ -333,38 +465,44 @@ namespace lfs::core::internal::metal {
         Block block = std::move(found->second);
         live_.erase(found);
         block.guard = newest_serial_.load(std::memory_order_acquire);
+        cached_bytes_ += block.capacity;
         free_[block.capacity].push_back(std::move(block));
+        if (cached_bytes_ > cache_limit_)
+            evict_locked(cache_limit_);
     }
 
-    // Batches do not retain their buffers, so only blocks whose last batch
-    // completed go back to the system.
-    void Context::trim_locked() {
+    // Returns cached blocks to the system, largest first, until at most limit
+    // bytes stay cached. Batches do not retain their buffers, so only blocks
+    // whose last batch completed can go.
+    void Context::evict_locked(const size_t limit) {
         const uint64_t done = completed();
         bool removed = false;
-        for (auto& [capacity, blocks] : free_) {
-            std::erase_if(blocks, [&](const Block& block) {
-                if (block.guard > done)
+        for (auto size = free_.end(); size != free_.begin() && cached_bytes_ > limit;) {
+            --size;
+            std::erase_if(size->second, [&](const Block& block) {
+                if (cached_bytes_ <= limit || block.guard > done)
                     return false;
                 [residency_ removeAllocation:block.buffer];
+                cached_bytes_ -= block.capacity;
                 removed = true;
                 return true;
             });
+            if (size->second.empty())
+                size = free_.erase(size);
         }
         if (removed)
             [residency_ commit];
     }
 
     void Context::trim() {
+        flush();
         std::lock_guard lock(memory_mutex_);
-        trim_locked();
+        evict_locked(0);
     }
 
     size_t Context::cached_bytes() {
         std::lock_guard lock(memory_mutex_);
-        size_t bytes = 0;
-        for (const auto& [capacity, blocks] : free_)
-            bytes += capacity * blocks.size();
-        return bytes;
+        return cached_bytes_;
     }
 
     MemoryInfo Context::stats() {
@@ -509,6 +647,12 @@ namespace lfs::core::internal {
             if (const auto context = metal::live_context())
                 context->wait(serial);
         }
+    }
+
+    ExpressionCacheStats metal_expression_cache_stats() {
+        if (@available(macOS 26.0, *))
+            return metal::acquire_context()->expressions().stats();
+        throw std::runtime_error("Metal expression backend is unavailable");
     }
 
 } // namespace lfs::core::internal
