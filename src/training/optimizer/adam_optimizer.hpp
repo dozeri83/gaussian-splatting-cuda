@@ -6,6 +6,7 @@
 
 #include "core/splat_data.hpp"
 #include "core/tensor_upload.hpp"
+#include "lfs/training/ops/adam.hpp"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -194,14 +195,14 @@ namespace lfs::training {
         /// `n_new` rows BEFORE any free_mask / param mutation. Returns false when
         /// capacity-ensure fails so callers can abort with zero torn state.
         [[nodiscard]] bool preflight_grow_capacity(size_t n_new);
-        void relocate_params_at_indices_gpu(ParamType type, const int64_t* indices_device, size_t n_indices);
+        // indices are int64 device rows.
+        void relocate_params_at_indices_gpu(ParamType type, const lfs::core::Tensor& indices);
 
         // Low-level state manipulation
         void reset_state_at_indices(ParamType type, const std::vector<int64_t>& indices);
         // Keeps CUDA-resident indices on device; accepts int32 or int64 tensors.
         void reset_state_at_indices(ParamType type, const lfs::core::Tensor& indices);
         void extend_state_for_new_params(ParamType type, size_t n_new);
-        void extend_state_by_gather(ParamType type, const lfs::core::Tensor& indices);
 
         // State access
         const AdamParamState* get_state(ParamType type) const;
@@ -227,6 +228,9 @@ namespace lfs::training {
         static void note_slow_path_grow(const char* site, const std::string& name);
         AdamConfig config_;
         lfs::core::SplatData& splat_data_;
+        const lfs::gpu_ops::AdamOps* ops_ = nullptr;
+        // Binds absent optional op arguments.
+        lfs::core::Tensor absent_;
         std::unordered_map<std::string, AdamParamState> states_;
         lfs::core::TensorUpload reset_indices_upload_;
         lfs::core::TensorUpload extend_indices_upload_;
@@ -254,7 +258,10 @@ namespace lfs::training {
         std::string param_name(ParamType type) const;
         void init_state(ParamType type, bool allocate_grad = false);
         void ensure_grad(ParamType type);
-        void step_param(ParamType type, int iteration);
+        void step_shN(int iteration);
+        [[nodiscard]] const lfs::gpu_ops::AdamOps& adam_ops() const;
+        [[nodiscard]] lfs::gpu_ops::AdamHyper adam_hyper() const;
+        [[nodiscard]] lfs::gpu_ops::AdamModifiers adam_modifiers() const;
         void validate_mean_step_far_mask();
         size_t compute_new_capacity(size_t current_capacity, size_t required_size) const;
 
