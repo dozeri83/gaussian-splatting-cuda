@@ -41,13 +41,15 @@ namespace lfs::io {
         using core::Device;
         using core::Tensor;
         using Clock = std::chrono::steady_clock;
+        // The streamed-SOG spec fixes the root manifest name.
+        constexpr std::string_view SSOG_MANIFEST = "lod-meta.json";
         struct Cancelled {};
         void progress(const SsogSaveOptions& o, float p, const std::string& stage) {
             if (o.progress_callback && !o.progress_callback(p, stage))
                 throw Cancelled{};
         }
         fs::path manifest_path(const fs::path& p) {
-            return fs::is_directory(p) ? p / "lod-meta.json" : p;
+            return fs::is_directory(p) ? p / SSOG_MANIFEST : p;
         }
         size_t integer(const Json& j, const char* name) {
             if (!j.is_number_integer() || j.get<double>() < 0 ||
@@ -123,7 +125,7 @@ namespace lfs::io {
                 std::vector<uint8_t> bytes(static_cast<size_t>(size));
                 if (!file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size)))
                     throw std::runtime_error("Cannot read complete SSOG archive");
-                read_archive(bytes, "lod-meta.json");
+                read_archive(bytes, std::string(SSOG_MANIFEST));
             }
 
             EntryProvider(const std::vector<uint8_t>& bytes, const std::string& manifest, uint64_t expansion_limit)
@@ -172,9 +174,13 @@ namespace lfs::io {
                     lfs::io::detail::ascii_lower_inplace(extension);
                     // A bundled unit contains several textures and uses the
                     // archive allowance, rather than a single image's limit.
-                    const uint64_t limit = extension == ".json"  ? MAX_METADATA_BYTES
-                                           : extension == ".sog" ? MAX_ARCHIVE_BYTES
-                                                                 : MAX_ENCODED_IMAGE_BYTES;
+                    // A streamed-SOG manifest scales with leaf count; a unit's
+                    // meta.json (nested SOG archives) does not.
+                    const bool is_ssog_manifest = manifest == SSOG_MANIFEST && basename == manifest;
+                    const uint64_t limit = is_ssog_manifest       ? MAX_SSOG_MANIFEST_BYTES
+                                           : extension == ".json" ? MAX_METADATA_BYTES
+                                           : extension == ".sog"  ? MAX_ARCHIVE_BYTES
+                                                                  : MAX_ENCODED_IMAGE_BYTES;
                     if (!archive_entry_size_is_set(entry) || n < 0 || (n == 0 && !is_license) || uint64_t(n) > limit || uint64_t(n) > expansion_limit_ - total)
                         throw std::runtime_error("SSOG archive entry exceeds size limit");
                     total += uint64_t(n);
@@ -244,8 +250,8 @@ namespace lfs::io {
                     return data;
                 } catch (const std::exception& e) { return make_error(ErrorCode::READ_FAILURE, e.what()); }
             }
-            Json json(const std::string& name) const {
-                auto bytes = read(name, MAX_METADATA_BYTES);
+            Json json(const std::string& name, const size_t limit = MAX_METADATA_BYTES) const {
+                auto bytes = read(name, limit);
                 if (!bytes)
                     throw std::runtime_error(bytes.error().message);
                 return Json::parse(bytes->begin(), bytes->end());
@@ -293,7 +299,7 @@ namespace lfs::io {
         };
         Manifest parse_manifest(const fs::path& path) {
             auto entries = std::make_shared<EntryProvider>(path);
-            Manifest m{entries->json("lod-meta.json"), entries, {}};
+            Manifest m{entries->json(std::string(SSOG_MANIFEST), MAX_SSOG_MANIFEST_BYTES), entries, {}};
             const auto& j = m.json;
             if (!j.is_object())
                 throw std::runtime_error("Invalid lod-meta.json object");
