@@ -502,7 +502,9 @@ namespace lfs::io {
         : config_(std::move(config)),
           output_queue_(std::max<size_t>(1, config_.output_queue_size)) {
 
-        cleanup_stale_run_spill_directories();
+        const bool cuda_run = config_.backend == lfs::core::GpuBackend::CUDA;
+        if (cuda_run)
+            cleanup_stale_run_spill_directories();
         config_.jpeg_batch_size = std::clamp<size_t>(config_.jpeg_batch_size, 1, 12);
         if (config_.decode_frame_ring_capacity == 0) {
             config_.decode_frame_ring_capacity = DECODE_FRAME_RING_CAPACITY;
@@ -530,11 +532,11 @@ namespace lfs::io {
                  config_.cold_process_threads,
                  config_.use_16bit_color);
 
-        const bool nvcodec_available = is_nvcodec_available();
+        const bool nvcodec_available = cuda_run && is_nvcodec_available();
         LOG_INFO("[PipelinedImageLoader] host compressed cache cap: {:.1f} GiB",
                  config_.max_cache_bytes / (1024.0 * 1024.0 * 1024.0));
 
-        {
+        if (cuda_run) {
             const auto base = run_spill_base();
             std::error_code ec;
             std::filesystem::create_directories(base, ec);
@@ -553,7 +555,7 @@ namespace lfs::io {
             }
         }
 
-        if (lfs::core::gpu_backend_available(lfs::core::GpuBackend::CUDA)) {
+        if (cuda_run && lfs::core::gpu_backend_available(lfs::core::GpuBackend::CUDA)) {
             decode_queue_ = std::make_unique<lfs::core::TensorWorkQueue>(lfs::core::GpuBackend::CUDA);
             decode_stream_ = static_cast<cudaStream_t>(decode_queue_->native_handle());
             for (size_t i = 0; i < config_.cold_process_threads; ++i) {
@@ -562,10 +564,12 @@ namespace lfs::io {
             }
         }
         running_ = true;
-        decoded_frame_ring_ = std::make_shared<DecodedFrameRing>(
-            config_.decode_frame_ring_capacity, &running_);
-        decoded_frame_ring_->set_capacity(adaptive_target_ + 2);
-        decode_hwc_workspace_.resize(config_.jpeg_batch_size);
+        if (cuda_run) {
+            decoded_frame_ring_ = std::make_shared<DecodedFrameRing>(
+                config_.decode_frame_ring_capacity, &running_);
+            decoded_frame_ring_->set_capacity(adaptive_target_ + 2);
+            decode_hwc_workspace_.resize(config_.jpeg_batch_size);
+        }
 
         for (size_t i = 0; i < config_.io_threads; ++i) {
             io_threads_.emplace_back([this] { prefetch_thread_func(); });
@@ -577,6 +581,11 @@ namespace lfs::io {
 
         for (size_t i = 0; i < sidecar_queues_.size(); ++i) {
             cold_process_threads_.emplace_back([this, i] { cold_process_thread_func(i); });
+        }
+        if (!cuda_run) {
+            for (size_t i = 0; i < config_.cold_process_threads; ++i) {
+                cold_process_threads_.emplace_back([this] { portable_process_thread_func(); });
+            }
         }
 
         if (nvcodec_available) {
@@ -629,7 +638,8 @@ namespace lfs::io {
         sidecar_queues_.clear();
         decode_stream_ = nullptr;
         sidecar_streams_.clear();
-        release_nvcodec_loader_cache(config_.decoder_pool_size);
+        if (config_.backend == lfs::core::GpuBackend::CUDA)
+            release_nvcodec_loader_cache(config_.decoder_pool_size);
 
         LOG_INFO("[PipelinedImageLoader] Done: {} loaded, {} hits, {} misses",
                  stats_.total_images_loaded, stats_.hot_path_hits, stats_.cold_path_misses);
@@ -983,6 +993,11 @@ namespace lfs::io {
 
     lfs::core::Tensor PipelinedImageLoader::load_image_immediate(
         const std::filesystem::path& path, const LoadParams& params) {
+        if (config_.backend != lfs::core::GpuBackend::CUDA) {
+            const lfs::core::GpuBackendScope backend(config_.backend);
+            lfs::core::TensorUpload upload;
+            return decode_portable_rgb(path, params, upload);
+        }
         const auto stream = image_execution_stream(params.cuda_stream);
         const lfs::core::CUDAStreamGuard execution_scope(stream);
 
@@ -1938,12 +1953,15 @@ namespace lfs::io {
 
         // Capture each producer before publishing. Waiting belongs to the consumer,
         // otherwise a slow mask stalls subsequent work on the shared decode queue.
+        // VulkanRecorderRegistry submits foreign producers and tracks access barriers;
+        // Metal serializes dispatches through its shared context encoder.
         std::optional<lfs::core::TensorFence> image_ready, mask_ready;
-        if (image) {
+        const bool cuda_run = config_.backend == lfs::core::GpuBackend::CUDA;
+        if (image && cuda_run) {
             image_ready.emplace(lfs::core::GpuBackend::CUDA);
             image_ready->record(image->stream());
         }
-        if (mask) {
+        if (mask && cuda_run) {
             mask_ready.emplace(lfs::core::GpuBackend::CUDA);
             mask_ready->record(mask->stream());
         }
@@ -1999,7 +2017,8 @@ namespace lfs::io {
     }
 
     void PipelinedImageLoader::prefetch_thread_func() {
-        const lfs::core::GpuBackendScope backend(lfs::core::GpuBackend::CUDA);
+        const lfs::core::GpuBackendScope backend(config_.backend);
+        const bool cuda_run = config_.backend == lfs::core::GpuBackend::CUDA;
         while (running_) {
             ImageRequest request;
             try {
@@ -2013,7 +2032,7 @@ namespace lfs::io {
                                       request.path, std::move(message));
             };
 
-            if (!decode_queue_) {
+            if (cuda_run && !decode_queue_) {
                 fail_image_request("CUDA image processing is unavailable");
                 continue;
             }
@@ -2032,6 +2051,10 @@ namespace lfs::io {
                 depth_result.undistort = request.undistort;
                 depth_result.aux_target_width = request.aux_target_width;
                 depth_result.aux_target_height = request.aux_target_height;
+                if (!cuda_run) {
+                    cold_queue_.push(std::move(depth_result));
+                    return;
+                }
                 depth_result.cache_key = make_sidecar_key(depth_result, SidecarCacheFormat::Depth);
                 if (auto cached = load_cached_jpeg_blob(depth_result.cache_key)) {
                     depth_result.jpeg_data = std::move(cached);
@@ -2074,6 +2097,10 @@ namespace lfs::io {
                 normal_result.undistort = request.undistort;
                 normal_result.aux_target_width = request.aux_target_width;
                 normal_result.aux_target_height = request.aux_target_height;
+                if (!cuda_run) {
+                    cold_queue_.push(std::move(normal_result));
+                    return;
+                }
                 normal_result.cache_key = make_sidecar_key(normal_result, SidecarCacheFormat::Normal);
                 if (auto cached = load_cached_jpeg_blob(normal_result.cache_key)) {
                     normal_result.jpeg_data = std::move(cached);
@@ -2101,6 +2128,49 @@ namespace lfs::io {
             if (!is_regular_file_no_throw(request.path)) {
                 LOG_DEBUG("[PipelinedImageLoader] Skipping missing image {}", lfs::core::path_to_utf8(request.path));
                 fail_image_request("file does not exist or is not a regular file");
+                continue;
+            }
+
+            if (!cuda_run) {
+                // Host decoding reads each source file in its worker; there is no
+                // encoded run cache to consult.
+                PrefetchedImage result;
+                result.sequence_id = request.sequence_id;
+                result.loader_generation = request.loader_generation;
+                result.path = request.path;
+                result.params = request.params;
+                result.needs_processing = true;
+                result.alpha_as_mask = request.extract_alpha_as_mask;
+                result.alpha_mask_params = request.alpha_mask_params;
+                result.undistort = request.undistort;
+                cold_queue_.push(std::move(result));
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex_);
+                    ++stats_.cold_path_misses;
+                }
+                if (request.mask_path && !request.extract_alpha_as_mask) {
+                    if (!is_regular_file_no_throw(*request.mask_path)) {
+                        std::unique_lock<std::mutex> lock(pending_pairs_mutex_);
+                        fail_sidecar_locked(request.sequence_id, request.loader_generation,
+                                            SidecarKind::Mask,
+                                            *request.mask_path, "file does not exist or is not a regular file", lock);
+                    } else {
+                        PrefetchedImage mask_result;
+                        mask_result.sequence_id = request.sequence_id;
+                        mask_result.loader_generation = request.loader_generation;
+                        mask_result.path = *request.mask_path;
+                        mask_result.params = request.params;
+                        mask_result.is_mask = true;
+                        mask_result.needs_processing = true;
+                        mask_result.mask_params = request.mask_params;
+                        mask_result.undistort = request.undistort;
+                        cold_queue_.push(std::move(mask_result));
+                        std::lock_guard<std::mutex> lock(stats_mutex_);
+                        ++stats_.mask_cache_misses;
+                    }
+                }
+                enqueue_depth_request();
+                enqueue_normal_request();
                 continue;
             }
 
