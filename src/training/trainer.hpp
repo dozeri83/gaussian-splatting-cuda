@@ -18,7 +18,7 @@
 #include "core/tensor_upload.hpp"
 #include "dataset.hpp"
 #include "io/project_recovery.hpp"
-#include "kernels/depth_loss.hpp"
+#include "lfs/training/ops/geometry_types.hpp"
 #include "lfs/training/ops/registry.hpp"
 #include "lfs/training/refine_scratch.hpp"
 #include "losses/mask_loss.hpp"
@@ -256,7 +256,7 @@ namespace lfs::training {
         void beginModelRead(lfs::core::TensorExecutionTarget reader_queue);
         void endModelRead(lfs::core::TensorExecutionTarget reader_queue);
 
-        lfs::core::TensorExecutionTarget trainingQueue() const { return training_queue_ ? lfs::core::TensorExecutionTarget(*training_queue_) : lfs::core::TensorExecutionTarget::default_queue(lfs::core::GpuBackend::CUDA); }
+        lfs::core::TensorExecutionTarget trainingQueue() const { return training_queue_ ? lfs::core::TensorExecutionTarget(*training_queue_) : lfs::core::TensorExecutionTarget::default_queue(lfs::core::default_gpu_backend()); }
 
         // Reverse edge for the zero-copy viewport: the viewer's render-complete
         // timeline imported into CUDA, plus the latest timeline value covering
