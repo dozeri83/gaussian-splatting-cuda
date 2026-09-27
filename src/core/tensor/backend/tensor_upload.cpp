@@ -587,8 +587,8 @@ namespace lfs::core {
             if (impl_->vulkan_queue && !impl_->borrowed_queue && impl_->recorder_id != 0 &&
                 impl_->queue_context)
                 impl_->queue_context->recorders().destroy_queue(impl_->recorder_id);
-            // Stream ownership and import lifetime are independent. In particular,
-            // a borrowed default stream can still have outstanding timeline waits.
+                // Stream ownership and import lifetime are independent. In particular,
+                // a borrowed default stream can still have outstanding timeline waits.
 #if LFS_HAS_CUDA
             if (impl_->backend == GpuBackend::CUDA &&
                 (impl_->ready_cuda || impl_->consumer_cuda || !impl_->retired_consumers.empty()))
