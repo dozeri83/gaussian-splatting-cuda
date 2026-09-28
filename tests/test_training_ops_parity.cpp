@@ -38,7 +38,10 @@
 #include "training/trainer.hpp"
 #include "training/training_setup.hpp"
 
+#include "core/gpu_device_runtime.hpp"
+#if LFS_HAS_CUDA
 #include <cuda_runtime.h>
+#endif
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -46,6 +49,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -169,6 +173,7 @@ namespace {
             snapshot.missing(name);
             return;
         }
+#if LFS_HAS_CUDA
         if (backend == GpuBackend::CUDA) {
             const cudaError_t status = cudaDeviceSynchronize();
             if (status != cudaSuccess) {
@@ -176,6 +181,7 @@ namespace {
                 return;
             }
         }
+#endif
         Tensor view = tensor;
         if (view.dtype() == DataType::Float16) {
             view = view.to(DataType::Float32);
@@ -924,7 +930,7 @@ namespace {
 
         auto adam_grid = pattern({1, 12, 2, 3, 4}, 1.f, 4);
         auto m1 = pattern(adam_grid.shape(), 1.f, 11);
-        auto m2 = pattern(adam_grid.shape(), 1.f, 17);
+        auto m2 = pattern(adam_grid.shape(), 1.f, 17).abs();
         auto adam_grad = pattern(adam_grid.shape(), 1.f, 19);
         const ops::AdamUpdateParams adam{0.002f, 0.9f, 0.999f, 10.f, 31.622776f, 1e-15f};
         table->adam(adam_grid, m1, m2, adam_grad, adam);
@@ -937,9 +943,7 @@ namespace {
         table->upload_slice(host, device, 0, 0, 8);
         auto downloaded = Tensor::zeros({8}, Device::CPU);
         table->download_slice(downloaded, device, 0, 0, 8);
-        if (backend == GpuBackend::CUDA) {
-            cudaDeviceSynchronize();
-        }
+        lfs::core::gpu_device_barrier(backend);
         keep(out.snapshot, backend, "bilateral.upload", device, kExact);
         keep(out.snapshot, backend, "bilateral.download", downloaded, kExact);
         return out;
@@ -1145,20 +1149,20 @@ namespace {
     Capture capture_lpips(GpuBackend backend) {
         Capture out;
         const auto* table = lfs::training::training_ops(backend).lpips;
-        auto weight = pattern({128, 64, 3, 3}, 1.f, 7);
+        auto weight = pattern({128, 64, 3, 3}, 1.f, 7).to(DataType::Float16);
         auto taps = Tensor::empty({9, 128, 64}, Device::GPU, DataType::Float16);
         table->weight_taps(weight, taps);
         keep(out.snapshot, backend, "lpips.taps", taps, kConv);
         auto rgb = pattern({1, 3, 7, 9}, 1.f, 1);
-        auto conv_w = pattern({64, 3, 3, 3}, 1.f, 2);
-        auto bias = pattern({64}, 1.f, 3);
+        auto conv_w = pattern({64, 3, 3, 3}, 1.f, 2).to(DataType::Float16);
+        auto bias = pattern({64}, 1.f, 3).to(DataType::Float16);
         auto conv = Tensor::empty({1, 64, 7, 9}, Device::GPU, DataType::Float16);
         const ops::RGBConvParams rgb_params{{-.030f, -.088f, -.188f}, {.458f, .448f, .450f}, true};
         table->rgb_conv(rgb, conv_w, bias, conv, rgb_params);
         keep(out.snapshot, backend, "lpips.rgb", conv, kConv);
-        auto x = pattern({1, 64, 7, 9}, 1.f, 1);
-        auto w = pattern({64, 64, 3, 3}, 1.f, 2);
-        auto b = pattern({64}, 1.f, 3);
+        auto x = pattern({1, 64, 7, 9}, 1.f, 1).to(DataType::Float16);
+        auto w = pattern({64, 64, 3, 3}, 1.f, 2).to(DataType::Float16);
+        auto b = pattern({64}, 1.f, 3).to(DataType::Float16);
         auto y = Tensor::empty({1, 64, 7, 9}, Device::GPU, DataType::Float16);
         auto scratch = Tensor::empty({9, 64, 64}, Device::GPU, DataType::Float16);
         Tensor absent;
@@ -1167,9 +1171,9 @@ namespace {
         conv_params.activation = lfs::core::nn::Activation::Relu;
         table->convolution(x, w, absent, b, y, scratch, conv_params);
         keep(out.snapshot, backend, "lpips.conv", y, kConv);
-        auto px = pattern({1, 64, 2, 8}, 1.f, 1);
-        auto py = pattern({1, 64, 2, 8}, 1.f, 2);
-        auto pw = pattern({1, 64, 1, 1}, 1.f, 3);
+        auto px = pattern({1, 64, 2, 8}, 1.f, 1).to(DataType::Float16);
+        auto py = pattern({1, 64, 2, 8}, 1.f, 2).to(DataType::Float16);
+        auto pw = pattern({1, 64, 1, 1}, 1.f, 3).to(DataType::Float16);
         auto score = Tensor::zeros({1}, Device::GPU);
         auto pooled_x = Tensor::empty({1, 64, 1, 4}, Device::GPU, DataType::Float16);
         auto pooled_y = Tensor::empty(pooled_x.shape(), Device::GPU, pooled_x.dtype());
@@ -1534,22 +1538,27 @@ namespace {
         // A previous caller may have left a live arena. Reset first so the borrow
         // size does not depend on that residue; full_reset is idempotent.
         table->reset_arena();
+        // Each backend reports its own allocator's block sizes.
         for (const size_t bytes : {size_t{0}, size_t{1}, size_t{255}, size_t{256}, size_t{4096}, size_t{1} << 20}) {
-            out.snapshot.exact_u("session.allocation." + std::to_string(bytes), table->allocation_bytes(bytes));
+            out.snapshot.exact_i("session.allocation." + std::to_string(bytes),
+                                 table->allocation_bytes(bytes) == lfs::core::gpu_allocation_bytes(backend, bytes));
         }
         const uint32_t previous = table->set_arena_timeout(17);
         const uint32_t observed = table->set_arena_timeout(previous);
         out.snapshot.exact_u("session.timeout.previous", previous);
         out.snapshot.exact_u("session.timeout.roundtrip", observed);
-        out.snapshot.exact_u("session.baseline", table->device_baseline_bytes());
+        // The baseline is the native context size, which differs per backend.
+        (void)table->device_baseline_bytes();
         table->sample_memory();
         table->dump_arena_statistics();
         table->log_arena_failure("training-ops-parity");
         table->profile(true);
         table->profile(false);
+#if LFS_HAS_CUDA
         if (backend == GpuBackend::CUDA) {
             cudaGetLastError();
         }
+#endif
         (void)table->arena_memory_info();
         const auto target = lfs::core::TensorExecutionTarget::current();
         const ops::IdleArenaBorrow borrow = table->borrow_idle_arena(4096, 0, target);
@@ -1568,7 +1577,10 @@ namespace {
     }
 
     Capture capture(lfs::training::Family family, GpuBackend backend) {
-        lfs::core::GpuBackendScope scope(backend);
+        const lfs::test::DefaultGpuBackendForTesting session(backend);
+        if (!session.switched()) {
+            return Capture{{}, std::string("cannot make ") + backend_name(backend) + " the default backend"};
+        }
         switch (family) {
         case lfs::training::Family::Photometric: return capture_photometric(backend);
         case lfs::training::Family::Adam: return capture_adam(backend);
@@ -1604,6 +1616,143 @@ namespace {
         }
         const std::string diff = compare_snapshots(actual.snapshot, expected.snapshot, exact);
         EXPECT_TRUE(diff.empty()) << diff;
+    }
+
+    // LFS_TRAINING_OPS_GOLDEN names a directory of CUDA captures. A process with
+    // CUDA writes them; one without CUDA compares the second backend against them.
+    std::optional<std::filesystem::path> golden_directory() {
+        const char* const value = std::getenv("LFS_TRAINING_OPS_GOLDEN");
+        if (value == nullptr || *value == '\0') {
+            return std::nullopt;
+        }
+        return std::filesystem::path(value);
+    }
+
+    std::filesystem::path golden_path(const std::filesystem::path& directory, const std::string_view name) {
+        return directory / (std::string(name) + ".golden");
+    }
+
+    template <class T>
+    void write_pod(std::ostream& out, const T& value) {
+        out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    }
+
+    template <class T>
+    void write_array(std::ostream& out, const std::vector<T>& values) {
+        write_pod(out, static_cast<uint64_t>(values.size()));
+        out.write(reinterpret_cast<const char*>(values.data()), static_cast<std::streamsize>(values.size() * sizeof(T)));
+    }
+
+    template <class T>
+    bool read_pod(std::istream& in, T& value) {
+        return static_cast<bool>(in.read(reinterpret_cast<char*>(&value), sizeof(value)));
+    }
+
+    template <class T>
+    bool read_array(std::istream& in, std::vector<T>& values) {
+        uint64_t count = 0;
+        if (!read_pod(in, count) || count > (uint64_t{1} << 32)) {
+            return false;
+        }
+        values.resize(count);
+        return static_cast<bool>(in.read(reinterpret_cast<char*>(values.data()), static_cast<std::streamsize>(count * sizeof(T))));
+    }
+
+    void write_string(std::ostream& out, const std::string& text) {
+        write_array(out, std::vector<char>(text.begin(), text.end()));
+    }
+
+    bool read_string(std::istream& in, std::string& text) {
+        std::vector<char> chars;
+        if (!read_array(in, chars)) {
+            return false;
+        }
+        text.assign(chars.begin(), chars.end());
+        return true;
+    }
+
+    void write_golden(const std::filesystem::path& path, const Capture& capture) {
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream out(path, std::ios::binary);
+        write_string(out, capture.error);
+        write_pod(out, static_cast<uint64_t>(capture.snapshot.fields.size()));
+        for (const Field& field : capture.snapshot.fields) {
+            write_string(out, field.name);
+            write_pod(out, static_cast<int32_t>(field.kind));
+            write_pod(out, field.tol.abs);
+            write_pod(out, field.tol.rel);
+            write_array(out, field.bytes);
+            write_array(out, field.values);
+        }
+        ASSERT_TRUE(out.good()) << "cannot write " << path;
+    }
+
+    Capture read_golden(const std::filesystem::path& path) {
+        Capture capture;
+        std::ifstream in(path, std::ios::binary);
+        uint64_t count = 0;
+        if (!in || !read_string(in, capture.error) || !read_pod(in, count)) {
+            capture.error = "cannot read golden " + path.string();
+            return capture;
+        }
+        for (uint64_t index = 0; index < count; ++index) {
+            Field field;
+            int32_t kind = 0;
+            if (!read_string(in, field.name) || !read_pod(in, kind) || !read_pod(in, field.tol.abs) ||
+                !read_pod(in, field.tol.rel) || !read_array(in, field.bytes) || !read_array(in, field.values)) {
+                capture.error = "truncated golden " + path.string();
+                return capture;
+            }
+            field.kind = static_cast<Kind>(kind);
+            capture.snapshot.fields.push_back(std::move(field));
+        }
+        return capture;
+    }
+
+    // The CUDA capture, live or from the golden directory; nullopt when neither exists.
+    std::optional<Capture> cuda_reference(const lfs::training::Family family) {
+        if (lfs::core::gpu_backend_available(GpuBackend::CUDA)) {
+            return capture(family, GpuBackend::CUDA);
+        }
+        const auto directory = golden_directory();
+        const auto name = lfs::training::training_family_name(family);
+        if (directory && std::filesystem::exists(golden_path(*directory, name))) {
+            return read_golden(golden_path(*directory, name));
+        }
+        return std::nullopt;
+    }
+
+    // On a CUDA machine with LFS_TRAINING_OPS_GOLDEN set, records every family's
+    // CUDA capture for machines without CUDA. The loss curve is recorded by
+    // TrainingOpsLossCurveParity.SyntheticLossCurve/Cuda.
+    TEST(TrainingOpsParity, WriteGoldens) {
+        const auto directory = golden_directory();
+        if (!directory || !lfs::core::gpu_backend_available(GpuBackend::CUDA)) {
+            GTEST_SKIP() << "needs a CUDA device and LFS_TRAINING_OPS_GOLDEN";
+        }
+        const auto previous = lfs::core::default_gpu_backend();
+        lfs::test::reset_gpu_backend_for_testing();
+        ASSERT_TRUE(lfs::core::set_default_gpu_backend(GpuBackend::CUDA));
+        for (size_t index = 0; index < static_cast<size_t>(lfs::training::Family::Count); ++index) {
+            const auto family = static_cast<lfs::training::Family>(index);
+            write_golden(golden_path(*directory, lfs::training::training_family_name(family)),
+                         capture(family, GpuBackend::CUDA));
+        }
+        lfs::test::reset_gpu_backend_for_testing();
+        EXPECT_TRUE(lfs::core::set_default_gpu_backend(previous));
+    }
+
+    TEST(TrainingOpsParity, GoldenRoundTrip) {
+        Capture original;
+        keep_f(original.snapshot, "value", 1.5f, kRaster);
+        original.snapshot.exact_i("index", 7);
+        original.snapshot.missing("absent");
+        const auto path = std::filesystem::temp_directory_path() / "lfs_training_ops_golden_test" / "Probe.golden";
+        write_golden(path, original);
+        const Capture restored = read_golden(path);
+        EXPECT_TRUE(restored.error.empty()) << restored.error;
+        EXPECT_TRUE(compare_snapshots(restored.snapshot, original.snapshot, true).empty());
+        std::filesystem::remove_all(path.parent_path());
     }
 
     TEST(TrainingOpsParity, ComparatorRejectsPerturbation) {
@@ -1651,10 +1800,34 @@ namespace {
         if (!family_present(lfs::training::training_ops(backend), family)) {
             GTEST_SKIP() << lfs::training::training_family_name(family);
         }
-        if (!lfs::core::gpu_backend_available(GpuBackend::CUDA) || !lfs::core::gpu_backend_available(backend)) {
-            GTEST_SKIP() << backend_name(backend) << " or CUDA device unavailable";
+        if (!lfs::core::gpu_backend_available(backend)) {
+            GTEST_SKIP() << backend_name(backend) << " device unavailable";
         }
-        expect_match(capture(family, backend), capture(family, GpuBackend::CUDA), false);
+        const auto reference = cuda_reference(family);
+        if (!reference) {
+            GTEST_SKIP() << "no CUDA device and no golden for " << lfs::training::training_family_name(family);
+        }
+        expect_match(capture(family, backend), *reference, false);
+    }
+
+    // Without a CUDA reference, a filled slot must still run its fixture cleanly
+    // and produce finite floats.
+    TEST_P(TrainingOpsFamilyParity, RunsCleanly) {
+        const auto [family, backend] = GetParam();
+        if (!family_present(lfs::training::training_ops(backend), family)) {
+            GTEST_SKIP() << lfs::training::training_family_name(family);
+        }
+        if (!lfs::core::gpu_backend_available(backend)) {
+            GTEST_SKIP() << backend_name(backend) << " device unavailable";
+        }
+        const Capture result = capture(family, backend);
+        ASSERT_TRUE(result.error.empty()) << result.error;
+        for (const Field& field : result.snapshot.fields) {
+            for (size_t index = 0; index < field.values.size(); ++index) {
+                ASSERT_TRUE(std::isfinite(field.values[index]))
+                    << field.name << " index " << index << " is " << field.values[index];
+            }
+        }
     }
 
     INSTANTIATE_TEST_SUITE_P(
@@ -1800,8 +1973,11 @@ namespace {
             GTEST_SKIP() << names;
             return;
         }
-        if (!lfs::core::gpu_backend_available(GpuBackend::CUDA) || !lfs::core::gpu_backend_available(*backend)) {
-            GTEST_SKIP() << backend_name(*backend) << " or CUDA device unavailable";
+        const auto directory = golden_directory();
+        const bool live_cuda = lfs::core::gpu_backend_available(GpuBackend::CUDA);
+        const bool golden_curve = directory && std::filesystem::exists(golden_path(*directory, "LossCurve"));
+        if (!lfs::core::gpu_backend_available(*backend) || (!live_cuda && !golden_curve)) {
+            GTEST_SKIP() << backend_name(*backend) << " device, or a CUDA device or golden curve, unavailable";
         }
 
         const auto dataset = write_synthetic_scene();
@@ -1819,7 +1995,21 @@ namespace {
             EXPECT_TRUE(error.empty()) << error;
             return losses;
         };
-        const auto reference = run(GpuBackend::CUDA, "cuda");
+        std::vector<float> reference;
+        if (live_cuda) {
+            reference = run(GpuBackend::CUDA, "cuda");
+            if (directory) {
+                Capture curve;
+                keep_f(curve.snapshot, "losses", 0.f, kLoss);
+                curve.snapshot.fields.back().values = reference;
+                write_golden(golden_path(*directory, "LossCurve"), curve);
+            }
+        } else {
+            const Capture curve = read_golden(golden_path(*directory, "LossCurve"));
+            ASSERT_TRUE(curve.error.empty()) << curve.error;
+            ASSERT_EQ(curve.snapshot.fields.size(), 1u);
+            reference = curve.snapshot.fields.front().values;
+        }
         const auto other = run(*backend, "second");
         lfs::test::reset_gpu_backend_for_testing();
         const auto restored = lfs::core::set_default_gpu_backend(previous);
