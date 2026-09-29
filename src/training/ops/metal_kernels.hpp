@@ -7,10 +7,10 @@
 
 #include <cstdint>
 #include <format>
-#include <limits>
-#include <stdexcept>
 #include <initializer_list>
+#include <limits>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
