@@ -43,6 +43,7 @@ namespace {
         std::filesystem::path loaded_path;
         lfs::core::param::TrainingParameters loaded_params;
         bool load_dataset_called = false;
+        std::optional<bool> start_overwrite;
 
         lfs::mcp::SharedSceneToolBackend backend() {
             return lfs::mcp::SharedSceneToolBackend{
@@ -65,7 +66,10 @@ namespace {
                     [](const std::filesystem::path&, bool) -> std::expected<void, std::string> {
                     return {};
                 },
-                .start_training = []() -> std::expected<void, std::string> { return {}; },
+                .start_training = [this](const bool overwrite) -> std::expected<void, std::string> {
+                    start_overwrite = overwrite;
+                    return {};
+                },
                 .render_capture = [](std::optional<int>, int, int, bool)
                     -> std::expected<std::string, std::string> {
                     return std::string{};
@@ -221,4 +225,32 @@ TEST(McpSharedSceneToolsTest, GetLastErrorReturnsNullWhenNoFailureLatched) {
     ASSERT_TRUE(result["success"].get<bool>());
     EXPECT_TRUE(result["last_error"].is_null());
     EXPECT_TRUE(result["last_error_message"].is_null());
+}
+
+TEST(McpSharedSceneToolsTest, LoadDatasetRejectsInvalidParametersBeforeReachingTheBackend) {
+    ScopedSharedSceneToolRegistration cleanup;
+    FakeSharedSceneBackend backend;
+    lfs::mcp::register_shared_scene_tools(backend.backend());
+
+    const auto result = lfs::mcp::ToolRegistry::instance().call_tool(
+        "scene.load_dataset",
+        json{{"path", "/tmp/mcp_dataset"}, {"strategy", "igs+"}, {"max_iterations", 0}});
+
+    ASSERT_TRUE(result.contains("error_message")) << result.dump();
+    EXPECT_NE(result["error_message"].get<std::string>().find("iterations"), std::string::npos)
+        << result.dump();
+    EXPECT_FALSE(backend.load_dataset_called);
+}
+
+TEST(McpSharedSceneToolsTest, TrainingStartForwardsOverwriteConsent) {
+    ScopedSharedSceneToolRegistration cleanup;
+    FakeSharedSceneBackend backend;
+    lfs::mcp::register_shared_scene_tools(backend.backend());
+    auto& registry = lfs::mcp::ToolRegistry::instance();
+
+    ASSERT_TRUE(registry.call_tool("training.start", json::object())["success"].get<bool>());
+    EXPECT_EQ(backend.start_overwrite, false);
+
+    ASSERT_TRUE(registry.call_tool("training.start", json{{"overwrite", true}})["success"].get<bool>());
+    EXPECT_EQ(backend.start_overwrite, true);
 }
