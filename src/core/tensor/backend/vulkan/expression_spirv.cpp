@@ -3,9 +3,9 @@
 #include "../../internal/expression_emitter.hpp"
 #include "spirv_module.hpp"
 #include <bit>
-#include <limits>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <spirv/unified1/GLSL.std.450.h>
 #include <stdexcept>
