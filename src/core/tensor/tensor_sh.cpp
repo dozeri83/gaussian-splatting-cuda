@@ -8,8 +8,8 @@
 #include "internal/tensor_impl.hpp"
 #include <cstdint>
 #include <limits>
-#include <utility>
 #include <tbb/parallel_for.h>
+#include <utility>
 
 namespace lfs::core {
 
