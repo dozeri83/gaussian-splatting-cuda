@@ -62,6 +62,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numbers>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -591,13 +592,35 @@ namespace lfs::app {
             };
         }
 
-        json selection_result_json(vis::SceneManager& scene_manager, const vis::SelectionResult& result) {
+        // Gaussians whose selection state differs between two selection masks; a missing
+        // mask selects nothing.
+        int64_t changed_selection_count(const std::shared_ptr<core::Tensor>& before,
+                                        const std::shared_ptr<core::Tensor>& after) {
+            const bool has_before = before && before->is_valid();
+            const bool has_after = after && after->is_valid();
+            if (has_before && has_after && before->numel() == after->numel()) {
+                const core::Tensor prior =
+                    before->device() == after->device() ? *before : before->to(after->device());
+                return static_cast<int64_t>(after->ne(prior).count_nonzero());
+            }
+            if (has_after)
+                return static_cast<int64_t>(after->count_nonzero());
+            return has_before ? static_cast<int64_t>(before->count_nonzero()) : 0;
+        }
+
+        // Runs a selection command and reports how many Gaussians it changed. The service's
+        // SelectionResult::affected_count is the post-command selected count, which its
+        // deferred group counts can still hold at the previous selection size.
+        template <typename Command>
+        json selection_command_json(vis::SceneManager& scene_manager, Command&& command) {
+            const auto before = scene_manager.getScene().getSelectionMask();
+            const vis::SelectionResult result = std::forward<Command>(command)();
             if (!result.success)
                 return json{{"error", result.error}};
 
             return json{
                 {"success", true},
-                {"affected_count", static_cast<int64_t>(result.affected_count)},
+                {"affected_count", changed_selection_count(before, scene_manager.getScene().getSelectionMask())},
                 {"selected_count", selected_gaussian_count(scene_manager)},
             };
         }
@@ -608,15 +631,23 @@ namespace lfs::app {
             return args[key].get<std::string>();
         }
 
+        // Tool schemas reject malformed vectors before the handler; this keeps a direct
+        // caller from indexing a short array and rejects values that overflow float.
         std::expected<std::optional<glm::vec3>, std::string> optional_vec3_arg(const json& args, const char* key) {
             if (!args.contains(key) || args[key].is_null())
                 return std::optional<glm::vec3>{};
 
             const auto& value = args[key];
-            if (!value.is_array() || value.size() != 3)
-                return std::unexpected(std::string("Field '") + key + "' must be a 3-element array");
+            if (!value.is_array() || value.size() != 3 ||
+                !std::ranges::all_of(value, [](const json& v) { return v.is_number(); }))
+                return std::unexpected(std::format("Field '{}' must be a 3-element number array (got {})", key,
+                                                   value.dump()));
 
-            return glm::vec3(value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
+            const glm::vec3 result(value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
+            if (!std::isfinite(result.x) || !std::isfinite(result.y) || !std::isfinite(result.z))
+                return std::unexpected(std::format("Field '{}' must contain finite float values (got {})", key,
+                                                   value.dump()));
+            return result;
         }
 
         struct ViewArguments {
@@ -628,26 +659,29 @@ namespace lfs::app {
 
         struct ViewArgumentsError {
             std::string message;
+            std::string parameter;
         };
 
         std::expected<ViewArguments, ViewArgumentsError> parse_view_arguments(const json& args) {
             auto eye = optional_vec3_arg(args, "eye");
             if (!eye)
-                return std::unexpected(ViewArgumentsError{eye.error()});
+                return std::unexpected(ViewArgumentsError{eye.error(), "eye"});
             auto target = optional_vec3_arg(args, "target");
             if (!target)
-                return std::unexpected(ViewArgumentsError{target.error()});
+                return std::unexpected(ViewArgumentsError{target.error(), "target"});
             auto up = optional_vec3_arg(args, "up");
             if (!up)
-                return std::unexpected(ViewArgumentsError{up.error()});
+                return std::unexpected(ViewArgumentsError{up.error(), "up"});
             if (!eye->has_value() || !target->has_value())
-                return std::unexpected(ViewArgumentsError{"Fields 'eye' and 'target' must be provided"});
+                return std::unexpected(ViewArgumentsError{"Fields 'eye' and 'target' must be provided", "eye"});
 
             ViewArguments result{
                 .eye = **eye,
                 .target = **target,
                 .up = up->value_or(glm::vec3(0.0f, 1.0f, 0.0f)),
             };
+            if (auto error = view_vectors_error(result.eye, result.target, result.up))
+                return std::unexpected(ViewArgumentsError{std::move(*error), "eye"});
             if (args.contains("fov_degrees"))
                 result.fov_degrees = args["fov_degrees"].get<float>();
             return result;
@@ -1336,6 +1370,20 @@ namespace lfs::app {
 
             props.set("resolved_node_names", *targets);
             return {};
+        }
+
+        // Euler angles past a full turn in either direction are almost always a units
+        // mistake (degrees passed as radians) and lose precision in float.
+        json rotation_components_schema(const std::string& description) {
+            constexpr double FULL_TURN = 2.0 * std::numbers::pi;
+            return json{{"items", json{{"type", "number"}, {"minimum", -FULL_TURN}, {"maximum", FULL_TURN}}},
+                        {"description", description + ", each within [-2*pi, 2*pi]"}};
+        }
+
+        // A zero or negative scale factor collapses or mirrors the node.
+        json scale_components_schema(const std::string& description) {
+            return json{{"items", json{{"type", "number"}, {"exclusiveMinimum", 0}}},
+                        {"description", description + ", each > 0"}};
         }
 
         std::expected<void, std::string> prepare_transform_set_operator(vis::Visualizer& viewer,
@@ -2545,14 +2593,11 @@ namespace lfs::app {
                     return result;
                 },
             .render_capture =
-                [viewer](std::optional<int> camera_index, int width, int height, bool presented) {
+                [viewer](int width, int height, bool presented) {
                     // Runs as render work, not plain posted work: the window-crop fallback
                     // inside capture_live_viewport_to_base64 needs an active GUI frame.
                     return capture_after_gui_render(
-                        viewer, [viewer, camera_index, width, height, presented]() {
-                            if (camera_index)
-                                return render_scene_to_base64(
-                                    viewer->getScene(), *camera_index, width, height);
+                        viewer, [viewer, width, height, presented]() {
                             return capture_live_viewport_to_base64(viewer, width, height, presented);
                         });
                 },
@@ -2657,12 +2702,12 @@ namespace lfs::app {
         registry.register_tool(
             McpTool{
                 .name = "render.capture_window",
-                .description = "Capture the current composited app window. Unlike render_capture without camera_index, this includes the full window, including panels, toolbars, and GUI overlays.",
+                .description = "Capture the current composited app window. Unlike render_capture, which grabs the viewport region only, this includes the full window, including panels, toolbars, and GUI overlays.",
                 .input_schema = {
                     .type = "object",
                     .properties = json{
-                        {"width", json{{"type", "integer"}, {"description", "Optional output width; preserves aspect ratio when height is omitted"}}},
-                        {"height", json{{"type", "integer"}, {"description", "Optional output height; preserves aspect ratio when width is omitted"}}}},
+                        {"width", mcp::capture_size_schema("Optional output width in pixels; preserves aspect ratio when height is omitted")},
+                        {"height", mcp::capture_size_schema("Optional output height in pixels; preserves aspect ratio when width is omitted")}},
                     .required = {}},
                 .metadata = mcp::McpToolMetadata{
                     .category = "render",
@@ -2708,15 +2753,15 @@ namespace lfs::app {
                 .input_schema = {
                     .type = "object",
                     .properties = json{
-                        {"eye", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Camera eye position [x,y,z]"}}},
-                        {"target", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Camera target/pivot position [x,y,z]"}}},
-                        {"up", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional up vector [x,y,z], defaults to [0,1,0]"}}},
+                        {"eye", number_array_schema(3, "Camera eye position [x,y,z]")},
+                        {"target", number_array_schema(3, "Camera target/pivot position [x,y,z]")},
+                        {"up", number_array_schema(3, "Optional up vector [x,y,z], defaults to [0,1,0]")},
                         {"fov_degrees", json{{"type", "number"}, {"description", "Optional vertical field of view in degrees"}}}},
                     .required = {"eye", "target"}}},
             [viewer_impl](const json& args) -> json {
                 auto view = parse_view_arguments(args);
                 if (!view)
-                    return json{{"error", view.error().message}};
+                    return mcp::invalid_argument_result(view.error().message, view.error().parameter);
 
                 return post_and_wait(viewer_impl, [view = *view]() -> json {
                     apply_view_arguments(view);
@@ -3024,9 +3069,9 @@ namespace lfs::app {
                 .input_schema = {
                     .type = "object",
                     .properties = json{
-                        {"eye", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Camera eye position [x,y,z]"}}},
-                        {"target", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Camera target/pivot position [x,y,z]"}}},
-                        {"up", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional up vector [x,y,z], defaults to [0,1,0]"}}},
+                        {"eye", number_array_schema(3, "Camera eye position [x,y,z]")},
+                        {"target", number_array_schema(3, "Camera target/pivot position [x,y,z]")},
+                        {"up", number_array_schema(3, "Optional up vector [x,y,z], defaults to [0,1,0]")},
                         {"fov_degrees", json{{"type", "number"}, {"description", "Optional vertical field of view in degrees"}}}},
                     .required = {"eye", "target"}},
                 .metadata = mcp::McpToolMetadata{
@@ -3039,7 +3084,7 @@ namespace lfs::app {
             [viewer_impl](const json& args) -> json {
                 auto view = parse_view_arguments(args);
                 if (!view)
-                    return json{{"error", view.error().message}};
+                    return mcp::invalid_argument_result(view.error().message, view.error().parameter);
 
                 const auto started_at = std::chrono::steady_clock::now();
                 auto applied = post_and_wait(viewer_impl, [view = *view]() -> json {
@@ -3102,7 +3147,7 @@ namespace lfs::app {
                         {"render_scale", json{{"type", "number"}}},
                         {"scene_upscaler", json{{"type", "string"}, {"enum", scene_upscaler_backend_enum}}},
                         {"scene_upscaler_preset", json{{"type", "string"}, {"enum", scene_upscaler_preset_enum}}},
-                        {"background_color", json{{"type", "array"}, {"items", json{{"type", "number"}}}}},
+                        {"background_color", number_array_schema(3, "Background RGB color [r,g,b]")},
                         {"environment_mode", json{{"type", "integer"}}},
                         {"environment_map_path", json{{"type", "string"}}},
                         {"environment_exposure", json{{"type", "number"}}},
@@ -3916,7 +3961,7 @@ namespace lfs::app {
                         {"y0", json{{"type", "number"}, {"description", "Top edge Y coordinate"}}},
                         {"x1", json{{"type", "number"}, {"description", "Right edge X coordinate"}}},
                         {"y1", json{{"type", "number"}, {"description", "Bottom edge Y coordinate"}}},
-                        {"camera_index", json{{"type", "integer"}, {"description", "-1 = the current viewer (default; matches render.capture omitted-index behavior); >= 0 = dataset camera index; out-of-range fails with an error"}}},
+                        {"camera_index", json{{"type", "integer"}, {"minimum", SELECTION_VIEWER_CAMERA_INDEX}, {"description", "-1 = project through the current viewer (default); >= 0 = project through that dataset camera, with x/y in its image pixels; an index past the last camera fails with an error"}}},
                         {"mode", json{{"type", "string"}, {"enum", json::array({"replace", "add", "remove", "intersect"})}, {"description", "Selection mode (default: replace)"}}}},
                     .required = {"x0", "y0", "x1", "y1"}}},
             [viewer_impl](const json& args) -> json {
@@ -3931,8 +3976,9 @@ namespace lfs::app {
                     auto* const scene_manager = viewer_impl->getSceneManager();
                     if (!scene_manager)
                         return json{{"error", "Scene manager not initialized"}};
-                    return selection_result_json(*scene_manager,
-                                                 scene_manager->selectRect(x0, y0, x1, y1, mode, camera_index));
+                    return selection_command_json(*scene_manager, [&] {
+                        return scene_manager->selectRect(x0, y0, x1, y1, mode, camera_index);
+                    });
                 });
             });
 
@@ -3943,8 +3989,8 @@ namespace lfs::app {
                 .input_schema = {
                     .type = "object",
                     .properties = json{
-                        {"points", json{{"type", "array"}, {"items", json{{"type", "array"}, {"items", json{{"type", "number"}}}}}, {"description", "Polygon vertices [[x0,y0], [x1,y1], ...]"}}},
-                        {"camera_index", json{{"type", "integer"}, {"description", "-1 = the current viewer (default; matches render.capture omitted-index behavior); >= 0 = dataset camera index; out-of-range fails with an error"}}},
+                        {"points", point_list_schema(3, "Polygon vertices [[x0,y0], [x1,y1], ...]")},
+                        {"camera_index", json{{"type", "integer"}, {"minimum", SELECTION_VIEWER_CAMERA_INDEX}, {"description", "-1 = project through the current viewer (default); >= 0 = project through that dataset camera, with x/y in its image pixels; an index past the last camera fails with an error"}}},
                         {"mode", json{{"type", "string"}, {"enum", json::array({"replace", "add", "remove", "intersect"})}, {"description", "Selection mode (default: replace)"}}}},
                     .required = {"points"}}},
             [viewer_impl](const json& args) -> json {
@@ -3966,8 +4012,9 @@ namespace lfs::app {
                     auto* const scene_manager = viewer_impl->getSceneManager();
                     if (!scene_manager)
                         return json{{"error", "Scene manager not initialized"}};
-                    return selection_result_json(*scene_manager,
-                                                 scene_manager->selectPolygon(vertex_data, mode, camera_index));
+                    return selection_command_json(*scene_manager, [&] {
+                        return scene_manager->selectPolygon(vertex_data, mode, camera_index);
+                    });
                 });
             });
 
@@ -3978,8 +4025,8 @@ namespace lfs::app {
                 .input_schema = {
                     .type = "object",
                     .properties = json{
-                        {"points", json{{"type", "array"}, {"items", json{{"type", "array"}, {"items", json{{"type", "number"}}}}}, {"description", "Lasso points [[x0,y0], [x1,y1], ...]"}}},
-                        {"camera_index", json{{"type", "integer"}, {"description", "-1 = the current viewer (default; matches render.capture omitted-index behavior); >= 0 = dataset camera index; out-of-range fails with an error"}}},
+                        {"points", point_list_schema(3, "Lasso points [[x0,y0], [x1,y1], ...]")},
+                        {"camera_index", json{{"type", "integer"}, {"minimum", SELECTION_VIEWER_CAMERA_INDEX}, {"description", "-1 = project through the current viewer (default); >= 0 = project through that dataset camera, with x/y in its image pixels; an index past the last camera fails with an error"}}},
                         {"mode", json{{"type", "string"}, {"enum", json::array({"replace", "add", "remove", "intersect"})}, {"description", "Selection mode (default: replace)"}}}},
                     .required = {"points"}}},
             [viewer_impl](const json& args) -> json {
@@ -4001,8 +4048,9 @@ namespace lfs::app {
                     auto* const scene_manager = viewer_impl->getSceneManager();
                     if (!scene_manager)
                         return json{{"error", "Scene manager not initialized"}};
-                    return selection_result_json(*scene_manager,
-                                                 scene_manager->selectLasso(vertex_data, mode, camera_index));
+                    return selection_command_json(*scene_manager, [&] {
+                        return scene_manager->selectLasso(vertex_data, mode, camera_index);
+                    });
                 });
             });
 
@@ -4015,7 +4063,7 @@ namespace lfs::app {
                     .properties = json{
                         {"x", json{{"type", "number"}, {"description", "X coordinate"}}},
                         {"y", json{{"type", "number"}, {"description", "Y coordinate"}}},
-                        {"camera_index", json{{"type", "integer"}, {"description", "-1 = the current viewer (default; matches render.capture omitted-index behavior); >= 0 = dataset camera index; out-of-range fails with an error"}}},
+                        {"camera_index", json{{"type", "integer"}, {"minimum", SELECTION_VIEWER_CAMERA_INDEX}, {"description", "-1 = project through the current viewer (default); >= 0 = project through that dataset camera, with x/y in its image pixels; an index past the last camera fails with an error"}}},
                         {"mode", json{{"type", "string"}, {"enum", json::array({"replace", "add", "remove", "intersect"})}, {"description", "Selection mode (default: replace)"}}}},
                     .required = {"x", "y"}}},
             [viewer_impl](const json& args) -> json {
@@ -4028,8 +4076,9 @@ namespace lfs::app {
                     auto* const scene_manager = viewer_impl->getSceneManager();
                     if (!scene_manager)
                         return json{{"error", "Scene manager not initialized"}};
-                    return selection_result_json(*scene_manager,
-                                                 scene_manager->selectRing(x, y, mode, camera_index));
+                    return selection_command_json(*scene_manager, [&] {
+                        return scene_manager->selectRing(x, y, mode, camera_index);
+                    });
                 });
             });
 
@@ -4043,7 +4092,7 @@ namespace lfs::app {
                         {"x", json{{"type", "number"}, {"description", "X coordinate"}}},
                         {"y", json{{"type", "number"}, {"description", "Y coordinate"}}},
                         {"radius", json{{"type", "number"}, {"description", "Selection radius in pixels (default: 20)"}}},
-                        {"camera_index", json{{"type", "integer"}, {"description", "-1 = the current viewer (default; matches render.capture omitted-index behavior); >= 0 = dataset camera index; out-of-range fails with an error"}}},
+                        {"camera_index", json{{"type", "integer"}, {"minimum", SELECTION_VIEWER_CAMERA_INDEX}, {"description", "-1 = project through the current viewer (default); >= 0 = project through that dataset camera, with x/y in its image pixels; an index past the last camera fails with an error"}}},
                         {"mode", json{{"type", "string"}, {"enum", json::array({"replace", "add", "remove", "intersect"})}, {"description", "Selection mode (default: replace)"}}}},
                     .required = {"x", "y"}}},
             [viewer_impl](const json& args) -> json {
@@ -4057,8 +4106,9 @@ namespace lfs::app {
                     auto* const scene_manager = viewer_impl->getSceneManager();
                     if (!scene_manager)
                         return json{{"error", "Scene manager not initialized"}};
-                    return selection_result_json(*scene_manager,
-                                                 scene_manager->selectBrush(x, y, radius, mode, camera_index));
+                    return selection_command_json(*scene_manager, [&] {
+                        return scene_manager->selectBrush(x, y, radius, mode, camera_index);
+                    });
                 });
             });
 
@@ -4072,7 +4122,7 @@ namespace lfs::app {
                         {"x", json{{"type", "number"}, {"description", "X coordinate"}}},
                         {"y", json{{"type", "number"}, {"description", "Y coordinate"}}},
                         {"radius", json{{"type", "number"}, {"description", "Selection radius in pixels (default: 20)"}}},
-                        {"camera_index", json{{"type", "integer"}, {"description", "-1 = the current viewer (default; matches render.capture omitted-index behavior); >= 0 = dataset camera index; out-of-range fails with an error"}}},
+                        {"camera_index", json{{"type", "integer"}, {"minimum", SELECTION_VIEWER_CAMERA_INDEX}, {"description", "-1 = project through the current viewer (default); >= 0 = project through that dataset camera, with x/y in its image pixels; an index past the last camera fails with an error"}}},
                         {"mode", json{{"type", "string"}, {"enum", json::array({"replace", "add", "remove", "intersect"})}, {"description", "Selection mode (default: replace)"}}}},
                     .required = {"x", "y"}}},
             [viewer_impl](const json& args) -> json {
@@ -4086,8 +4136,9 @@ namespace lfs::app {
                     auto* const scene_manager = viewer_impl->getSceneManager();
                     if (!scene_manager)
                         return json{{"error", "Scene manager not initialized"}};
-                    return selection_result_json(*scene_manager,
-                                                 scene_manager->selectBrush(x, y, radius, mode, camera_index));
+                    return selection_command_json(*scene_manager, [&] {
+                        return scene_manager->selectBrush(x, y, radius, mode, camera_index);
+                    });
                 });
             });
 
@@ -4285,6 +4336,9 @@ namespace lfs::app {
                 .operator_id = vis::op::BuiltinOp::TransformSet,
                 .category = "transform",
                 .description = "Set absolute visualizer-world transform components for a node or the current shared node selection",
+                .property_overrides = json{
+                    {"rotation", rotation_components_schema("Optional visualizer-world XYZ Euler rotation in radians")},
+                    {"scale", scale_components_schema("Optional visualizer-world XYZ scale")}},
                 .prepare = prepare_transform_set_operator,
                 .on_success = transform_operator_result,
             });
@@ -4309,6 +4363,8 @@ namespace lfs::app {
                 .category = "transform",
                 .description = "Rotate a node or the current shared node selection by visualizer-world XYZ Euler deltas in radians",
                 .required = {"value"},
+                .property_overrides = json{
+                    {"value", rotation_components_schema("Visualizer-world XYZ Euler delta in radians")}},
                 .prepare = prepare_transform_operator,
                 .on_success = transform_operator_result,
             });
@@ -4321,6 +4377,8 @@ namespace lfs::app {
                 .category = "transform",
                 .description = "Scale a node or the current shared node selection by visualizer-world XYZ factors",
                 .required = {"value"},
+                .property_overrides = json{
+                    {"value", scale_components_schema("Visualizer-world XYZ scale multiplier")}},
                 .prepare = prepare_transform_operator,
                 .on_success = transform_operator_result,
             });
@@ -4351,6 +4409,9 @@ namespace lfs::app {
                     if (!cropbox_id)
                         return json{{"error", cropbox_id.error()}};
 
+                    // Select the box as the GUI's add does, so crop_box_set/get without a
+                    // node address it whatever was selected before.
+                    scene_manager->selectNode(*cropbox_id);
                     return crop_box_info_json(*scene_manager, *cropbox_id);
                 });
             });
@@ -4388,11 +4449,11 @@ namespace lfs::app {
                     .type = "object",
                     .properties = json{
                         {"node", json{{"type", "string"}, {"description", "Optional crop box node or parent node name; defaults to the current selected crop box"}}},
-                        {"min", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional local minimum bounds"}}},
-                        {"max", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional local maximum bounds"}}},
-                        {"translation", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional local XYZ translation"}}},
-                        {"rotation", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional local XYZ Euler rotation in radians"}}},
-                        {"scale", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional local XYZ scale"}}},
+                        {"min", number_array_schema(3, "Optional local minimum bounds")},
+                        {"max", number_array_schema(3, "Optional local maximum bounds")},
+                        {"translation", number_array_schema(3, "Optional local XYZ translation")},
+                        {"rotation", number_array_schema(3, "Optional local XYZ Euler rotation in radians")},
+                        {"scale", number_array_schema(3, "Optional local XYZ scale")},
                         {"inverse", json{{"type", "boolean"}, {"description", "Invert the crop volume"}}},
                         {"enabled", json{{"type", "boolean"}, {"description", "Enable crop filtering for this crop box"}}},
                         {"show", json{{"type", "boolean"}, {"description", "Show crop boxes in the viewport"}}},
@@ -4555,6 +4616,9 @@ namespace lfs::app {
                     if (!ellipsoid_id)
                         return json{{"error", ellipsoid_id.error()}};
 
+                    // Select the ellipsoid as the GUI's add does, so ellipsoid_set/get without
+                    // a node address it whatever was selected before.
+                    scene_manager->selectNode(*ellipsoid_id);
                     return ellipsoid_info_json(*scene_manager, *ellipsoid_id);
                 });
             });
@@ -4592,10 +4656,10 @@ namespace lfs::app {
                     .type = "object",
                     .properties = json{
                         {"node", json{{"type", "string"}, {"description", "Optional ellipsoid node or parent node name; defaults to the current selected ellipsoid"}}},
-                        {"radii", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional ellipsoid radii"}}},
-                        {"translation", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional local XYZ translation"}}},
-                        {"rotation", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional local XYZ Euler rotation in radians"}}},
-                        {"scale", json{{"type", "array"}, {"items", json{{"type", "number"}}}, {"description", "Optional local XYZ scale"}}},
+                        {"radii", number_array_schema(3, "Optional ellipsoid radii")},
+                        {"translation", number_array_schema(3, "Optional local XYZ translation")},
+                        {"rotation", number_array_schema(3, "Optional local XYZ Euler rotation in radians")},
+                        {"scale", number_array_schema(3, "Optional local XYZ scale")},
                         {"inverse", json{{"type", "boolean"}, {"description", "Invert the ellipsoid selection volume"}}},
                         {"enabled", json{{"type", "boolean"}, {"description", "Enable ellipsoid filtering for this helper"}}},
                         {"show", json{{"type", "boolean"}, {"description", "Show ellipsoids in the viewport"}}},
@@ -5481,8 +5545,9 @@ namespace lfs::app {
                     if (!scene_manager)
                         return json{{"error", "Scene manager not initialized"}};
 
-                    auto result = selection_result_json(*scene_manager,
-                                                        scene_manager->selectRect(x0, y0, x1, y1, "replace", camera_index));
+                    auto result = selection_command_json(*scene_manager, [&] {
+                        return scene_manager->selectRect(x0, y0, x1, y1, "replace", camera_index);
+                    });
                     if (!result.value("success", false))
                         return result;
                     result["bounding_box"] = bbox;
