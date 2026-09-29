@@ -29,7 +29,6 @@ namespace {
     // The backend of the running parameterized test.
     lfs::core::GpuBackend backend_under_test() { return testing::TestWithParam<lfs::core::GpuBackend>::GetParam(); }
 
-
     using lfs::core::DataType;
     using lfs::core::Device;
     using lfs::core::GpuBackend;
