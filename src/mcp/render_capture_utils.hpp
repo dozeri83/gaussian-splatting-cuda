@@ -95,11 +95,11 @@ namespace lfs::mcp {
     // or past MAX_CAPTURE_DIMENSION once the omitted side follows the source aspect) is the
     // caller's error and fails as InvalidArgument; a bad source buffer as Internal.
     inline lfs::Result<std::string> encode_pixels_to_base64(const uint8_t* src_pixels,
-                                                                           int src_width,
-                                                                           int src_height,
-                                                                           int channels,
-                                                                           int width = 0,
-                                                                           int height = 0) {
+                                                            int src_width,
+                                                            int src_height,
+                                                            int channels,
+                                                            int width = 0,
+                                                            int height = 0) {
         if (!src_pixels)
             return capture_error(lfs::ErrorCode::Internal, "Pixel buffer is null");
         if (src_width <= 0 || src_height <= 0 || channels < 1 || channels > 4)
@@ -138,20 +138,20 @@ namespace lfs::mcp {
             out_width * channels);
         if (!ok)
             return capture_error(lfs::ErrorCode::Internal,
-                                         std::format("PNG encoding of a {}x{} capture failed", out_width, out_height));
+                                 std::format("PNG encoding of a {}x{} capture failed", out_width, out_height));
 
         return core::base64_encode(png_buf);
     }
 
     inline lfs::Result<std::string> encode_render_tensor_to_base64(core::Tensor image,
-                                                                                  int width = 0,
-                                                                                  int height = 0) {
+                                                                   int width = 0,
+                                                                   int height = 0) {
         image = image.clone().to(core::Device::CPU).to(core::DataType::Float32);
         if (image.ndim() == 4)
             image = image.squeeze(0);
         if (image.ndim() != 3)
             return capture_error(lfs::ErrorCode::Internal,
-                                         std::format("Render tensor must be 3D (got {} dimensions)", image.ndim()));
+                                 std::format("Render tensor must be 3D (got {} dimensions)", image.ndim()));
         const auto layout = rendering::detectImageLayout(image);
         if (layout == rendering::ImageLayout::Unknown)
             return capture_error(lfs::ErrorCode::Internal, "Render tensor has an unsupported image layout");
