@@ -759,8 +759,7 @@ namespace lfs::training {
         // d/d(color[f, k]) = sum_j pinv[k, j] * grad_offsets[j] / num_frames
         if (config_.color_mean > 0.0f) {
             const auto offsets = color_params_.reshape({num_frames_, 8}).mm(color_pinv_block_diag_).mean(0);
-            const auto grad_offsets = smooth_l1_grad(offsets, 0.005f).mul(
-                config_.color_mean / (8.0f * static_cast<float>(num_frames_)));
+            const auto grad_offsets = smooth_l1_grad(offsets, 0.005f).mul(config_.color_mean / (8.0f * static_cast<float>(num_frames_)));
             const auto grad_row = color_pinv_block_diag_.mm(grad_offsets.reshape({8, 1})).reshape({1, 8});
             color_grad_ = color_grad_.reshape({num_frames_, 8}).add(grad_row).reshape({num_frames_ * 8});
         }
@@ -769,7 +768,7 @@ namespace lfs::training {
         if (config_.train_crf && config_.crf_channel > 0.0f) {
             const auto deviation = channel_deviation(crf_params_, num_cameras_, 4);
             crf_grad_ = crf_grad_.add(deviation.mul(
-                                                  2.0f * config_.crf_channel / static_cast<float>(num_cameras_ * 4 * 3))
+                                                   2.0f * config_.crf_channel / static_cast<float>(num_cameras_ * 4 * 3))
                                           .reshape({num_cameras_ * 12}));
         }
     }
