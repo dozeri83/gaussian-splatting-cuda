@@ -906,6 +906,13 @@ namespace lfs::core::internal {
         return next_timeline_.fetch_add(1, std::memory_order_relaxed) + 1;
     }
 
+    // Queue lock held. Batches are submitted out of reservation order across
+    // threads, so the published value only moves forward.
+    void VulkanContext::publish_submitted_locked(const uint64_t signal_value) {
+        if (signal_value > submitted_timeline_.load(std::memory_order_relaxed))
+            submitted_timeline_.store(signal_value, std::memory_order_release);
+    }
+
     void VulkanContext::submit(const VkCommandBuffer command,
                                const uint64_t signal_value) {
         if (dead()) {
@@ -927,7 +934,7 @@ namespace lfs::core::internal {
         std::lock_guard lock(queue_mutex_);
         vk_check(this, vkQueueSubmit2(queue_, 1, &submit_info, VK_NULL_HANDLE),
                  "vkQueueSubmit2");
-        submitted_timeline_.store(signal_value, std::memory_order_release);
+        publish_submitted_locked(signal_value);
     }
 
     void VulkanContext::submit_after(const VkCommandBuffer command, const uint64_t wait_value,
@@ -959,7 +966,7 @@ namespace lfs::core::internal {
         std::lock_guard lock(queue_mutex_);
         vk_check(this, vkQueueSubmit2(queue_, 1, &submit_info, VK_NULL_HANDLE),
                  "vkQueueSubmit2");
-        submitted_timeline_.store(signal_value, std::memory_order_release);
+        publish_submitted_locked(signal_value);
     }
 
     void VulkanContext::submit_external_wait(VkSemaphore semaphore, uint64_t value, uint64_t signal_value) {
@@ -978,7 +985,7 @@ namespace lfs::core::internal {
         submit.pSignalSemaphoreInfos = &signal;
         std::lock_guard lock(queue_mutex_);
         vk_check(this, vkQueueSubmit2(queue_, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit2(external tensor wait)");
-        submitted_timeline_.store(signal_value, std::memory_order_release);
+        publish_submitted_locked(signal_value);
     }
 
     void VulkanContext::submit_external_after(const VkSemaphore external, const uint64_t external_value,
@@ -1012,7 +1019,7 @@ namespace lfs::core::internal {
         std::lock_guard lock(queue_mutex_);
         vk_check(this, vkQueueSubmit2(queue_, 1, &submit, VK_NULL_HANDLE),
                  "vkQueueSubmit2(external tensor wait)");
-        submitted_timeline_.store(signal_value, std::memory_order_release);
+        publish_submitted_locked(signal_value);
     }
 
     void VulkanContext::wait(const uint64_t value) {
