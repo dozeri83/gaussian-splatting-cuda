@@ -2223,6 +2223,15 @@ namespace lfs::vis {
         // Update editor context state from scene/trainer
         editor_context_.update(scene_manager_.get(), trainer_manager_.get());
 
+        if (scene_manager_ && rendering_manager_ && viewport_.windowSize.y > 0) {
+            const float focal_length_mm = rendering_manager_->getFocalLengthMm();
+            scene_manager_->updateTileStreams(viewport_.getViewMatrix(),
+                                              viewport_.getProjectionMatrix(focal_length_mm),
+                                              static_cast<float>(viewport_.windowSize.y),
+                                              lfs::rendering::focalLengthToVFovRad(focal_length_mm),
+                                              [this] { wakeMainLoop(); });
+        }
+
         if (pending_training_completion_refresh_frames_ > 0 &&
             (!trainer_manager_ || !trainer_manager_->isTrainingActive())) {
             --pending_training_completion_refresh_frames_;
