@@ -92,9 +92,12 @@ namespace lfs::io {
         const SplatTileSource& source, std::uint32_t tile);
 
     // Merges decoded tiles into one model in the source-local frame; null for no tiles.
+    // With an allocator the merged tensors are allocated by it (e.g. renderer storage),
+    // so the result needs no further migration copy.
     [[nodiscard]] LFS_IO_API std::unique_ptr<core::SplatData> merge_splat_tiles(
         const SplatTileSource& source, std::span<const std::uint32_t> tiles,
-        const std::function<const core::SplatData*(std::uint32_t)>& splats);
+        const std::function<const core::SplatData*(std::uint32_t)>& splats,
+        const core::SplatTensorAllocator& allocator = {});
 
     // A 3D Tiles tileset.json (sniffed by content, since the extension is generic).
     [[nodiscard]] LFS_IO_API bool is_tiles3d_path(const std::filesystem::path& path);

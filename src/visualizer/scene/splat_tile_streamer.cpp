@@ -5,9 +5,9 @@
 #include "splat_tile_streamer.hpp"
 #include "core/logger.hpp"
 #include "core/tensor_backend.hpp"
-#include "io/loader.hpp"
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <thread>
 
 namespace lfs::vis {
@@ -46,6 +46,8 @@ namespace lfs::vis {
                          .render;
         std::ranges::sort(shown_set_);
         requested_set_ = shown_set_;
+        for (const auto tile : shown_set_)
+            drawn_bytes_ += tile_bytes(source_->tiles()[tile]);
         resizeWorkers(auto_tile_load_workers());
     }
 
@@ -74,7 +76,7 @@ namespace lfs::vis {
                                                                const SplatTileStreamSettings& settings,
                                                                std::function<void()> wake) {
         resizeWorkers(settings.num_load_workers > 0 ? static_cast<std::size_t>(settings.num_load_workers)
-                                                     : auto_tile_load_workers());
+                                                    : auto_tile_load_workers());
         std::lock_guard lock(mutex_);
         if (!wake_)
             wake_ = std::move(wake);
@@ -98,7 +100,7 @@ namespace lfs::vis {
         if (over_budget_ && sse_factor_ < kMaxSseFactor) {
             sse_factor_ = std::min(sse_factor_ * kSseFactorStep, kMaxSseFactor);
             cache_changed_ = true;
-        } else if (!over_budget_ && sse_factor_ > 1.0f && cache_bytes_ < cache_limit_bytes_ * 4 / 5) {
+        } else if (!over_budget_ && sse_factor_ > 1.0f && usedBytesLocked() < cache_limit_bytes_ * 4 / 5) {
             sse_factor_ = std::max(sse_factor_ / kSseFactorStep, 1.0f);
             cache_changed_ = true;
         }
@@ -129,6 +131,10 @@ namespace lfs::vis {
         if (!built_)
             return nullptr;
         shown_set_ = std::move(built_set_);
+        drawn_bytes_ = built_bytes_; // the caller releases the previous model on swap
+        built_bytes_ = 0;
+        ++release_gen_;
+        cv_.notify_all();
         return std::move(built_);
     }
 
@@ -141,6 +147,7 @@ namespace lfs::vis {
                                  .failed_tiles = failed_.size(),
                                  .full_detail_splats = full_detail_splats_,
                                  .cache_bytes = cache_bytes_,
+                                 .drawn_bytes = drawn_bytes_ + building_bytes_ + (built_ ? built_bytes_ : 0),
                                  .cache_limit_bytes = cache_limit_bytes_,
                                  .gpu_total_bytes = gpu_total_bytes_,
                                  .build_ms = build_ms_,
@@ -153,8 +160,12 @@ namespace lfs::vis {
         return out;
     }
 
+    std::uint64_t SplatTileStreamer::usedBytesLocked() const {
+        return cache_bytes_ + in_flight_bytes_ + drawn_bytes_ + building_bytes_ + (built_ ? built_bytes_ : 0);
+    }
+
     void SplatTileStreamer::evictLocked(const std::uint64_t incoming) {
-        while (cache_bytes_ + in_flight_bytes_ + incoming > cache_limit_bytes_) {
+        while (usedBytesLocked() + incoming > cache_limit_bytes_) {
             auto victim = cache_.end();
             for (auto it = cache_.begin(); it != cache_.end(); ++it) {
                 if (it->second.last_wanted == frame_ || std::ranges::binary_search(requested_set_, it->first))
@@ -192,24 +203,35 @@ namespace lfs::vis {
                     cache_changed_ = true;
                     continue;
                 }
+                // The merged model is a second copy of its tiles and the drawn one stays
+                // until it is replaced, so both count against the memory limit too.
+                std::uint64_t merge_bytes = 0;
+                for (const auto tile : set)
+                    merge_bytes += tile_bytes(tiles[tile]);
+                building_bytes_ = merge_bytes;
+                evictLocked();
                 building_ = true;
                 lock.unlock();
                 const auto build_start = std::chrono::steady_clock::now();
-                auto merged = io::merge_splat_tiles(*source_, set, [&](const std::uint32_t tile) {
-                    return pieces.at(tile).get();
-                });
-                if (merged) {
-                    if (auto migrated = io::migrateSplatTensorsToAllocator(*merged, allocator_); !migrated) {
-                        LOG_ERROR("3D Tiles: cannot prepare streamed model: {}", migrated.error().format());
-                        merged.reset();
-                    }
+                std::unique_ptr<core::SplatData> merged;
+                try {
+                    // Merged straight into renderer storage: no separate migration copy.
+                    merged = io::merge_splat_tiles(
+                        *source_, set, [&](const std::uint32_t tile) { return pieces.at(tile).get(); }, allocator_);
+                } catch (const std::exception& e) {
+                    LOG_ERROR("3D Tiles: cannot prepare streamed model: {}", e.what());
                 }
+                pieces.clear();
                 const auto build_ms =
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - build_start).count();
                 lock.lock();
                 building_ = false;
+                building_bytes_ = 0;
+                ++release_gen_;
+                cv_.notify_all();
                 build_ms_ = build_ms;
                 if (merged && gen > installed_gen_) {
+                    built_bytes_ = merge_bytes;
                     built_ = std::move(merged);
                     built_set_ = std::move(set);
                     installed_gen_ = gen;
@@ -232,9 +254,14 @@ namespace lfs::vis {
                     continue;
                 const auto bytes = tile_bytes(tiles[tile]);
                 evictLocked(bytes);
-                if (cache_bytes_ + in_flight_bytes_ + bytes <= cache_limit_bytes_) {
+                const auto used = usedBytesLocked();
+                const auto transient = building_bytes_ + (built_ ? built_bytes_ : 0);
+                if (used + bytes <= cache_limit_bytes_) {
                     next = tile;
                     next_bytes = bytes;
+                } else if (used - transient + bytes <= cache_limit_bytes_) {
+                    // Fits once the pending merge replaces the drawn model: wait for it
+                    // instead of coarsening the view over a transient peak.
                 } else if (!over_budget_) {
                     over_budget_ = true;
                     if (wake_)
@@ -245,9 +272,10 @@ namespace lfs::vis {
             if (next == io::SplatTile::kNone) {
                 const auto selection = frame_;
                 const auto limit = cache_limit_bytes_;
+                const auto released = release_gen_;
                 cv_.wait(lock, stop, [&] {
                     return (!build_request_.empty() && !building_) || frame_ != selection ||
-                           cache_limit_bytes_ != limit;
+                           cache_limit_bytes_ != limit || release_gen_ != released;
                 });
                 continue;
             }

@@ -87,8 +87,8 @@ class Tiles3dPanel(Panel):
                      loading=stats["loading_tiles"], failed=stats["failed_tiles"], total=stats["tiles"]))
         ui.label(_tr("stats_splats", drawn=_count(stats["drawn_splats"]),
                      full=_count(stats["full_detail_splats"])))
-        ui.label(_tr("stats_memory", cache=_gib(stats["cache_bytes"]), limit=_gib(stats["cache_limit_bytes"]),
-                     total=_gib(stats["gpu_total_bytes"])))
+        ui.label(_tr("stats_memory", cache=_gib(stats["cache_bytes"]), drawn=_gib(stats["drawn_bytes"]),
+                     limit=_gib(stats["cache_limit_bytes"]), total=_gib(stats["gpu_total_bytes"])))
         ui.label(_tr("stats_sse", sse=f"{stats['max_sse']:.1f}"))
         ui.label(_tr("stats_workers", workers=stats["load_workers"]))
         ui.label(_tr("stats_build", ms=f"{stats['build_ms']:.0f}"))

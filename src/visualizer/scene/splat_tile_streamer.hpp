@@ -41,10 +41,11 @@ namespace lfs::vis {
         std::uint64_t drawn_splats = 0;
         std::uint64_t full_detail_splats = 0;
         std::uint64_t cache_bytes = 0;
+        std::uint64_t drawn_bytes = 0; // merged models (drawn and pending); count toward the limit
         std::uint64_t cache_limit_bytes = 0;
         std::uint64_t gpu_total_bytes = 0;
-        double build_ms = 0.0; // last merge of the drawn tiles
-        float max_sse = 0.0f;  // in use; above the setting while the view exceeds the cache
+        double build_ms = 0.0;        // last merge of the drawn tiles
+        float max_sse = 0.0f;         // in use; above the setting while the view exceeds the cache
         std::size_t load_workers = 0; // tile decode/upload threads currently running
     };
 
@@ -79,8 +80,11 @@ namespace lfs::vis {
         // Grows or shrinks the decode-worker pool to `count` (at least one). Main thread,
         // called without the mutex held because shrinking joins the retired threads.
         void resizeWorkers(std::size_t count);
-        // Releases least recently wanted tiles until `incoming` more bytes fit the cache.
+        // Releases least recently wanted tiles until `incoming` more bytes fit the limit.
         void evictLocked(std::uint64_t incoming = 0);
+        // GPU bytes held by the stream: cached and in-flight tiles plus the drawn,
+        // finished and in-progress merged models, which copy their tiles.
+        [[nodiscard]] std::uint64_t usedBytesLocked() const;
 
         std::shared_ptr<const io::SplatTileSource> source_;
         core::SplatTensorAllocator allocator_;
@@ -95,7 +99,11 @@ namespace lfs::vis {
         std::unordered_set<std::uint32_t> failed_;
         std::unordered_set<std::uint32_t> in_flight_; // tiles a worker is currently loading
         std::uint64_t cache_bytes_ = 0;
-        std::uint64_t in_flight_bytes_ = 0; // cache space reserved for in-flight tiles
+        std::uint64_t in_flight_bytes_ = 0;        // cache space reserved for in-flight tiles
+        std::uint64_t drawn_bytes_ = 0;            // model the node currently shows
+        std::uint64_t built_bytes_ = 0;            // finished model awaiting its swap (built_)
+        std::uint64_t building_bytes_ = 0;         // model a worker is merging
+        std::uint64_t release_gen_ = 0;            // bumped when a merged model's memory frees up
         std::vector<std::uint32_t> wanted_;        // load queue, most urgent first
         std::vector<std::uint32_t> build_request_; // latest render set awaiting a merge
         // Generations order merges so the newest finished cut wins regardless of the order

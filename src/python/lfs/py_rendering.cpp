@@ -1533,6 +1533,7 @@ namespace lfs::python {
         result["drawn_splats"] = stats->drawn_splats;
         result["full_detail_splats"] = stats->full_detail_splats;
         result["cache_bytes"] = stats->cache_bytes;
+        result["drawn_bytes"] = stats->drawn_bytes;
         result["cache_limit_bytes"] = stats->cache_limit_bytes;
         result["gpu_total_bytes"] = stats->gpu_total_bytes;
         result["build_ms"] = stats->build_ms;
