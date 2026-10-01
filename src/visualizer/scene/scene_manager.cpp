@@ -548,6 +548,15 @@ namespace lfs::vis {
         return tile_streamers_.begin()->second->stats();
     }
 
+    std::optional<std::string> SceneManager::tileMode() const {
+        if (!tile_streamers_.empty())
+            return "stream";
+        for (const auto& uuid : flat_tile_nodes_)
+            if (scene_.getNodeByUuid(uuid))
+                return "flat";
+        return std::nullopt;
+    }
+
     void SceneManager::setupEventHandlers() {
 
         // Handle PLY commands
@@ -1039,6 +1048,8 @@ namespace lfs::vis {
                 const std::string added_name = added ? added->name : name;
                 if (added && load_result.tile_source)
                     attachTileStream(added->uuid, std::move(load_result.tile_source), path);
+                else if (added && load_result.is_tileset)
+                    recordFlatTileNode(added->uuid);
 
                 {
                     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1239,6 +1250,8 @@ namespace lfs::vis {
             const std::string added_name = added ? added->name : name;
             if (added && load_result.tile_source)
                 attachTileStream(added->uuid, std::move(load_result.tile_source), path);
+            else if (added && load_result.is_tileset)
+                recordFlatTileNode(added->uuid);
 
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);

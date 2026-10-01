@@ -8,6 +8,7 @@
 #include "io/loader.hpp"
 #include <algorithm>
 #include <chrono>
+#include <thread>
 
 namespace lfs::vis {
 
@@ -26,6 +27,11 @@ namespace lfs::vis {
         }
     } // namespace
 
+    std::size_t auto_tile_load_workers() {
+        const unsigned cores = std::thread::hardware_concurrency();
+        return std::clamp<std::size_t>(cores / 4, 2, 4);
+    }
+
     SplatTileStreamer::SplatTileStreamer(std::shared_ptr<const io::SplatTileSource> source,
                                          core::SplatTensorAllocator allocator)
         : source_(std::move(source)),
@@ -40,17 +46,35 @@ namespace lfs::vis {
                          .render;
         std::ranges::sort(shown_set_);
         requested_set_ = shown_set_;
-        worker_ = std::jthread([this](const std::stop_token& stop) { work(stop); });
+        resizeWorkers(auto_tile_load_workers());
     }
 
     SplatTileStreamer::~SplatTileStreamer() {
-        worker_.request_stop();
+        for (auto& worker : workers_)
+            worker.request_stop();
         cv_.notify_all();
+    }
+
+    void SplatTileStreamer::resizeWorkers(std::size_t count) {
+        count = std::max<std::size_t>(count, 1);
+        if (count == workers_.size())
+            return;
+        if (count < workers_.size()) {
+            for (std::size_t i = count; i < workers_.size(); ++i)
+                workers_[i].request_stop();
+            cv_.notify_all();
+            workers_.resize(count); // jthread destructors join the retired workers
+        } else {
+            while (workers_.size() < count)
+                workers_.emplace_back([this](const std::stop_token& stop) { work(stop); });
+        }
     }
 
     std::unique_ptr<core::SplatData> SplatTileStreamer::update(const io::SplatTileView& view,
                                                                const SplatTileStreamSettings& settings,
                                                                std::function<void()> wake) {
+        resizeWorkers(settings.num_load_workers > 0 ? static_cast<std::size_t>(settings.num_load_workers)
+                                                     : auto_tile_load_workers());
         std::lock_guard lock(mutex_);
         if (!wake_)
             wake_ = std::move(wake);
@@ -98,6 +122,7 @@ namespace lfs::vis {
             if (selection.complete && !selection.render.empty() && selection.render != requested_set_) {
                 requested_set_ = selection.render;
                 build_request_ = std::move(selection.render);
+                build_request_gen_ = ++build_gen_;
             }
             cv_.notify_all();
         }
@@ -119,7 +144,8 @@ namespace lfs::vis {
                                  .cache_limit_bytes = cache_limit_bytes_,
                                  .gpu_total_bytes = gpu_total_bytes_,
                                  .build_ms = build_ms_,
-                                 .max_sse = last_view_.max_sse * sse_factor_};
+                                 .max_sse = last_view_.max_sse * sse_factor_,
+                                 .load_workers = workers_.size()};
         for (const auto tile : shown_set_)
             out.drawn_splats += tiles[tile].splat_count;
         for (const auto tile : wanted_)
@@ -128,7 +154,7 @@ namespace lfs::vis {
     }
 
     void SplatTileStreamer::evictLocked(const std::uint64_t incoming) {
-        while (cache_bytes_ + incoming > cache_limit_bytes_) {
+        while (cache_bytes_ + in_flight_bytes_ + incoming > cache_limit_bytes_) {
             auto victim = cache_.end();
             for (auto it = cache_.begin(); it != cache_.end(); ++it) {
                 if (it->second.last_wanted == frame_ || std::ranges::binary_search(requested_set_, it->first))
@@ -147,39 +173,16 @@ namespace lfs::vis {
         const auto tiles = source_->tiles();
         std::unique_lock lock(mutex_);
         while (!stop.stop_requested()) {
-            // Next tile to load: the most urgent missing one, releasing tiles the view no
-            // longer needs to make room. If it still does not fit, the view is over budget.
-            std::uint32_t next = io::SplatTile::kNone;
-            if (build_request_.empty()) {
-                evictLocked();
-                over_budget_ = false;
-                for (const auto tile : wanted_) {
-                    if (cache_.contains(tile) || failed_.contains(tile))
-                        continue;
-                    const auto bytes = tile_bytes(tiles[tile]);
-                    evictLocked(bytes);
-                    if (cache_bytes_ + bytes <= cache_limit_bytes_)
-                        next = tile;
-                    else if (!over_budget_) {
-                        over_budget_ = true;
-                        if (wake_)
-                            wake_(); // the next update coarsens the selection
-                    }
-                    break;
-                }
-            }
-            if (build_request_.empty() && next == io::SplatTile::kNone) {
-                const auto selection = frame_;
-                const auto limit = cache_limit_bytes_;
-                cv_.wait(lock, stop, [&] {
-                    return !build_request_.empty() || frame_ != selection || cache_limit_bytes_ != limit;
-                });
-                continue;
-            }
-
-            if (!build_request_.empty()) {
+            // A completed render set is merged by one worker at a time (building_), so the
+            // others keep loading tiles. The merge installs only when its generation is
+            // still newer than the drawn model; a newer request started meanwhile wins, but
+            // an otherwise-valid merge is never thrown away just because a finer cut was
+            // requested while it ran. Pieces hold shared ownership, so the merge stays valid
+            // even if a tile is evicted before it finishes.
+            if (!build_request_.empty() && !building_) {
                 auto set = std::move(build_request_);
                 build_request_.clear();
+                const auto gen = build_request_gen_;
                 std::unordered_map<std::uint32_t, std::shared_ptr<const core::SplatData>> pieces;
                 for (const auto tile : set)
                     if (const auto it = cache_.find(tile); it != cache_.end())
@@ -189,6 +192,7 @@ namespace lfs::vis {
                     cache_changed_ = true;
                     continue;
                 }
+                building_ = true;
                 lock.unlock();
                 const auto build_start = std::chrono::steady_clock::now();
                 auto merged = io::merge_splat_tiles(*source_, set, [&](const std::uint32_t tile) {
@@ -203,27 +207,66 @@ namespace lfs::vis {
                 const auto build_ms =
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - build_start).count();
                 lock.lock();
+                building_ = false;
                 build_ms_ = build_ms;
-                if (merged && set == requested_set_) {
+                if (merged && gen > installed_gen_) {
                     built_ = std::move(merged);
                     built_set_ = std::move(set);
+                    installed_gen_ = gen;
                     if (wake_)
                         wake_();
                 }
                 continue;
             }
 
+            // Next tile to load: the most urgent one no worker already holds or is loading,
+            // releasing tiles the view no longer needs to make room. If it still does not
+            // fit, the view is over budget. In-flight tiles reserve their cache bytes so
+            // parallel workers do not collectively overrun the cache.
+            std::uint32_t next = io::SplatTile::kNone;
+            std::uint64_t next_bytes = 0;
+            evictLocked();
+            over_budget_ = false;
+            for (const auto tile : wanted_) {
+                if (cache_.contains(tile) || failed_.contains(tile) || in_flight_.contains(tile))
+                    continue;
+                const auto bytes = tile_bytes(tiles[tile]);
+                evictLocked(bytes);
+                if (cache_bytes_ + in_flight_bytes_ + bytes <= cache_limit_bytes_) {
+                    next = tile;
+                    next_bytes = bytes;
+                } else if (!over_budget_) {
+                    over_budget_ = true;
+                    if (wake_)
+                        wake_(); // the next update coarsens the selection
+                }
+                break;
+            }
+            if (next == io::SplatTile::kNone) {
+                const auto selection = frame_;
+                const auto limit = cache_limit_bytes_;
+                cv_.wait(lock, stop, [&] {
+                    return (!build_request_.empty() && !building_) || frame_ != selection ||
+                           cache_limit_bytes_ != limit;
+                });
+                continue;
+            }
+
+            in_flight_.insert(next);
+            in_flight_bytes_ += next_bytes;
             lock.unlock();
             auto loaded = io::load_splat_tile_gpu(*source_, next);
             lock.lock();
+            in_flight_.erase(next);
+            in_flight_bytes_ -= next_bytes;
             if (!loaded) {
                 LOG_ERROR("3D Tiles: tile {}: {}", next, loaded.error());
                 failed_.insert(next);
                 continue;
             }
-            const auto bytes = tile_bytes(tiles[next]);
-            cache_.emplace(next, CachedTile{std::make_shared<const core::SplatData>(std::move(*loaded)), bytes, frame_});
-            cache_bytes_ += bytes;
+            cache_.emplace(next,
+                           CachedTile{std::make_shared<const core::SplatData>(std::move(*loaded)), next_bytes, frame_});
+            cache_bytes_ += next_bytes;
             cache_changed_ = true;
             if (wake_)
                 wake_();

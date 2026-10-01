@@ -1642,14 +1642,23 @@ def get_lod_stats() -> dict:
     """
 
 def get_tiles_settings() -> dict:
-    """Get 3D Tiles streaming settings: {cache_fraction, max_sse, cull, freeze}"""
+    """
+    Get 3D Tiles streaming settings: {cache_fraction, max_sse, cull, freeze, num_load_workers}
+    """
 
-def set_tiles_settings(cache_fraction: float | None = None, max_sse: float | None = None, cull: bool | None = None, freeze: bool | None = None) -> None:
-    """Update 3D Tiles streaming settings; omitted values keep their current setting"""
+def set_tiles_settings(cache_fraction: float | None = None, max_sse: float | None = None, cull: bool | None = None, freeze: bool | None = None, num_load_workers: int | None = None) -> None:
+    """
+    Update 3D Tiles streaming settings; omitted values keep their current setting
+    """
 
 def get_tiles_stats() -> dict | None:
     """
     Get statistics (incl. max_sse in use) of the streamed 3D Tiles node, or None when no tileset streams
+    """
+
+def get_tiles_mode() -> str | None:
+    """
+    How the loaded 3D Tiles node is shown: 'stream', 'flat', or None when no tileset is loaded
     """
 
 def register_class(cls: object) -> None:

@@ -43,6 +43,7 @@
 #include <functional>
 #include <numbers>
 #include <optional>
+#include <string>
 #include <variant>
 
 #include <glm/glm.hpp>
@@ -1489,12 +1490,14 @@ namespace lfs::python {
             result["max_sse"] = settings.max_sse;
             result["cull"] = settings.cull;
             result["freeze"] = settings.freeze;
+            result["num_load_workers"] = settings.num_load_workers;
         }
         return result;
     }
 
     void set_tiles_settings(const std::optional<float> cache_fraction, const std::optional<float> max_sse,
-                            const std::optional<bool> cull, const std::optional<bool> freeze) {
+                            const std::optional<bool> cull, const std::optional<bool> freeze,
+                            const std::optional<int> num_load_workers) {
         auto* const scene_manager = tile_scene_manager();
         if (!scene_manager)
             return;
@@ -1507,6 +1510,13 @@ namespace lfs::python {
             settings.cull = *cull;
         if (freeze)
             settings.freeze = *freeze;
+        if (num_load_workers)
+            settings.num_load_workers = std::max(*num_load_workers, 0);
+    }
+
+    std::optional<std::string> get_tiles_mode() {
+        auto* const scene_manager = tile_scene_manager();
+        return scene_manager ? scene_manager->tileMode() : std::nullopt;
     }
 
     std::optional<nb::dict> get_tiles_stats() {
@@ -1527,6 +1537,8 @@ namespace lfs::python {
         result["gpu_total_bytes"] = stats->gpu_total_bytes;
         result["build_ms"] = stats->build_ms;
         result["max_sse"] = stats->max_sse;
+        result["load_workers"] = stats->load_workers;
+        result["mode"] = "stream";
         return result;
     }
 
@@ -2102,12 +2114,15 @@ Args:
         m.def("get_lod_stats", &get_lod_stats,
               "Get LOD statistics: {enabled, selected, budget, levels:[{level, count}, ...]}");
         m.def("get_tiles_settings", &get_tiles_settings,
-              "Get 3D Tiles streaming settings: {cache_fraction, max_sse, cull, freeze}");
+              "Get 3D Tiles streaming settings: {cache_fraction, max_sse, cull, freeze, num_load_workers}");
         m.def("set_tiles_settings", &set_tiles_settings, nb::arg("cache_fraction") = nb::none(),
               nb::arg("max_sse") = nb::none(), nb::arg("cull") = nb::none(), nb::arg("freeze") = nb::none(),
+              nb::arg("num_load_workers") = nb::none(),
               "Update 3D Tiles streaming settings; omitted values keep their current setting");
         m.def("get_tiles_stats", &get_tiles_stats,
               "Get statistics (incl. max_sse in use) of the streamed 3D Tiles node, or None when no tileset streams");
+        m.def("get_tiles_mode", &get_tiles_mode,
+              "How the loaded 3D Tiles node is shown: 'stream', 'flat', or None when no tileset is loaded");
     }
 
 } // namespace lfs::python

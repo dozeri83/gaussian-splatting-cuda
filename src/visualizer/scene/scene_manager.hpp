@@ -22,8 +22,10 @@
 #include <glm/vec2.hpp>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace lfs::vis {
 
@@ -134,6 +136,10 @@ namespace lfs::vis {
         [[nodiscard]] std::optional<std::filesystem::path> tileStreamPath(const core::Uuid& uuid) const;
         // Statistics of the first streamed node, if any.
         [[nodiscard]] std::optional<SplatTileStreamStats> tileStreamStats() const;
+        // "stream" when a tileset streams, "flat" when one loaded fully, or nullopt.
+        [[nodiscard]] std::optional<std::string> tileMode() const;
+        // Records a node whose tileset was small enough to load flat (no streaming).
+        void recordFlatTileNode(const core::Uuid& uuid) { flat_tile_nodes_.insert(uuid); }
         void setImportLicenseCallback(std::function<void(const std::optional<std::vector<uint8_t>>&)> callback) {
             import_license_callback_ = std::move(callback);
         }
@@ -410,6 +416,7 @@ namespace lfs::vis {
         std::unordered_map<core::Uuid, std::filesystem::path> tile_stream_paths_;
         // Model each streamer last installed; any other model means the node was replaced.
         std::unordered_map<core::Uuid, const core::SplatData*> tile_stream_models_;
+        std::unordered_set<core::Uuid> flat_tile_nodes_; // tilesets small enough to load flat
         SplatTileStreamSettings tile_stream_settings_;
         bool open_tile_stream_panel_ = false; // until the panel is registered
         std::filesystem::path dataset_path_;

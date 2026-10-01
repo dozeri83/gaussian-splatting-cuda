@@ -4,6 +4,7 @@
 
 #include "io/splat_tile_source.hpp"
 #include "core/scene.hpp"
+#include "core/splat_data_transform.hpp"
 #include <algorithm>
 
 namespace lfs::io {
@@ -87,16 +88,23 @@ namespace lfs::io {
         data->scaling_raw() = data->scaling_raw().to(Device::GPU);
         data->rotation_raw() = data->rotation_raw().to(Device::GPU);
         data->opacity_raw() = data->opacity_raw().to(Device::GPU);
+        // Bake the tile's placement into the splats once, here, so repeated cut
+        // rebuilds can concatenate the cached tiles on the fast identity path
+        // instead of re-transforming and re-cloning every tile each time.
+        if (const auto& placement = source.tiles()[tile].transform; placement != glm::mat4(1.0f))
+            core::transform(*data, placement);
         return data;
     }
 
     std::unique_ptr<core::SplatData> merge_splat_tiles(
-        const SplatTileSource& source, const std::span<const std::uint32_t> tiles,
+        const SplatTileSource& /*source*/, const std::span<const std::uint32_t> tiles,
         const std::function<const core::SplatData*(std::uint32_t)>& splats) {
         std::vector<std::pair<const core::SplatData*, glm::mat4>> pieces;
         for (const auto index : tiles)
             if (const auto* data = splats(index))
-                pieces.emplace_back(data, source.tiles()[index].transform);
+                // Placement is already baked in by load_splat_tile_gpu, so merge on
+                // the identity fast path (preallocate once, slice-copy each tile).
+                pieces.emplace_back(data, glm::mat4(1.0f));
         return core::Scene::mergeSplatsWithTransforms(pieces);
     }
 

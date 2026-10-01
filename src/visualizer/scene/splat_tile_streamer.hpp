@@ -23,7 +23,14 @@ namespace lfs::vis {
         float max_sse = 16.0f;       // pixels of error a tile may show before refining
         bool cull = true;            // false: select by distance only, keeping off-view tiles
         bool freeze = false;         // keep the current selection while the camera moves
+        int num_load_workers = 0;    // tile decode/upload threads; 0 picks an automatic count
     };
+
+    // Automatic decode-worker count: enough to overlap read/decode/upload without
+    // starving the render thread or a concurrent training job. The parallel work is
+    // CPU-side SPZ decode; host->device uploads share one bus and the render-set merge
+    // stays serial, so returns flatten past a few workers. clamp(cores / 4, 2, 4).
+    [[nodiscard]] std::size_t auto_tile_load_workers();
 
     struct SplatTileStreamStats {
         std::size_t tiles = 0;
@@ -38,6 +45,7 @@ namespace lfs::vis {
         std::uint64_t gpu_total_bytes = 0;
         double build_ms = 0.0; // last merge of the drawn tiles
         float max_sse = 0.0f;  // in use; above the setting while the view exceeds the cache
+        std::size_t load_workers = 0; // tile decode/upload threads currently running
     };
 
     // View-dependent streaming of a SplatTileSource into one scene node. The main
@@ -68,6 +76,9 @@ namespace lfs::vis {
         };
 
         void work(const std::stop_token& stop);
+        // Grows or shrinks the decode-worker pool to `count` (at least one). Main thread,
+        // called without the mutex held because shrinking joins the retired threads.
+        void resizeWorkers(std::size_t count);
         // Releases least recently wanted tiles until `incoming` more bytes fit the cache.
         void evictLocked(std::uint64_t incoming = 0);
 
@@ -82,9 +93,19 @@ namespace lfs::vis {
         std::condition_variable_any cv_;
         std::unordered_map<std::uint32_t, CachedTile> cache_;
         std::unordered_set<std::uint32_t> failed_;
+        std::unordered_set<std::uint32_t> in_flight_; // tiles a worker is currently loading
         std::uint64_t cache_bytes_ = 0;
+        std::uint64_t in_flight_bytes_ = 0; // cache space reserved for in-flight tiles
         std::vector<std::uint32_t> wanted_;        // load queue, most urgent first
-        std::vector<std::uint32_t> build_request_; // render set to merge
+        std::vector<std::uint32_t> build_request_; // latest render set awaiting a merge
+        // Generations order merges so the newest finished cut wins regardless of the order
+        // workers finish in, instead of discarding a merge whenever a finer cut was asked
+        // for meanwhile. A merge installs only when its generation is newer than the drawn
+        // one; a single in-flight merge (building_) keeps the other workers loading tiles.
+        std::uint64_t build_gen_ = 0;         // monotonic request counter
+        std::uint64_t build_request_gen_ = 0; // generation of build_request_
+        std::uint64_t installed_gen_ = 0;     // generation of the drawn model
+        bool building_ = false;               // a worker is merging a render set
         std::unique_ptr<core::SplatData> built_;
         std::vector<std::uint32_t> built_set_;
         std::uint64_t frame_ = 0;
@@ -98,7 +119,7 @@ namespace lfs::vis {
         std::vector<std::uint32_t> requested_set_;
         io::SplatTileView last_view_{};
 
-        std::jthread worker_;
+        std::vector<std::jthread> workers_;
     };
 
 } // namespace lfs::vis

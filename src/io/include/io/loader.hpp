@@ -142,6 +142,8 @@ namespace lfs::io {
         std::optional<std::vector<std::uint8_t>> license_bytes;
         // Set when `data` is only the current cut of a view-dependent LOD source.
         std::shared_ptr<SplatTileSource> tile_source;
+        // Set when the source is a 3D Tiles tileset, whether it streams or loaded flat.
+        bool is_tileset = false;
     };
 
     /**

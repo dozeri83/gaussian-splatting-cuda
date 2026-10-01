@@ -39,14 +39,23 @@ class Tiles3dPanel(Panel):
         self._handle = model.get_handle()
 
     def poll(self, _context):
-        return lf.get_tiles_stats() is not None
+        return lf.get_tiles_mode() is not None
 
     def draw(self, ui):
+        mode = lf.get_tiles_mode()
+        if mode is None:
+            return
+        mode_label = _tr("mode_stream") if mode == "stream" else _tr("mode_flat")
+        ui.label(_tr("mode", mode=mode_label))
+
         settings = lf.get_tiles_settings()
         stats = lf.get_tiles_stats()
         if not settings or stats is None:
+            # Loaded flat (no streaming): the mode line above is all there is to show.
+            ui.text_disabled(_tr("flat_help"))
             return
 
+        ui.separator()
         changed, value = ui.slider_float(_tr("cache_fraction"), settings["cache_fraction"], 0.0, 1.0)
         if changed:
             lf.set_tiles_settings(cache_fraction=value)
@@ -56,6 +65,11 @@ class Tiles3dPanel(Panel):
         if changed:
             lf.set_tiles_settings(max_sse=value)
         ui.text_disabled(_tr("max_sse_help"))
+
+        changed, value = ui.slider_int(_tr("num_load_workers"), settings["num_load_workers"], 0, 16)
+        if changed:
+            lf.set_tiles_settings(num_load_workers=value)
+        ui.text_disabled(_tr("num_load_workers_help"))
 
         changed, value = ui.checkbox(_tr("cull"), settings["cull"])
         if changed:
@@ -76,4 +90,5 @@ class Tiles3dPanel(Panel):
         ui.label(_tr("stats_memory", cache=_gib(stats["cache_bytes"]), limit=_gib(stats["cache_limit_bytes"]),
                      total=_gib(stats["gpu_total_bytes"])))
         ui.label(_tr("stats_sse", sse=f"{stats['max_sse']:.1f}"))
+        ui.label(_tr("stats_workers", workers=stats["load_workers"]))
         ui.label(_tr("stats_build", ms=f"{stats['build_ms']:.0f}"))

@@ -69,6 +69,7 @@ namespace lfs::io {
         LoadResult result;
         result.scene_center = core::Tensor::zeros({3}, core::Device::CPU);
         result.loader_used = name();
+        result.is_tileset = true;
         if (options.validate_only)
             return result;
 
