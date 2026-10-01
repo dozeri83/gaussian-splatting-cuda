@@ -666,7 +666,6 @@ namespace lfs::core {
 
         const size_t gaussian_count = model ? static_cast<size_t>(model->size()) : 0;
         const glm::vec3 centroid = model ? computeCentroid(model.get()) : node->centroid;
-        last_model_content_swap_ = {.previous = node->model.get(), .current = model.get()};
         auto previous = retireCombinedModelIfInFlight(std::move(node->model));
         node->model = std::move(model);
         node->gaussian_count.store(gaussian_count, std::memory_order_release);
