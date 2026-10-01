@@ -1966,9 +1966,25 @@ namespace lfs::vis {
                 invalidateGTComparisonImageCache();
                 clearVulkanViewportImageState();
                 last_logged_vksplat_render_error_.clear();
+                // A node whose model was swapped in place (streamed tiles, PLY sequence
+                // frames) keeps the renderer: its per-frame input path already rebinds
+                // new tensors and holds the old ones until their frames retire. Only the
+                // exact previous -> current swap qualifies; anything else (a different
+                // model, LOD-tree models, a live trainer) still resets.
+                const bool content_swap = [&] {
+                    if (!scene_manager || comparison_identity != 0 || !model || model->lod_tree)
+                        return false;
+                    if (const auto* trainers = scene_manager->getTrainerManager(); trainers && trainers->getTrainer())
+                        return false;
+                    const auto swap = scene_manager->getScene().lastModelContentSwap();
+                    return swap.previous != nullptr && swap.current == model &&
+                           reinterpret_cast<size_t>(swap.previous) == model_change.previous_model_ptr;
+                }();
                 if (vksplat_viewport_renderer_) {
                     if (is_training && lfs::rendering::isVkSplatBackend(frame_settings.raster_backend)) {
                         LOG_DEBUG("Preserving VkSplat renderer across training model change");
+                    } else if (content_swap) {
+                        LOG_DEBUG("Preserving VkSplat renderer across in-place model swap");
                     } else {
                         // The trainer must drop the fence handle before reset destroys
                         // the CUDA import it points at.

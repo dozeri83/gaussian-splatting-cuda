@@ -302,6 +302,14 @@ namespace lfs::core {
         // just a pointer swap + MODEL_CHANGED. Used by the PLY-sequence streaming player.
         [[nodiscard]] std::unique_ptr<lfs::core::SplatData> swapNodeModel(
             const std::string& name, std::unique_ptr<lfs::core::SplatData> model);
+        // The most recent swapNodeModel transition. Renderers use it to tell an in-place
+        // content update of one node from a different model being loaded. The pointers
+        // identify models only; `previous` may already be released.
+        struct ModelContentSwap {
+            const lfs::core::SplatData* previous = nullptr;
+            const lfs::core::SplatData* current = nullptr;
+        };
+        [[nodiscard]] ModelContentSwap lastModelContentSwap() const noexcept { return last_model_content_swap_; }
         [[nodiscard]] bool setPayloadHydrationState(
             const Uuid& uuid, PayloadHydrationState state);
         void setNodeVisibility(const std::string& name, bool visible);
@@ -758,6 +766,8 @@ namespace lfs::core {
         mutable const lfs::core::SplatData* single_node_model_ = nullptr;
         mutable size_t single_node_selection_offset_ = 0;
         mutable size_t single_node_full_selection_count_ = 0;
+
+        ModelContentSwap last_model_content_swap_;
 
         mutable std::mutex combined_model_mutex_;
         SplatTensorAllocator combined_model_allocator_;
