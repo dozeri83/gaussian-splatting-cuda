@@ -85,6 +85,7 @@ namespace lfs::training {
             vk_check(context.get(), vkCreateComputePipelines(context->device(), context->pipeline_cache(), 1, &pipeline_info, nullptr, &pipeline->handle), "vkCreateComputePipelines(training.lpips)");
             vkDestroyShaderModule(context->device(), shader, nullptr);
             cache.emplace(key, pipeline);
+            release_at_shutdown(*context, mutex, cache);
             return pipeline;
         }
 
@@ -222,7 +223,7 @@ namespace lfs::training {
                                                               : 4;
             const size_t tile_pixels = 64;
             const size_t tile_channels = cooperative ? 64 : 16;
-            const size_t spatial_tiles = halo ? ((size_t(p.out_height) + 7) / 8) * ((size_t(p.out_width) + 7) / 8)
+            const size_t spatial_tiles = halo ? ((size_t(p.out_height) + 3) / 4) * ((size_t(p.out_width) + 15) / 16)
                                               : (size_t(p.out_height) * p.out_width + tile_pixels - 1) / tile_pixels;
             const size_t work = spatial_tiles *
                                 ((size_t(p.out_channels) + tile_channels - 1) / tile_channels) * input.size(0) * (cooperative ? 512 : 256);
@@ -268,7 +269,7 @@ namespace lfs::training {
     } // namespace
 
     const gpu_ops::LpipsOps& vulkan_lpips_ops() {
-        static const gpu_ops::LpipsOps ops{{.weight_taps = weight_taps, .rgb_conv = rgb_conv, .convolution = convolution, .pool_reduce = pool_reduce}};
+        static const gpu_ops::LpipsOps ops{{.weight_taps = weight_taps, .rgb_conv = rgb_conv, .convolution = convolution, .pool_reduce = pool_reduce, .prefer_independent_queue = true}};
         return ops;
     }
 } // namespace lfs::training
