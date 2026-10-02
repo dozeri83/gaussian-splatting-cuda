@@ -72,7 +72,7 @@ namespace lfs::core::internal {
         context->recorders().record(reads, writes, [&](VkCommandBuffer command) {
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
             vkCmdPushConstants(command, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-            vkCmdDispatch(command, std::min(65535u, (uint32_t(width) * uint32_t(height) + 63) / 64), 1, 1);
+            vkCmdDispatch(command, std::min(65535u, (uint32_t(width) * uint32_t(height) + 255) / 256), 1, 1);
         });
         if (validity)
             *validity = mask.to(DataType::UInt8);

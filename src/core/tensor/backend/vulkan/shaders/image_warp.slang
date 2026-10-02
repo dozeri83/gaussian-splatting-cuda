@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
-static const uint LFS_LOCAL_SIZE_X = 64;
+static const uint LFS_LOCAL_SIZE_X = 256;
 static const uint LFS_PUSH_CONSTANT_SIZE = 56;
 struct UndistortParams {
     float src_fx, src_fy, src_cx, src_cy, dst_fx, dst_fy, dst_cx, dst_cy;
@@ -633,12 +633,12 @@ void distort_area_to_source_kernel(
         dst[channel * output_plane + output_index] = result[channel];
 }
 
-[numthreads(64, 1, 1)] void main(uint3 tid : SV_DispatchThreadID, uint3 groups : SV_GroupID) {
+[numthreads(256, 1, 1)] void main(uint3 tid : SV_DispatchThreadID, uint3 groups : SV_GroupID) {
     UndistortParams params = ((Ptr<UndistortParams, Access.Read>)pc.camera)[0];
     Ptr<float, Access.Read> src = (Ptr<float, Access.Read>)pc.input;
     Ptr<float, Access.ReadWrite> dst = (Ptr<float, Access.ReadWrite>)pc.output;
     const uint count = uint(pc.width * pc.height);
-    const uint stride = min(65535u, (count + 63u) / 64u) * 64u;
+    const uint stride = min(65535u, (count + 255u) / 256u) * 256u;
     for (uint index = tid.x; index < count; index += stride) {
         int x = int(index) % pc.width, y = int(index) / pc.width;
         if (pc.mode == 0) {
