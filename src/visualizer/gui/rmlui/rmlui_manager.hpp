@@ -8,8 +8,8 @@
 #include "core/export.hpp"
 
 #include "gui/gui_input.hpp"
+#include "gui/rmlui/element_observer.hpp"
 #include <RmlUi/Core/EventListener.h>
-#include <RmlUi/Core/ObserverPtr.h>
 #include <RmlUi/Core/Types.h>
 #include <functional>
 
@@ -254,8 +254,8 @@ namespace lfs::vis::gui {
             PanelInputState input;
             std::function<bool(float, float)> pointer_blocker;
             PointerPressState pointer_presses[3] = {};
-            Rml::ObserverPtr<Rml::Element> pointer_documents[3];
-            Rml::ObserverPtr<Rml::Element> drag_element;
+            ElementObserver pointer_documents[3];
+            ElementObserver drag_element;
             std::vector<SDL_Scancode> shortcuts;
             uint64_t frame = 0;
             bool exclusive = false;
@@ -264,7 +264,7 @@ namespace lfs::vis::gui {
         };
         struct KeyOwner {
             Rml::Context* context = nullptr;
-            Rml::ObserverPtr<Rml::Element> element;
+            ElementObserver element;
             bool gui = false;
         };
         std::unordered_map<Rml::Context*, InputHandler> input_handlers_;
@@ -283,7 +283,7 @@ namespace lfs::vis::gui {
         Rml::Context* contextById(uint64_t id, bool include_retired = false) const;
         struct PointerCancellation {
             uint64_t context_id;
-            Rml::ObserverPtr<Rml::Element> unloaded_drag;
+            ElementObserver unloaded_drag;
         };
         std::vector<PointerCancellation> pending_pointer_cancellations_;
         std::vector<uint64_t> pending_context_destructions_;
@@ -293,7 +293,7 @@ namespace lfs::vis::gui {
         bool flushing_input_lifecycle_ = false;
         bool input_dispatch_active_ = false;
         bool accepts_text_activation_ = true;
-        std::vector<Rml::ObserverPtr<Rml::Element>> rejected_focus_;
+        std::vector<ElementObserver> rejected_focus_;
 
         std::unique_ptr<RmlSystemInterface> system_interface_;
         std::unique_ptr<Rml::RenderInterface> owned_render_interface_;

@@ -1252,7 +1252,7 @@ namespace lfs::vis::gui {
                 it = input_handlers_.find(context);
             }
             auto* focused = context ? context->GetFocusElement() : nullptr;
-            auto pressed_element = focused ? focused->GetObserverPtr() : Rml::ObserverPtr<Rml::Element>();
+            auto pressed_element = focused ? focused->GetObserverPtr() : ElementObserver();
             const bool text_owner = rml_input::wantsTextInput(focused);
             const bool exclusive = context && it->second.exclusive;
             bool gui_release = false;
@@ -1295,7 +1295,7 @@ namespace lfs::vis::gui {
                 if (auto* shortcut = shortcutContext(); shortcut && shortcut != context) {
                     context = shortcut;
                     focused = context->GetFocusElement();
-                    pressed_element = focused ? focused->GetObserverPtr() : Rml::ObserverPtr<Rml::Element>();
+                    pressed_element = focused ? focused->GetObserverPtr() : ElementObserver();
                     const auto id = context_ids_.at(context);
                     invoke(id);
                     context = contextById(id);

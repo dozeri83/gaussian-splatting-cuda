@@ -12,6 +12,7 @@
 #include "gui/editor/zep_rml_display.hpp"
 #include "gui/gui_focus_state.hpp"
 #include "gui/gui_manager.hpp"
+#include "gui/rmlui/element_observer.hpp"
 #include "python/python_buffer_analysis.hpp"
 #include "theme/theme.hpp"
 
@@ -2752,7 +2753,7 @@ namespace lfs::vis::editor {
             const Zep::ZepBuffer*, std::string>
             session_locators;
 
-        Rml::ObserverPtr<Rml::Element> rml_element;
+        gui::ElementObserver rml_element;
         bool request_focus = false;
         bool is_focused = false;
         bool force_unfocused = false;
