@@ -4,6 +4,7 @@
 #include "core/image_io.hpp"
 #include "core/nn.hpp"
 #include "cuda_backend_test.hpp"
+#include "lfs/training/ops/registry.hpp"
 #include "metrics/metrics.hpp"
 
 #include <cuda_runtime.h>

@@ -3,7 +3,7 @@
 
 #include "core/cuda/undistort/undistort.hpp"
 #include "core/image_io.hpp"
-#include "core/tensor/internal/tensor_serialization.hpp"
+#include "core/tensor_serialization.hpp"
 #include "cuda_backend_test.hpp"
 #include "io/nvcodec_image_loader.hpp"
 #include "io/pipelined_image_loader.hpp"
