@@ -63,7 +63,8 @@ namespace lfs::core {
 
         // Load mask from disk, process it, and return it (cached)
         Tensor load_and_get_mask(int resize_factor = -1, int max_width = 0,
-                                 bool invert_mask = false, float mask_threshold = 0.5f, bool binarize = true);
+                                 bool invert_mask = false, float mask_threshold = 0.5f, bool binarize = true,
+                                 bool apply_undistortion = true);
 
         // Load depth map from disk, convert to [H,W] float32 [0,1], and return it (cached)
         Tensor load_and_get_depth(int resize_factor = -1, int max_width = 0);
@@ -83,7 +84,8 @@ namespace lfs::core {
         // Load normal map from disk, decode unit normals as [3,H,W]
         // float32 in [-1,1] (file encoding v = n*0.5+0.5), and return it (cached).
         Tensor load_and_get_normal(int resize_factor, int max_width,
-                                   const NormalPriorDecode& decode);
+                                   const NormalPriorDecode& decode,
+                                   bool apply_undistortion = true);
 
         // Quantization step of the depth prior's file encoding in target units
         // (1/255 for 8-bit, 1/65535 for 16-bit, 0 for float). Header probe on
@@ -144,6 +146,11 @@ namespace lfs::core {
             _image_width = width;
             _image_height = height;
             _image_size_loaded = true;
+        }
+        void restore_image_dimensions(int width, int height, bool size_loaded) noexcept {
+            _image_width = width;
+            _image_height = height;
+            _image_size_loaded = size_loaded;
         }
         int camera_height() const noexcept { return _camera_height; }
         int camera_width() const noexcept { return _camera_width; }
@@ -277,7 +284,7 @@ namespace lfs::core {
         bool _cached_mask_invert = false;
         float _cached_mask_threshold = 0.5f;
         bool _cached_mask_binarize = true;
-        bool _cached_mask_undistort_prepared = false;
+        bool _cached_mask_was_undistorted = false;
         // Raw, pre-supplied in-memory mask (used by direct-scene plugins) —
         // takes precedence over _mask_path when set. Processed on first use.
         Tensor _in_memory_mask_raw;

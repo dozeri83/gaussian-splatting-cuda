@@ -34,7 +34,7 @@ namespace lfs::training {
             core::nn::kernels::lpips_pool_reduce(x.data_ptr(), y.data_ptr(), weight.data_ptr(), score.ptr<float>(),
                                                  pooled_x.is_valid() ? pooled_x.data_ptr() : nullptr, pooled_y.is_valid() ? pooled_y.data_ptr() : nullptr,
                                                  x.shape()[0], x.shape()[1], x.shape()[2], x.shape()[3], p.y0, p.y1, p.x0, p.x1,
-                                                 p.inverse_count, core::getCurrentCUDAStream());
+                                                 p.inverse_count, p.weights ? p.weights->ptr<float>() : nullptr, p.weights_width, p.weights_y0, p.weights_x0, core::getCurrentCUDAStream());
         }
     } // namespace
 

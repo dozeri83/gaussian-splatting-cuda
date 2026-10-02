@@ -164,6 +164,7 @@ namespace lfs::core {
                                        const LabelUpdateProgram& program, ExecContext context) = 0;
             virtual void ppisp_apply(StorageRef input, StorageRef output, int width, int height, const PpispParams& params, ExecContext context) = 0;
             virtual void environment_composite(StorageRef rgb, StorageRef alpha, StorageRef environment, StorageRef output, const EnvironmentCompositeParams& params, ExecContext context) = 0;
+            virtual Tensor image_warp(const Tensor& input, const UndistortParams& params, int mode, bool inverse, Tensor* validity, ExecContext context);
             virtual Tensor image_undistort(const Tensor& input, const UndistortParams& params, bool mask, ExecContext context) = 0;
             virtual Tensor image_resize_prior(const Tensor& input, int height, int width, bool normal, ExecContext context) = 0;
             virtual void affine_splat_geometry(StorageRef, StorageRef, StorageRef, StorageRef, const splat_transform::LinearTransform&, size_t, ExecContext) = 0;

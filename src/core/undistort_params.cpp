@@ -27,12 +27,24 @@ namespace lfs::core {
         constexpr float NEWTON_EPSILON = 1e-6f;
         constexpr float MAX_FISHEYE_THETA = 1.56079632679f;
         constexpr int MAX_NEWTON_ITERATIONS = 20;
+        constexpr float INVERSE_RESIDUAL_PIXELS = 5.0e-4f;
+        // Float32 Newton stalls near 6e-4 px at 8k image scales; accepting up to 1e-2 px keeps
+        // those pixels valid while the geometric error stays far below sampling resolution.
+        constexpr float INVERSE_ACCEPT_PIXELS = 1.0e-2f;
+        constexpr float INVERSE_JACOBIAN_STEP = 1.0e-4f;
+        constexpr float INVERSE_MAX_STEP = 2.0f;
         constexpr float COLMAP_MIN_SCALE = 0.2f;
         constexpr float COLMAP_MAX_SCALE = 2.0f;
+        constexpr int AREA_QUADRATURE = 8;
+        constexpr int LANCZOS_RADIUS = 3;
+        constexpr int OUTPUT_TILE_ROWS = 256;
+        constexpr float MIN_SIGNED_WEIGHT_RATIO = 1.0e-4f;
+        constexpr float EVALUATION_MIN_COVERAGE = 0.999f;
 
+        // COLMAP sensor/models.h (BSD-3 licensed formulas)
         void apply_distortion_pinhole(
             const float x, const float y,
-            const float* dist, const int num_dist,
+            const float* __restrict__ dist, const int num_dist,
             float& dx, float& dy) {
 
             const float r2 = x * x + y * y;
@@ -346,7 +358,7 @@ namespace lfs::core {
             }
         }
 
-    } // anonymous namespace
+    } // namespace
 
     void distort_normalized_point(
         const UndistortParams& params,
@@ -638,11 +650,61 @@ namespace lfs::core {
         params.dst_cx = cx * static_cast<float>(params.dst_width) / static_cast<float>(width);
         params.dst_cy = cy * static_cast<float>(params.dst_height) / static_cast<float>(height);
 
-        LOG_INFO("Undistort: {}x{} -> {}x{}, fx={:.1f}->{:.1f}, fy={:.1f}->{:.1f}",
+        LOG_INFO("Undistort: %dx%d -> %dx%d, fx=%.1f->%.1f, fy=%.1f->%.1f",
                  width, height, params.dst_width, params.dst_height,
                  fx, params.dst_fx, fy, params.dst_fy);
 
         return params;
+    }
+
+    UndistortGrid compute_undistort_grid(
+        const UndistortParams& params, const int resize_factor, const int max_width) {
+        assert(params.dst_width > 0 && params.dst_height > 0);
+        const float resize_scale = 1.0f / static_cast<float>(std::max(1, resize_factor));
+        const int largest_crop_dimension = std::max(params.dst_width, params.dst_height);
+        const float width_scale = max_width > 0
+                                      ? static_cast<float>(max_width) /
+                                            static_cast<float>(largest_crop_dimension)
+                                      : 1.0f;
+        const float scale = std::min({1.0f, resize_scale, width_scale});
+        const int width = std::max(
+            1, static_cast<int>(std::lround(static_cast<double>(params.dst_width) * scale)));
+        const int height = std::max(
+            1, static_cast<int>(std::lround(static_cast<double>(params.dst_height) * scale)));
+        return {
+            .width = width,
+            .height = height,
+            .scale_x = static_cast<float>(width) / static_cast<float>(params.dst_width),
+            .scale_y = static_cast<float>(height) / static_cast<float>(params.dst_height)};
+    }
+
+    UndistortParams prepare_undistort_params(
+        const UndistortParams& params,
+        const int actual_src_width,
+        const int actual_src_height,
+        const int resize_factor,
+        const int max_width) {
+        const auto grid = compute_undistort_grid(params, resize_factor, max_width);
+        assert(actual_src_width > 0 && actual_src_height > 0);
+        assert(grid.width > 0 && grid.height > 0);
+        UndistortParams scaled = params;
+        const float src_scale_x = static_cast<float>(actual_src_width) /
+                                  static_cast<float>(params.src_width);
+        const float src_scale_y = static_cast<float>(actual_src_height) /
+                                  static_cast<float>(params.src_height);
+        scaled.src_fx = params.src_fx * src_scale_x;
+        scaled.src_fy = params.src_fy * src_scale_y;
+        scaled.src_cx = params.src_cx * src_scale_x;
+        scaled.src_cy = params.src_cy * src_scale_y;
+        scaled.src_width = actual_src_width;
+        scaled.src_height = actual_src_height;
+        scaled.dst_fx = params.dst_fx * grid.scale_x;
+        scaled.dst_fy = params.dst_fy * grid.scale_y;
+        scaled.dst_cx = params.dst_cx * grid.scale_x;
+        scaled.dst_cy = params.dst_cy * grid.scale_y;
+        scaled.dst_width = grid.width;
+        scaled.dst_height = grid.height;
+        return scaled;
     }
 
     UndistortParams scale_undistort_params(

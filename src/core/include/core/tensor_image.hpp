@@ -27,6 +27,20 @@ namespace lfs::core {
         const UndistortParams& params, const int actual_src_width, const int actual_src_height,
         const int max_width = 0);
 
+    struct UndistortGrid {
+        int width;
+        int height;
+        float scale_x;
+        float scale_y;
+    };
+
+    LFS_CORE_API UndistortGrid compute_undistort_grid(
+        const UndistortParams& params, int resize_factor, int max_width);
+
+    LFS_CORE_API UndistortParams prepare_undistort_params(
+        const UndistortParams& params, int actual_src_width, int actual_src_height,
+        int resize_factor, int max_width);
+
     // Maps normalized camera coordinates through the encoded camera model.
     LFS_CORE_API void distort_normalized_point(
         const UndistortParams& params, float x, float y, float& distorted_x, float& distorted_y);
@@ -37,6 +51,7 @@ namespace lfs::core {
         float& normalized_x, float& normalized_y);
 
     namespace internal {
+        LFS_CORE_API Tensor warp_image_tensor(const Tensor& input, const UndistortParams& params, int mode, bool inverse, Tensor* validity);
         LFS_CORE_API Tensor undistort_image_tensor(const Tensor& input, const UndistortParams& params, bool mask);
         LFS_CORE_API Tensor resize_image_prior_tensor(const Tensor& input, int height, int width, bool normal);
     } // namespace internal

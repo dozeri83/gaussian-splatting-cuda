@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/camera.hpp"
+#include "core/cuda/undistort/undistort.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "core/memory_pressure.hpp"
@@ -1248,7 +1249,7 @@ namespace lfs::vis {
                 lfs::core::Tensor gt_tensor;
                 if (request.mode == GTComparisonMode::RGB) {
                     auto [pixels, width, height, channels] = lfs::core::load_image(
-                        request.image_path, -1, request.preview_max_dimension);
+                        request.image_path, -1, request.undistort_requested ? 0 : request.preview_max_dimension);
                     const std::unique_ptr<unsigned char, decltype(&lfs::core::free_image)> owner(
                         pixels, &lfs::core::free_image);
                     if (pixels && width > 0 && height > 0 && channels > 0) {
@@ -1275,12 +1276,14 @@ namespace lfs::vis {
                                 if (gt_tensor.dtype() == lfs::core::DataType::UInt8) {
                                     gt_tensor = gt_tensor.to(lfs::core::DataType::Float32) / 255.0f;
                                 }
-                                const auto scaled = lfs::core::scale_undistort_params(
+                                const auto scaled = lfs::core::prepare_undistort_params(
                                     request.undistort_params,
                                     lfs::rendering::imageWidth(gt_tensor, gt_layout),
                                     lfs::rendering::imageHeight(gt_tensor, gt_layout),
+                                    1,
                                     request.preview_max_dimension);
-                                gt_tensor = lfs::core::internal::undistort_image_tensor(gt_tensor, scaled, false);
+                                gt_tensor = lfs::core::undistort_image(
+                                    gt_tensor.clamp(0.0f, 1.0f).contiguous(), scaled, nullptr);
                             }
                             gt_tensor = lfs::rendering::flipImageVertical(gt_tensor, gt_layout);
                             // Static GT display images must be decoupled from the CUDA pool
@@ -1296,12 +1299,13 @@ namespace lfs::vis {
                             -1, request.preview_max_dimension);
                         if (depth.is_valid() && depth.ndim() == 2) {
                             if (request.undistort_requested) {
-                                const auto scaled = lfs::core::scale_undistort_params(
+                                const auto scaled = lfs::core::prepare_undistort_params(
                                     request.undistort_params,
                                     static_cast<int>(depth.shape()[1]),
                                     static_cast<int>(depth.shape()[0]),
+                                    1,
                                     request.preview_max_dimension);
-                                depth = lfs::core::internal::undistort_image_tensor(depth, scaled, true);
+                                depth = lfs::core::undistort_depth_area(depth, scaled, nullptr);
                             }
                             image = makeDepthDisplayTensor(
                                 depth, request.depth_visualization_mode, request.background_color);
@@ -1319,12 +1323,13 @@ namespace lfs::vis {
                             const auto normal_layout = lfs::rendering::detectImageLayout(normal);
                             if (request.undistort_requested &&
                                 normal_layout != lfs::rendering::ImageLayout::Unknown) {
-                                const auto scaled = lfs::core::scale_undistort_params(
+                                const auto scaled = lfs::core::prepare_undistort_params(
                                     request.undistort_params,
                                     lfs::rendering::imageWidth(normal, normal_layout),
                                     lfs::rendering::imageHeight(normal, normal_layout),
+                                    1,
                                     request.preview_max_dimension);
-                                normal = lfs::core::internal::undistort_image_tensor(normal, scaled, false);
+                                normal = lfs::core::undistort_normal_area(normal, scaled, nullptr);
                             }
                             image = makeNormalDisplayTensor(normal);
                             image = resizeChwDisplayTensor(image, request.image_size);
@@ -1748,11 +1753,10 @@ namespace lfs::vis {
         if (context.viewport_region) {
             current_size = framebuffer_region.size;
         }
-        // Minimized / zero-extent: no presentable viewport work. Never start
-        // model reads or publish
-        // new viewer borrows â€” the trainer continues headless on the existing
-        // handshake fences only. Restore re-enters the normal frame path
-        // (first frame may block once for a stable model, same as cold start).
+        // Minimized / zero-extent: no presentable viewport work. Never hold a
+        // resize training pause, never start model reads, and never publish
+        // new viewer borrows — the trainer continues headless on the existing
+        // handshake fences only. Restore re-enters the normal frame path.
         if (current_size.x <= 0 || current_size.y <= 0) {
             if (vksplat_viewport_renderer_) {
                 vksplat_viewport_renderer_->setLiveSubmitCallback({});
@@ -2056,7 +2060,8 @@ namespace lfs::vis {
         // discrete layout resizes. On contention, retain the previous matching
         // frame and retry on the next cadence tick; the GUI commits a staged
         // layout only after matches_viewport_extent reports a fresh output.
-        // First frame / no cache still falls back to one blocking acquire below.
+        // This also applies without a cached frame: model growth can hold the
+        // exclusive lock while waiting for chunk binding on this viewer thread.
         const bool training_try_lock = is_training;
         if (is_training && vksplat_viewport_renderer_ &&
             (view_state.dirty_mask_.load(std::memory_order_relaxed) & ~DirtyFlag::SPLATS) != 0) {
@@ -2066,9 +2071,9 @@ namespace lfs::vis {
             (void)vksplat_viewport_renderer_->waitForArenaHandoff(kNavigationArenaWait);
         }
         auto render_lock = acquireLiveModelRenderLock(scene_manager, training_try_lock);
-        bool render_lock_contended = training_try_lock && !render_lock.has_value() &&
-                                     scene_manager && scene_manager->getTrainerManager() &&
-                                     scene_manager->getTrainerManager()->getTrainer();
+        const bool render_lock_contended = training_try_lock && !render_lock.has_value() &&
+                                           scene_manager && scene_manager->getTrainerManager() &&
+                                           scene_manager->getTrainerManager()->getTrainer();
 
         const lfs::core::SplatData* model = nullptr;
         SceneRenderState scene_state;
@@ -2147,8 +2152,8 @@ namespace lfs::vis {
                 has_visible_gaussian_model || has_point_cloud || has_meshes || has_environment;
         };
         refresh_content_flags();
-        size_t model_ptr = comparison_identity != 0 ? comparison_identity
-                                                    : reinterpret_cast<size_t>(model);
+        const size_t model_ptr = comparison_identity != 0 ? comparison_identity
+                                                          : reinterpret_cast<size_t>(model);
         // Edit-mode handoff moves the same SplatData into a scene node. Its
         // address does not change, but the trainer's GPU handshake is gone.
         // Use dataset ownership, not Running/Paused, so completion alone does
@@ -2336,9 +2341,9 @@ namespace lfs::vis {
                  has_meshes,
                  has_environment,
                  render_lock_contended);
-        // Step-boundary contention during densify: retain last splat image, re-queue
+        // On contention, retain any previous output and re-queue
         // dirty so the next cadence tick retries after the exclusive lock drops.
-        if (render_lock_contended && (has_cached_viewport_output || training_initializing)) {
+        if (render_lock_contended) {
             DirtyMask retry_dirty = frame_dirty;
             if (training_refresh_only) {
                 retry_dirty &= ~training_refresh_dirty;
@@ -2346,23 +2351,10 @@ namespace lfs::vis {
             if (retry_dirty != 0) {
                 view_state.dirty_mask_.fetch_or(retry_dirty, std::memory_order_relaxed);
             }
-            LOG_PERF("renderVulkanFrame: {} lock contended (retaining cached splat)",
+            LOG_PERF("renderVulkanFrame: {} lock contended (deferring preview)",
                      training_initializing ? "training initialization" : "step-boundary");
             render_lock.reset();
             return cached_frame_result();
-        }
-        if (render_lock_contended && !has_cached_viewport_output) {
-            // A normal running-training cold start may block once for a stable
-            // first frame. Starting is handled above and never waits for the
-            // initialization worker, even when no previous frame exists.
-            render_lock = acquireLiveModelRenderLock(scene_manager, /*try_lock=*/false);
-            render_lock_contended = !render_lock.has_value();
-            if (render_lock) {
-                sample_model_under_lock();
-                refresh_content_flags();
-                model_ptr = reinterpret_cast<size_t>(model);
-                (void)view_state.frame_lifecycle_service_.handleModelChange(model_ptr, view_state.viewport_artifact_service_, model_source);
-            }
         }
         // Scene state is authoritative here (contended frames returned above): nothing
         // visible must clear the viewport even when a cached frame exists â€” a consolidated
