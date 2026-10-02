@@ -187,6 +187,7 @@ namespace lfs::training {
         std::unique_ptr<lfs::io::PipelinedImageLoader> make_eval_image_loader(
             const lfs::core::param::TrainingParameters& params) {
             lfs::io::PipelinedLoaderConfig config;
+            config.backend = lfs::core::default_gpu_backend();
             config.jpeg_batch_size = 1;
             config.prefetch_count = 1;
             config.output_queue_size = 1;

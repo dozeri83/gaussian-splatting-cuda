@@ -1520,9 +1520,16 @@ TEST(ImageTensorBackends, LargePhotoKeepsAdjacentPixelIndicesDistinct) {
     params.dst_cx = params.dst_cy = 0.5f;
     params.src_cx = width - 1.5f;
     params.src_cy = height - 0.5f;
-    EXPECT_FLOAT_EQ(undistort_mask(mask, params, nullptr).cpu().ptr<float>()[0], 0.75f);
+    // Area quadrature integrates the selected pixel's bilinear tent, with
+    // the bottom image edge clamped for the positive half of its footprint.
+    constexpr float expected = 0.75f * 0.75f * 0.875f;
+    EXPECT_FLOAT_EQ(undistort_mask_area(mask, params, nullptr).cpu().ptr<float>()[0], expected);
+    if (gpu_backend_available(GpuBackend::CUDA)) {
+        const GpuBackendScope scope(GpuBackend::CUDA);
+        EXPECT_FLOAT_EQ(undistort_mask_area(mask.gpu(), params, nullptr).cpu().ptr<float>()[0], expected);
+    }
     if (gpu_backend_available(GpuBackend::Vulkan)) {
         const GpuBackendScope scope(GpuBackend::Vulkan);
-        EXPECT_FLOAT_EQ(undistort_mask(mask.gpu(), params, nullptr).cpu().ptr<float>()[0], 0.75f);
+        EXPECT_FLOAT_EQ(undistort_mask_area(mask.gpu(), params, nullptr).cpu().ptr<float>()[0], expected);
     }
 }
