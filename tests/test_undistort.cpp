@@ -200,8 +200,9 @@ TEST(UndistortFullOpenCV, ForwardMatchesDirectColmapFormula) {
             float actual_x = 0.0f;
             float actual_y = 0.0f;
             distort_normalized_point(params, x, y, actual_x, actual_y);
-            EXPECT_NEAR(actual_x, expected_x, 1.0e-7f);
-            EXPECT_NEAR(actual_y, expected_y, 1.0e-7f);
+            // The shared host implementation can fuse operations on native CPUs.
+            EXPECT_FLOAT_EQ(actual_x, expected_x);
+            EXPECT_FLOAT_EQ(actual_y, expected_y);
         }
     }
 }
