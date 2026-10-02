@@ -167,7 +167,7 @@ namespace lfs::vis {
             glm::ivec2 viewport_size);
         // Called by the viewer loop at idle cadence. Releases private viewer
         // scratch after a hysteresis window, or immediately under pressure.
-        void noteVksplatIdleFrame(bool training_active);
+        void releaseIdleVksplatScratch(bool training_active);
 
         enum class VksplatSelectionMaskShape : std::uint32_t {
             Brush = 0,
@@ -313,8 +313,8 @@ namespace lfs::vis {
                     return true;
             return false;
         }
-        void noteVksplatViewFrame();
-        [[nodiscard]] double secondsUntilVksplatScratchRelease(bool training_active) const;
+        void retainVksplatScratch();
+        [[nodiscard]] double secondsUntilVksplatScratchRelease() const;
 
         void setPivotAnimationEndTime(ViewId view, const std::chrono::steady_clock::time_point end_time) {
             viewState(view).animation_state_.setPivotAnimationEndTime(end_time);
@@ -485,9 +485,9 @@ namespace lfs::vis {
             return this->state().temporal_convergence_.remaining();
         }
         // Measurement only — does not affect scene render pacing/limiting.
-        void notePresentedFrame(const FramePlan& plan) {
+        void countPresentedFrame(const FramePlan& plan) {
             presented_framerate_controller_.beginFrame();
-            frame_demand_ledger_.notePresented(plan);
+            frame_demand_ledger_.countPresented(plan);
         }
 
         // Access to the auxiliary rendering engine used by point-cloud, mesh, and readback paths.
@@ -922,7 +922,6 @@ namespace lfs::vis {
         std::uint64_t point_cloud_preview_selection_revision_ = 0;
         VulkanContext* last_vulkan_context_ = nullptr;
         std::atomic<bool> vksplat_terminal_release_pending_{false};
-        std::uint32_t vksplat_idle_frame_count_ = 0;
         ViewportFrameLifecycleService::ModelSource renderer_model_source_ = ViewportFrameLifecycleService::ModelSource::Scene;
 
         std::chrono::steady_clock::time_point vksplat_idle_since_{};

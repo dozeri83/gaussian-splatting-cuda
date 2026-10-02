@@ -604,9 +604,8 @@ namespace lfs::vis {
             lfs::core::Tensor::trim_memory_pool();
     }
 
-    void RenderingManager::noteVksplatIdleFrame(const bool training_active) {
+    void RenderingManager::releaseIdleVksplatScratch(const bool training_active) {
         if (!vksplat_viewport_renderer_) {
-            vksplat_idle_frame_count_ = 0;
             vksplat_idle_since_ = {};
             return;
         }
@@ -623,7 +622,6 @@ namespace lfs::vis {
 #endif
 
         if (!training_active) {
-            vksplat_idle_frame_count_ = 0;
             vksplat_idle_since_ = {};
             if (under_pressure) {
                 vksplat_viewport_renderer_->releaseScratchOnIdle(true);
@@ -642,18 +640,16 @@ namespace lfs::vis {
             vksplat_viewport_renderer_->releaseScratchOnIdle(
                 false,
                 release_private_scratch);
-            vksplat_idle_frame_count_ = 0;
             vksplat_idle_since_ = now;
         }
     }
 
-    void RenderingManager::noteVksplatViewFrame() {
-        vksplat_idle_frame_count_ = 0;
+    void RenderingManager::retainVksplatScratch() {
         vksplat_idle_since_ = std::chrono::steady_clock::now();
     }
 
-    double RenderingManager::secondsUntilVksplatScratchRelease(const bool training_active) const {
-        if (!training_active || !vksplat_viewport_renderer_ || hasParkedArenaRetry())
+    double RenderingManager::secondsUntilVksplatScratchRelease() const {
+        if (!vksplat_viewport_renderer_ || hasParkedArenaRetry())
             return std::numeric_limits<double>::infinity();
         if (vksplat_idle_since_ == std::chrono::steady_clock::time_point{})
             return std::chrono::duration<double>(kVksplatIdleScratchReleaseDelay).count();

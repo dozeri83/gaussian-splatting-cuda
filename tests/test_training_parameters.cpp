@@ -321,7 +321,7 @@ namespace {
     TEST_F(TrainingParametersTest, BackendConflictsPreserve3DGSAndRejectUnsupportedGutFeatures) {
         using Conflict = lfs::core::param::TrainingBackendConflict;
         struct Case {
-            bool OptimizationParameters::*flag;
+            bool OptimizationParameters::* flag;
             Conflict conflict;
             const char* label;
         };
@@ -442,6 +442,19 @@ namespace {
         conflict = params;
         conflict.ppisp_freeze_from_sidecar = true;
         EXPECT_NE(conflict.validate().find(conflict_message), std::string::npos);
+    }
+
+    TEST_F(TrainingParametersTest, ResumeAcceptsAppliedSplatCompositionOnly) {
+        lfs::core::param::TrainingParameters params;
+        params.add_splat_paths = {"no-longer-required.ply"};
+        params.add_splat_freeze = {true};
+        params.resume_checkpoint = "training.resume";
+
+        EXPECT_NE(params.validate().find("--add-splat cannot be used together with --resume"),
+                  std::string::npos);
+
+        params.add_splats_applied = true;
+        EXPECT_TRUE(params.validate().empty());
     }
 
     TEST_F(TrainingParametersTest, PpispExposureFromExifRoundTripsThroughJson) {

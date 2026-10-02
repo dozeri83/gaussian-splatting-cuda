@@ -23,10 +23,17 @@ struct Parameters {
             const float k1 = num_dist > 0 ? dist[0] : 0.0f;
             const float k2 = num_dist > 1 ? dist[1] : 0.0f;
             const float k3 = num_dist > 2 ? dist[2] : 0.0f;
-            const float radial = 1.0f + k1 * r2 + k2 * r4 + k3 * r6;
+            const float numerator = 1.0f + k1 * r2 + k2 * r4 + k3 * r6;
+            float radial = numerator;
+            if (num_dist >= 6) {
+                const float denominator =
+                    1.0f + dist[3] * r2 + dist[4] * r4 + dist[5] * r6;
+                radial = numerator / denominator;
+            }
 
-            const float p1 = num_dist > 3 ? dist[3] : 0.0f;
-            const float p2 = num_dist > 4 ? dist[4] : 0.0f;
+            const int tangential_offset = num_dist >= 6 ? 6 : 3;
+            const float p1 = num_dist > tangential_offset ? dist[tangential_offset] : 0.0f;
+            const float p2 = num_dist > tangential_offset + 1 ? dist[tangential_offset + 1] : 0.0f;
 
             dx = x * radial + 2.0f * p1 * x * y + p2 * (r2 + 2.0f * x * x);
             dy = y * radial + p1 * (r2 + 2.0f * y * y) + 2.0f * p2 * x * y;
@@ -156,6 +163,10 @@ void main(uint3 tid : SV_DispatchThreadID, uniform Parameters p) {
             float dx,dy;
             apply_distortion((float(x)+0.5f-p.dst_cx)/p.dst_fx,(float(y)+0.5f-p.dst_cy)/p.dst_fy,
                 p.model,p.distortion,p.num_distortion,dx,dy);
+            if (!isfinite(dx) || !isfinite(dy)) {
+                for (int c=0;c<p.channels;++c) dst[c*dp+idx]=0.0f;
+                continue;
+            }
             const float sx=dx*p.src_fx+p.src_cx-0.5f, sy=dy*p.src_fy+p.src_cy-0.5f;
             const int x0=int(floor(sx)), y0=int(floor(sy));
             const float fx=sx-floor(sx), fy=sy-floor(sy);

@@ -27,6 +27,15 @@ namespace lfs::core {
         const UndistortParams& params, const int actual_src_width, const int actual_src_height,
         const int max_width = 0);
 
+    // Maps normalized camera coordinates through the encoded camera model.
+    LFS_CORE_API void distort_normalized_point(
+        const UndistortParams& params, float x, float y, float& distorted_x, float& distorted_y);
+
+    // Inverts a distorted image pixel to normalized camera coordinates.
+    LFS_CORE_API bool undistort_image_point(
+        const UndistortParams& params, float image_x, float image_y,
+        float& normalized_x, float& normalized_y);
+
     namespace internal {
         LFS_CORE_API Tensor undistort_image_tensor(const Tensor& input, const UndistortParams& params, bool mask);
         LFS_CORE_API Tensor resize_image_prior_tensor(const Tensor& input, int height, int width, bool normal);

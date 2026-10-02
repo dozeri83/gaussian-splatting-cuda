@@ -1493,7 +1493,7 @@ namespace lfs::vis {
         // includes the viewer turn itself.
         return static_cast<float>(std::max<double>(
             view.framerate_controller_.getSettings().training_frame_refresh_time_sec,
-            idlePreviewIntervalSec(0.0, viewer_turn_ms) + viewer_turn_ms * 1e-3));
+            idlePreviewIntervalSec(viewer_turn_ms) + viewer_turn_ms * 1e-3));
     }
 
     void RenderingManager::pollTrainingRefresh(const bool is_training, const int current_iteration) {
@@ -1506,8 +1506,8 @@ namespace lfs::vis {
             if (!dirty)
                 continue;
             if (is_training && view->has_training_preview_iteration_ &&
-                !trainingPreviewStepAdvanced(view->last_training_preview_iteration_, current_iteration)) {
-                frame_demand_ledger_.notePreviewSkippedNoStep();
+                current_iteration <= view->last_training_preview_iteration_) {
+                frame_demand_ledger_.countSkippedPreview();
                 continue;
             }
             if (is_training) {
@@ -1731,7 +1731,6 @@ namespace lfs::vis {
             // emitted only after the trainer's B3 cleanup has detached its
             // arena backing, so this also drops the viewer's final import.
             vksplat_viewport_renderer_->releaseScratchOnIdle(true);
-            vksplat_idle_frame_count_ = 0;
             vksplat_idle_since_ = {};
         }
 
@@ -4266,7 +4265,7 @@ namespace lfs::vis {
                         // when requested. Resetting it again after a parked
                         // retry adds that delay to every subsequent interval.
                         if (is_training && (frame_dirty & ~DirtyFlag::SPLATS) != 0)
-                            view_state.frame_lifecycle_service_.noteTrainingRender();
+                            view_state.frame_lifecycle_service_.restartTrainingRefresh();
                         view_state.vksplat_stale_frame_guard_.onSuccess();
                         render_lock.reset();
                         note_lod_page_generation(render_result.lod_page_generation);

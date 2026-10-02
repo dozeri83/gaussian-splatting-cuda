@@ -20,10 +20,17 @@ namespace lfs::core::internal::image_math {
         const float k1 = num_dist > 0 ? dist[0] : 0.0f;
         const float k2 = num_dist > 1 ? dist[1] : 0.0f;
         const float k3 = num_dist > 2 ? dist[2] : 0.0f;
-        const float radial = 1.0f + k1 * r2 + k2 * r4 + k3 * r6;
+        const float numerator = 1.0f + k1 * r2 + k2 * r4 + k3 * r6;
+        float radial = numerator;
+        if (num_dist >= 6) {
+            const float denominator =
+                1.0f + dist[3] * r2 + dist[4] * r4 + dist[5] * r6;
+            radial = numerator / denominator;
+        }
 
-        const float p1 = num_dist > 3 ? dist[3] : 0.0f;
-        const float p2 = num_dist > 4 ? dist[4] : 0.0f;
+        const int tangential_offset = num_dist >= 6 ? 6 : 3;
+        const float p1 = num_dist > tangential_offset ? dist[tangential_offset] : 0.0f;
+        const float p2 = num_dist > tangential_offset + 1 ? dist[tangential_offset + 1] : 0.0f;
 
         dx = x * radial + 2.0f * p1 * x * y + p2 * (r2 + 2.0f * x * x);
         dy = y * radial + p1 * (r2 + 2.0f * y * y) + 2.0f * p2 * x * y;
@@ -165,6 +172,11 @@ namespace lfs::core::internal::image_math {
         float dx, dy;
         apply_distortion((x + 0.5f - p.dst_cx) / p.dst_fx, (y + 0.5f - p.dst_cy) / p.dst_fy,
                          p.model_type, p.distortion, p.num_distortion, dx, dy);
+        if (!std::isfinite(dx) || !std::isfinite(dy)) {
+            for (int c = 0; c < channels; ++c)
+                dst[c * p.dst_width * p.dst_height + y * p.dst_width + x] = 0.0f;
+            return;
+        }
         const float sx = dx * p.src_fx + p.src_cx - 0.5f, sy = dy * p.src_fy + p.src_cy - 0.5f;
         for (int c = 0; c < channels; ++c)
             dst[c * p.dst_width * p.dst_height + y * p.dst_width + x] =

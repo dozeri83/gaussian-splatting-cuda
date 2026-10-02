@@ -15,6 +15,7 @@
 #include <device_launch_parameters.h>
 #include <limits>
 #include <nvtx3/nvToolsExt.h>
+#include <stdexcept>
 
 namespace lfs::core {
 
@@ -24,7 +25,7 @@ namespace lfs::core {
         constexpr float PIXEL_CENTER_OFFSET = 0.5f;
 
         // COLMAP sensor/models.h (BSD-3 licensed formulas)
-        __device__ void apply_distortion_pinhole(
+        __host__ __device__ void apply_distortion_pinhole(
             const float x, const float y,
             const float* __restrict__ dist, const int num_dist,
             float& dx, float& dy) {
@@ -36,10 +37,17 @@ namespace lfs::core {
             const float k1 = num_dist > 0 ? dist[0] : 0.0f;
             const float k2 = num_dist > 1 ? dist[1] : 0.0f;
             const float k3 = num_dist > 2 ? dist[2] : 0.0f;
-            const float radial = 1.0f + k1 * r2 + k2 * r4 + k3 * r6;
+            const float numerator = 1.0f + k1 * r2 + k2 * r4 + k3 * r6;
+            float radial = numerator;
+            if (num_dist >= 6) {
+                const float denominator =
+                    1.0f + dist[3] * r2 + dist[4] * r4 + dist[5] * r6;
+                radial = numerator / denominator;
+            }
 
-            const float p1 = num_dist > 3 ? dist[3] : 0.0f;
-            const float p2 = num_dist > 4 ? dist[4] : 0.0f;
+            const int tangential_offset = num_dist >= 6 ? 6 : 3;
+            const float p1 = num_dist > tangential_offset ? dist[tangential_offset] : 0.0f;
+            const float p2 = num_dist > tangential_offset + 1 ? dist[tangential_offset + 1] : 0.0f;
 
             dx = x * radial + 2.0f * p1 * x * y + p2 * (r2 + 2.0f * x * x);
             dy = y * radial + p1 * (r2 + 2.0f * y * y) + 2.0f * p2 * x * y;
@@ -198,11 +206,18 @@ namespace lfs::core {
             float dnx, dny;
             apply_distortion(nx, ny, params.model_type, params.distortion, params.num_distortion, dnx, dny);
 
+            const int dst_plane = params.dst_height * params.dst_width;
+            if (!isfinite(dnx) || !isfinite(dny)) {
+                for (int c = 0; c < channels; ++c) {
+                    dst[c * dst_plane + oy * params.dst_width + ox] = 0.0f;
+                }
+                return;
+            }
+
             const float sx = dnx * params.src_fx + params.src_cx - PIXEL_CENTER_OFFSET;
             const float sy = dny * params.src_fy + params.src_cy - PIXEL_CENTER_OFFSET;
 
             const int src_plane = params.src_height * params.src_width;
-            const int dst_plane = params.dst_height * params.dst_width;
 
             for (int c = 0; c < channels; ++c) {
                 dst[c * dst_plane + oy * params.dst_width + ox] =
@@ -229,6 +244,11 @@ namespace lfs::core {
 
             float dnx, dny;
             apply_distortion(nx, ny, params.model_type, params.distortion, params.num_distortion, dnx, dny);
+
+            if (!isfinite(dnx) || !isfinite(dny)) {
+                dst[oy * params.dst_width + ox] = 0.0f;
+                return;
+            }
 
             const float sx = dnx * params.src_fx + params.src_cx - PIXEL_CENTER_OFFSET;
             const float sy = dny * params.src_fy + params.src_cy - PIXEL_CENTER_OFFSET;

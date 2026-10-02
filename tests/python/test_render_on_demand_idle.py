@@ -76,22 +76,10 @@ def _tool(endpoint: str, name: str, arguments: dict | None = None) -> dict:
     result = _call(endpoint, "tools/call", {"name": name, "arguments": arguments or {}})
     if result.get("isError"):
         raise AssertionError(result)
-    structured = result.get("structuredContent")
-    if isinstance(structured, dict):
-        return structured
-    for item in result.get("content", []):
-        if item.get("type") == "text":
-            try:
-                decoded = json.loads(item["text"])
-                if isinstance(decoded, dict):
-                    return decoded
-            except (KeyError, json.JSONDecodeError):
-                pass
-    return result
-
+    return result["structuredContent"]
 
 def _ledger(endpoint: str, reset: bool = False) -> dict:
-    payload = _tool(endpoint, "runtime.frame_ledger", {"reset": reset})
+    payload = _tool(endpoint, "runtime_frame_ledger", {"reset": reset})
     return payload.get("frames", payload)
 
 
@@ -143,7 +131,6 @@ def test_every_render_mode_is_quiet_when_idle(tmp_path: Path) -> None:
                 raise AssertionError(f"app exited during startup; see {tmp_path / 'app.log'}")
             try:
                 _initialize(endpoint)
-                _call(endpoint, "tools/list")
                 break
             except (OSError, AssertionError):
                 time.sleep(0.5)
@@ -152,7 +139,7 @@ def test_every_render_mode_is_quiet_when_idle(tmp_path: Path) -> None:
 
         tools = _call(endpoint, "tools/list").get("tools", [])
         tool_names = {item.get("name") for item in tools}
-        required = {"runtime.frame_ledger"}
+        required = {"runtime_frame_ledger"}
         for mode in modes:
             for operation in mode.get("setup", []):
                 required.add(operation["tool"])
@@ -169,7 +156,7 @@ def test_every_render_mode_is_quiet_when_idle(tmp_path: Path) -> None:
                 current = _ledger(endpoint).get("frames_presented", 0)
                 if current != last_count:
                     last_count, stable_since = current, time.monotonic()
-            baseline = _ledger(endpoint, reset=True)
+            _ledger(endpoint, reset=True)
             utilization = []
             end = time.monotonic() + idle_seconds
             while time.monotonic() < end:
