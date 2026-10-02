@@ -20,6 +20,7 @@
 #include "visualizer/core/training_manager.hpp"
 #include "visualizer/rendering/rendering_manager.hpp"
 #include "visualizer/scene/scene_manager.hpp"
+#include "visualizer/screen/screen_service.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -281,11 +282,13 @@ TEST_F(TrainingSceneInitConcurrencyTest, ColdViewportDefersWhileTrainerHoldsMode
     lfs::vis::services().set(&manager);
     set_running(manager);
 
-    lfs::vis::RenderingManager rendering;
+    lfs::vis::screen::ScreenService views;
+    lfs::vis::RenderingManager rendering{views};
     Viewport viewport(640, 480);
     viewport.frameBufferSize = {640, 480};
     lfs::vis::RenderSettings settings;
     const lfs::vis::RenderingManager::RenderContext context{
+        .view = views.activeView(),
         .viewport = viewport,
         .settings = settings,
         .scene_manager = &scene_manager};
