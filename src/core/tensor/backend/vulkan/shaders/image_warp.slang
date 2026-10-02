@@ -424,7 +424,7 @@ float hypot(float x, float y) { return sqrt(x*x + y*y); }
             distort_image_to_source_kernel(
                 Ptr<float, Access.Read> src,
                 Ptr<float, Access.ReadWrite> dst,
-                Ptr<uint8_t, Access.ReadWrite> validity,
+                Ptr<int, Access.ReadWrite> validity,
                 const int channels,
                 const int ox, const int oy,
                 const UndistortParams params) {
@@ -648,7 +648,7 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 groups : SV_GroupID) {
     int x = int(index) % pc.width, y = int(index) / pc.width;
     if (pc.mode == 0) {
         if (pc.inverse != 0)
-            distort_image_to_source_kernel(src, dst, (Ptr<uint8_t, Access.ReadWrite>)pc.validity, pc.channels, x, y, params);
+            distort_image_to_source_kernel(src, dst, (Ptr<int, Access.ReadWrite>)pc.validity, pc.channels, x, y, params);
         else
             undistort_image_kernel(src, dst, pc.channels, x, y, pc.quadrature, params);
     } else {

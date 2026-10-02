@@ -44,8 +44,8 @@ namespace lfs::core::internal {
         auto output = Tensor::zeros(input.ndim() == 2 ? TensorShape{size_t(height), size_t(width)} : TensorShape{size_t(channels), size_t(height), size_t(width)}, Device::GPU);
         Tensor mask;
         if (validity) {
-            mask = Tensor::zeros({size_t(height), size_t(width)}, Device::GPU, DataType::UInt8);
-            *validity = mask;
+            // Use 32-bit stores so the warp does not require shaderInt8.
+            mask = Tensor::zeros({size_t(height), size_t(width)}, Device::GPU, DataType::Int32);
         }
         struct CameraParams {
             float src_fx, src_fy, src_cx, src_cy, dst_fx, dst_fy, dst_cx, dst_cy;
@@ -74,6 +74,8 @@ namespace lfs::core::internal {
             vkCmdPushConstants(command, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
             vkCmdDispatch(command, std::min(65535u, (uint32_t(width) * uint32_t(height) + 63) / 64), 1, 1);
         });
+        if (validity)
+            *validity = mask.to(DataType::UInt8);
         return output;
     }
     Tensor VulkanBackendOps::image_undistort(const Tensor& input, const UndistortParams& p, bool mask, ExecContext) {

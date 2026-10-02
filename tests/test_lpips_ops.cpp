@@ -103,7 +103,7 @@ namespace {
             ops().pool_reduce(x, y, w, actual, pool ? px : absent, pool ? py : absent, p);
             kernels::lpips_pool_reduce(x.data_ptr(), y.data_ptr(), w.data_ptr(), expected.ptr<float>(),
                                        pool ? ex.data_ptr() : nullptr, pool ? ey.data_ptr() : nullptr,
-                                       1, 64, 2, 8, p.y0, p.y1, p.x0, p.x1, p.inverse_count, getCurrentCUDAStream());
+                                       1, 64, 2, 8, p.y0, p.y1, p.x0, p.x1, p.inverse_count, nullptr, 0, 0, 0, getCurrentCUDAStream());
             same(actual, expected);
             if (pool) {
                 same(px, ex);

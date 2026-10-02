@@ -1876,7 +1876,7 @@ TEST(ArgumentParserTest, EvalSpaceAcceptsBothRegisteredValues) {
             "--eval-space",
             value,
         };
-        auto parsed = lfs::core::args::parse_args_and_params(
+        auto parsed = lfs::io::args::parse_args_and_params(
             static_cast<int>(std::size(argv)), argv);
         ASSERT_TRUE(parsed.has_value()) << value << ": " << parsed.error();
         EXPECT_EQ((*parsed)->optimization.eval_space, expected) << value;
@@ -1899,7 +1899,7 @@ TEST(ArgumentParserTest, EvalSpaceRejectsInvalidCliAndConfigValues) {
         "--eval-space",
         "source",
     };
-    auto from_cli = lfs::core::args::parse_args_and_params(
+    auto from_cli = lfs::io::args::parse_args_and_params(
         static_cast<int>(std::size(cli_argv)), cli_argv);
     ASSERT_FALSE(from_cli.has_value());
     EXPECT_NE(from_cli.error().find("eval_space"), std::string::npos) << from_cli.error();
@@ -1921,7 +1921,7 @@ TEST(ArgumentParserTest, EvalSpaceRejectsInvalidCliAndConfigValues) {
         "--config",
         config_text.c_str(),
     };
-    auto from_config = lfs::core::args::parse_args_and_params(
+    auto from_config = lfs::io::args::parse_args_and_params(
         static_cast<int>(std::size(config_argv)), config_argv);
     ASSERT_FALSE(from_config.has_value());
     EXPECT_NE(from_config.error().find("eval_space"), std::string::npos)
@@ -1938,7 +1938,7 @@ TEST(ArgumentParserTest, EvalSpaceCliWithoutUndistortStopsTheRun) {
               "--eval-space", "distorted"},
              {"LichtFeld-Studio", "-d", data_path.c_str(), "-o", output_path.c_str(),
               "--eval-space=undistorted"}}) {
-        auto parsed = lfs::core::args::parse_args_and_params(
+        auto parsed = lfs::io::args::parse_args_and_params(
             static_cast<int>(args.size()), args.data());
         ASSERT_FALSE(parsed.has_value());
         EXPECT_NE(parsed.error().find("--eval-space needs --undistort"), std::string::npos)
@@ -1969,7 +1969,7 @@ TEST(ArgumentParserTest, EvalSpaceConfigWithoutUndistortIsAccepted) {
     for (const char* value : {"distorted", "undistorted"}) {
         optimization["eval_space"] = value;
         std::ofstream(config_path) << nlohmann::json{{"optimization", optimization}}.dump();
-        auto parsed = lfs::core::args::parse_args_and_params(
+        auto parsed = lfs::io::args::parse_args_and_params(
             static_cast<int>(std::size(argv)), argv);
         EXPECT_TRUE(parsed.has_value()) << value << ": " << parsed.error();
     }
@@ -1997,7 +1997,7 @@ TEST(ArgumentParserTest, EvalSpaceConfigRoundTripAndResumeKeepTheValue) {
         "--config",
         config_text.c_str(),
     };
-    auto parsed = lfs::core::args::parse_args_and_params(
+    auto parsed = lfs::io::args::parse_args_and_params(
         static_cast<int>(std::size(argv)), argv);
     ASSERT_TRUE(parsed.has_value()) << parsed.error();
     EXPECT_TRUE((*parsed)->optimization.undistort);
