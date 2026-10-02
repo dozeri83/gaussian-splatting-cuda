@@ -24,8 +24,10 @@ int main() {
     fs::remove(bundled_python);
 
 #ifdef LFS_MACOS_PORTABLE_APP
-    try { (void)lfs::vis::getAssetPath("outside.txt"); return 1; }
-    catch (const std::runtime_error& error) {
+    try {
+        (void)lfs::vis::getAssetPath("outside.txt");
+        return 1;
+    } catch (const std::runtime_error& error) {
         assert(std::string(error.what()).find(VISUALIZER_ASSET_PATH) == std::string::npos);
     }
 #else
