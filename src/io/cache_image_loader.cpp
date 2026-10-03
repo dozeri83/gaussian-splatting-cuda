@@ -11,11 +11,11 @@
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
+#include "core/shared_image_ops.hpp"
 #include "core/tensor.hpp"
 #include "core/tensor_backend.hpp"
 #include "core/tensor_image.hpp"
 #if LFS_HAS_CUDA
-#include "core/shared_image_ops.hpp"
 #include "io/nvcodec_image_loader.hpp"
 #include <cuda_runtime.h>
 #endif
@@ -24,7 +24,10 @@
 #include <bit>
 #include <fstream>
 #include <iomanip>
+#include <memory>
+#include <optional>
 #include <sstream>
+#include <type_traits>
 
 namespace lfs::io {
 
@@ -203,10 +206,10 @@ namespace lfs::io {
             const size_t width = tensor.shape()[2];
             auto hwc = tensor.permute({1, 2, 0}).contiguous();
             auto quantized = lfs::core::Tensor::empty(
-                {height, width, channels}, lfs::core::Device::CUDA,
+                {height, width, channels}, lfs::core::Device::GPU,
                 lfs::core::DataType::Float16);
             auto restored = lfs::core::Tensor::empty(
-                {height, width, channels}, lfs::core::Device::CUDA,
+                {height, width, channels}, lfs::core::Device::GPU,
                 lfs::core::DataType::Float32);
             const auto* image_ops = lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA);
             image_ops->convert(hwc, quantized, lfs::gpu_ops::ImageConversion::F32HWCToU16HWC,
@@ -217,30 +220,99 @@ namespace lfs::io {
         }
 
 #endif
-        lfs::core::Tensor preprocess_loaded_rgb_image(
-            unsigned char* data,
-            const int width,
-            const int height,
-            const int channels,
-            const bool output_uint8) {
+        constexpr int LANCZOS_KERNEL_SIZE = 2;
+
+        // Upload completes before the borrowed decoder allocation is released.
+        template <typename T>
+        lfs::core::Tensor upload_hwc(const T* data, const int width, const int height, const int channels) {
             using namespace lfs::core;
-
-            auto tensor = Tensor::from_blob(
-                data,
+            const auto cpu = Tensor::from_blob(
+                const_cast<T*>(data),
                 TensorShape({static_cast<size_t>(height), static_cast<size_t>(width), static_cast<size_t>(channels)}),
-                Device::CPU,
-                DataType::UInt8);
+                Device::CPU, std::is_same_v<T, uint16_t> ? DataType::Float16 : DataType::UInt8);
+            auto gpu = cpu.to(Device::GPU);
+            gpu.set_name("io.image.gpu_staging");
+            return gpu;
+        }
 
-            if (output_uint8) {
-                tensor = tensor.permute({2, 0, 1}).contiguous();
-            } else {
-                tensor = (tensor.to(DataType::Float32) / 255.0f).permute({2, 0, 1}).contiguous();
+        lfs::core::Tensor hwc_to_chw(const lfs::core::Tensor& hwc, const int resize_factor, const int max_width,
+                                     const bool output_uint8) {
+            using namespace lfs::core;
+            const size_t H = hwc.shape()[0], W = hwc.shape()[1], C = hwc.shape()[2];
+            const bool sixteen_bit = hwc.dtype() == DataType::Float16;
+            const auto* ops = shared_image_ops(default_gpu_backend());
+            const auto [target_width, target_height] = resized_image_dimensions(
+                static_cast<int>(W), static_cast<int>(H), resize_factor, max_width);
+            if (static_cast<size_t>(target_width) != W || static_cast<size_t>(target_height) != H) {
+                Tensor source = hwc;
+                if (sixteen_bit) {
+                    source = Tensor::empty(hwc.shape(), Device::GPU, DataType::Float32);
+                    ops->convert(hwc, source, lfs::gpu_ops::ImageConversion::U16HWCToF32HWC, H, W, C, {});
+                }
+                auto resized = ops->resize(source, target_height, target_width, lfs::gpu_ops::Resample::LanczosRGB, LANCZOS_KERNEL_SIZE);
+                if (!output_uint8)
+                    return resized;
+                auto output = Tensor::empty(resized.shape(), Device::GPU, DataType::UInt8);
+                ops->convert(resized, output, lfs::gpu_ops::ImageConversion::F32CHWToU8CHW, target_height, target_width, C, {});
+                return output;
             }
-            free_image(data);
-            return tensor;
+            auto output = Tensor::empty({C, H, W}, Device::GPU, output_uint8 ? DataType::UInt8 : DataType::Float32);
+            const auto conversion = sixteen_bit
+                                        ? (output_uint8 ? lfs::gpu_ops::ImageConversion::U16HWCToU8CHW : lfs::gpu_ops::ImageConversion::U16HWCToF32CHW)
+                                        : (output_uint8 ? lfs::gpu_ops::ImageConversion::U8HWCToU8CHW : lfs::gpu_ops::ImageConversion::U8HWCToF32CHW);
+            ops->convert(hwc, output, conversion, H, W, C, {});
+            return output;
         }
 
     } // namespace
+
+    lfs::core::Tensor load_rgb_image_cpu_decoded(
+        const std::filesystem::path& path, const LoadParams& params, const bool decode_16bit) {
+#if LFS_HAS_CUDA
+        std::optional<lfs::core::CUDAStreamGuard> execution_scope;
+        if (lfs::core::default_gpu_backend() == lfs::core::GpuBackend::CUDA)
+            execution_scope.emplace(image_execution_stream(params.cuda_stream));
+#endif
+        const auto finish = [&](const auto* data, const int width, const int height, const int channels) {
+            if (!data || channels != 3)
+                throw std::runtime_error("Failed to decode image: " + lfs::core::path_to_utf8(path));
+            return hwc_to_chw(upload_hwc(data, width, height, channels),
+                              params.resize_factor, params.max_width, params.output_uint8);
+        };
+        if (decode_16bit) {
+            auto [data, width, height, channels] = lfs::core::load_image_u16(path, 1, 0);
+            const std::unique_ptr<uint16_t, decltype(&lfs::core::free_image)> owned(data, &lfs::core::free_image);
+            return finish(owned.get(), width, height, channels);
+        }
+        auto [data, width, height, channels] = lfs::core::load_image(path, 1, 0);
+        const std::unique_ptr<unsigned char, decltype(&lfs::core::free_image)> owned(data, &lfs::core::free_image);
+        return finish(owned.get(), width, height, channels);
+    }
+
+    lfs::core::Tensor load_rgba_image_cpu_decoded(
+        const std::filesystem::path& path, const int resize_factor, const int max_width, void* const cuda_stream,
+        const bool decode_16bit) {
+        using namespace lfs::core;
+#if LFS_HAS_CUDA
+        std::optional<CUDAStreamGuard> execution_scope;
+        if (default_gpu_backend() == GpuBackend::CUDA)
+            execution_scope.emplace(image_execution_stream(cuda_stream));
+#endif
+        const auto finish = [&](const auto* data, const int width, const int height, const int channels) {
+            if (!data || channels != 4)
+                throw std::runtime_error("Failed to decode RGBA image: " + path_to_utf8(path));
+            return hwc_to_chw(upload_hwc(data, width, height, channels),
+                              resize_factor, max_width, false);
+        };
+        if (decode_16bit) {
+            auto [data, width, height, channels] = load_image_with_alpha_u16(path, 1, 0);
+            const std::unique_ptr<uint16_t, decltype(&free_image)> owned(data, &free_image);
+            return finish(owned.get(), width, height, channels);
+        }
+        auto [data, width, height, channels] = load_image_with_alpha(path, 1, 0);
+        const std::unique_ptr<unsigned char, decltype(&free_image)> owned(data, &free_image);
+        return finish(owned.get(), width, height, channels);
+    }
 
     lfs::core::Tensor CacheLoader::load_cached_image_from_cpu(
         const std::filesystem::path& path, const LoadParams& params) {
@@ -272,19 +344,20 @@ namespace lfs::io {
 
         // Concurrent load - skip caching
         if (is_being_loaded) {
-            auto [img_data, width, height, channels] = load_image(path, params.resize_factor, params.max_width);
-            return preprocess_loaded_rgb_image(img_data, width, height, channels, params.output_uint8);
+            return load_rgb_image_cpu_decoded(path, params).to(Device::CPU);
         }
 
-        // Load image
-        auto [img_data, width, height, channels] = load_image(path, params.resize_factor, params.max_width);
-        if (!img_data) {
+        Tensor tensor;
+        try {
+            tensor = load_rgb_image_cpu_decoded(path, params).to(Device::CPU);
+        } catch (...) {
             std::lock_guard lock(cpu_cache_mutex_);
             image_being_loaded_cpu_.erase(cache_key);
-            throw std::runtime_error("Failed to load: " + lfs::core::path_to_utf8(path));
+            throw;
         }
-
-        auto tensor = preprocess_loaded_rgb_image(img_data, width, height, channels, params.output_uint8);
+        const int channels = static_cast<int>(tensor.shape()[0]);
+        const int height = static_cast<int>(tensor.shape()[1]);
+        const int width = static_cast<int>(tensor.shape()[2]);
 
         const std::size_t tensor_bytes = tensor.bytes();
 
@@ -372,8 +445,7 @@ namespace lfs::io {
             return load_cached_image_from_cpu(path, params);
         }
 
-        auto [data, width, height, channels] = load_image(path, params.resize_factor, params.max_width);
-        return preprocess_loaded_rgb_image(data, width, height, channels, params.output_uint8);
+        return load_rgb_image_cpu_decoded(path, params);
     }
 
     void CacheLoader::print_cache_status() const {
@@ -437,36 +509,7 @@ namespace lfs::io {
         }
 
         lfs::core::Tensor decode_with_cpu_fallback(const std::filesystem::path& path, const LoadParams& params) {
-            const auto stream = image_execution_stream(params.cuda_stream);
-            const lfs::core::CUDAStreamGuard execution_scope(stream);
-
-            using namespace lfs::core;
-
-            auto [img_data, width, height, channels] = load_image(path, params.resize_factor, params.max_width);
-            if (!img_data) {
-                throw std::runtime_error("Failed to load: " + lfs::core::path_to_utf8(path));
-            }
-
-            auto cpu_tensor = Tensor::empty_unpinned(
-                TensorShape({static_cast<size_t>(height), static_cast<size_t>(width), static_cast<size_t>(channels)}),
-                DataType::UInt8);
-            std::memcpy(cpu_tensor.data_ptr(), img_data, static_cast<size_t>(height) * width * channels);
-            free_image(img_data);
-
-            auto gpu_uint8 = cpu_tensor.gpu();
-            const auto H = static_cast<size_t>(height);
-            const auto W = static_cast<size_t>(width);
-            const auto C = static_cast<size_t>(channels);
-
-            if (params.output_uint8) {
-                auto output = Tensor::empty(TensorShape({C, H, W}), Device::GPU, DataType::UInt8);
-                lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA)->convert(gpu_uint8, output, lfs::gpu_ops::ImageConversion::U8HWCToU8CHW, H, W, C, {});
-                return output;
-            }
-
-            auto output = Tensor::empty(TensorShape({C, H, W}), Device::GPU, DataType::Float32);
-            lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA)->convert(gpu_uint8, output, lfs::gpu_ops::ImageConversion::U8HWCToF32CHW, H, W, C, {});
-            return output;
+            return load_rgb_image_cpu_decoded(path, params);
         }
 
     } // anonymous namespace
@@ -522,7 +565,7 @@ namespace lfs::io {
                         tensor = tensor.permute({2, 0, 1}).contiguous();
                         if (params.output_uint8) {
                             auto uint8_tensor = Tensor::empty(
-                                tensor.shape(), Device::CUDA, DataType::UInt8);
+                                tensor.shape(), Device::GPU, DataType::UInt8);
                             const lfs::core::CUDAStreamGuard execution_scope(
                                 static_cast<cudaStream_t>(params.cuda_stream));
                             lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA)->convert(tensor, uint8_tensor, lfs::gpu_ops::ImageConversion::F32CHWToU8CHW, tensor.shape()[1], tensor.shape()[2], tensor.shape()[0], {});

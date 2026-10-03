@@ -6,6 +6,7 @@
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
+#include "core/shared_image_ops.hpp"
 #include "io/pipelined_image_loader.hpp"
 
 #include <stb_image.h>
@@ -109,18 +110,13 @@ namespace lfs::io {
 
         std::pair<Tensor, Tensor> decode_rgba(const std::filesystem::path& path,
                                               const LoadParams& params,
-                                              lfs::core::TensorUpload& upload) {
-            auto [data, width, height, channels] =
-                lfs::core::load_image_with_alpha(path, params.undistort ? 1 : params.resize_factor, params.undistort ? 0 : params.max_width);
-            if (!data || channels != 4)
-                throw std::runtime_error("Failed to load RGBA image");
-            const auto rgba = to_device(upload, host_uint8(data, image_shape(height, width, 4),
-                                                           lfs::core::free_image));
-
-            Tensor rgb = rgba.slice(2, 0, 3).permute({2, 0, 1});
-            if (!params.output_uint8)
-                rgb = rgb.to(DataType::Float32).mul(UINT8_SCALE);
-            Tensor alpha = rgba.slice(2, 3, 4).squeeze(2).to(DataType::Float32).mul(UINT8_SCALE);
+                                              const bool decode_16bit) {
+            const auto rgba = load_rgba_image_cpu_decoded(path, params.undistort ? 1 : params.resize_factor,
+                                                          params.undistort ? 0 : params.max_width, nullptr, decode_16bit);
+            Tensor rgb = rgba.slice(0, 0, 3).contiguous();
+            if (params.output_uint8)
+                rgb = float_to_uint8(rgb);
+            Tensor alpha = rgba.slice(0, 3, 4).squeeze(0).contiguous();
             if (params.undistort) {
                 if (params.output_uint8)
                     rgb = rgb.to(DataType::Float32).div(255.0f);
@@ -130,6 +126,7 @@ namespace lfs::io {
                 if (params.output_uint8)
                     rgb = float_to_uint8(rgb);
             }
+            alpha = alpha.clamp(0.0f, 1.0f).mul(65535.0f).add(0.5f).to(DataType::Int32).to(DataType::Float32).div(65535.0f);
             return {rgb.contiguous(), alpha};
         }
 
@@ -176,6 +173,8 @@ namespace lfs::io {
             std::lock_guard stats_lock(stats_mutex_);
             ++stats_.cpu_decode_calls;
         }
+        if (!params.undistort && !encoded)
+            return load_rgb_image_cpu_decoded(path, params, config_.use_16bit_color);
         Tensor host;
         if (params.undistort) {
             auto [data, width, height, channels] = lfs::core::load_image_float(path);
@@ -290,7 +289,7 @@ namespace lfs::io {
 
             try {
                 if (item.alpha_as_mask) {
-                    auto [rgb, alpha] = decode_rgba(item.path, params, upload);
+                    auto [rgb, alpha] = decode_rgba(item.path, params, config_.use_16bit_color);
                     try_complete_pair(item.sequence_id, item.loader_generation, std::move(rgb),
                                       finish_mask(std::move(alpha), item.alpha_mask_params));
                 } else if (item.is_mask) {

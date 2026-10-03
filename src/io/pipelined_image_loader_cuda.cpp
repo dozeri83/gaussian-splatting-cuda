@@ -614,53 +614,10 @@ namespace lfs::io {
             synchronize_async_upload_before_free(stream, "image");
             lfs::core::free_image_float(img_data);
             decoded = gpu_staging.permute({2, 0, 1}).contiguous();
-        } else if (config_.use_16bit_color) {
-            auto [img_data, width, height, channels] = lfs::core::load_image_u16(
-                path, params.resize_factor, params.max_width);
-            if (!img_data)
-                throw std::runtime_error("Failed to decode image: " + lfs::core::path_to_utf8(path));
-
-            const size_t H = static_cast<size_t>(height);
-            const size_t W = static_cast<size_t>(width);
-            const size_t C = static_cast<size_t>(channels);
-
-            // Float16 is only a 2-byte container for the uint16 samples (no UInt16 dtype).
-            auto cpu_tensor = Tensor::from_blob(
-                img_data, TensorShape({H, W, C}), Device::CPU, DataType::Float16);
-            gpu_staging = cpu_tensor.to(Device::GPU, stream);
-
-            if (params.output_uint8) {
-                decoded = Tensor::empty(TensorShape({C, H, W}), Device::GPU, DataType::UInt8);
-                lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA)->convert(gpu_staging, decoded, lfs::gpu_ops::ImageConversion::U16HWCToU8CHW, H, W, C, {});
-            } else {
-                decoded = Tensor::empty(TensorShape({C, H, W}), Device::GPU, DataType::Float32);
-                lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA)->convert(gpu_staging, decoded, lfs::gpu_ops::ImageConversion::U16HWCToF32CHW, H, W, C, {});
-            }
-            synchronize_async_upload_before_free(stream, "image");
-            lfs::core::free_image(img_data);
         } else {
-            auto [img_data, width, height, channels] = lfs::core::load_image(
-                path, params.resize_factor, params.max_width);
-            if (!img_data)
-                throw std::runtime_error("Failed to decode image: " + lfs::core::path_to_utf8(path));
-
-            const size_t H = static_cast<size_t>(height);
-            const size_t W = static_cast<size_t>(width);
-            const size_t C = static_cast<size_t>(channels);
-
-            auto cpu_tensor = Tensor::from_blob(
-                img_data, TensorShape({H, W, C}), Device::CPU, DataType::UInt8);
-            gpu_staging = cpu_tensor.to(Device::GPU, stream);
-
-            if (params.output_uint8) {
-                decoded = Tensor::empty(TensorShape({C, H, W}), Device::GPU, DataType::UInt8);
-                lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA)->convert(gpu_staging, decoded, lfs::gpu_ops::ImageConversion::U8HWCToU8CHW, H, W, C, {});
-            } else {
-                decoded = Tensor::empty(TensorShape({C, H, W}), Device::GPU, DataType::Float32);
-                lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA)->convert(gpu_staging, decoded, lfs::gpu_ops::ImageConversion::U8HWCToF32CHW, H, W, C, {});
-            }
-            synchronize_async_upload_before_free(stream, "image");
-            lfs::core::free_image(img_data);
+            auto decode_params = params;
+            decode_params.cuda_stream = stream;
+            decoded = load_rgb_image_cpu_decoded(path, decode_params, config_.use_16bit_color);
         }
 
         return decoded;
@@ -1038,13 +995,9 @@ namespace lfs::io {
                             if (is_jpeg2k) {
                                 auto raw = nvcodec->decode_jpeg2k_16bit_from_memory_gpu(
                                     bytes, queue_stream(*decode_queue_), false, true);
-                                // Pipeline mask sidecars are always encoded as UINT8 below.
-                                // The decoder returns normalized Float32 for UINT16 streams;
-                                // reinterpreting that output as raw u16 would normalize twice.
-                                LFS_ASSERT_MSG(
-                                    raw.dtype() == lfs::core::DataType::UInt8,
-                                    "pipeline JPEG2000 mask cache must contain eight-bit samples");
-                                mask_tensor = raw.to(lfs::core::DataType::Float32) / 255.0f;
+                                mask_tensor = raw.dtype() == lfs::core::DataType::UInt8
+                                                  ? raw.to(lfs::core::DataType::Float32) / 255.0f
+                                                  : raw;
                             } else {
                                 mask_tensor = nvcodec->load_image_from_memory_gpu(
                                     bytes, 1, 0, queue_stream(*decode_queue_), DecodeFormat::Grayscale);
@@ -1208,38 +1161,18 @@ namespace lfs::io {
                 auto nvcodec = acquire_nvcodec_loader(config_.decoder_pool_size);
 
                 if (item.alpha_as_mask) {
-                    auto [img_data, width, height, channels] = lfs::core::load_image_with_alpha(
-                        item.path,
-                        item.undistort ? 1 : item.params.resize_factor,
-                        item.undistort ? 0 : item.params.max_width);
-
-                    if (!img_data || channels != 4)
-                        throw std::runtime_error("Failed to load RGBA image");
-
-                    const size_t H = static_cast<size_t>(height);
-                    const size_t W = static_cast<size_t>(width);
-
-                    auto cpu_tensor = lfs::core::Tensor::from_blob(
-                        img_data, lfs::core::TensorShape({H, W, 4}),
-                        lfs::core::Device::CPU, lfs::core::DataType::UInt8);
-                    auto gpu_uint8 = cpu_tensor.to(lfs::core::Device::GPU);
-
-                    lfs::core::free_image(img_data);
-
-                    auto rgb = item.params.output_uint8
-                                   ? lfs::core::Tensor::empty(
-                                         lfs::core::TensorShape({3, H, W}),
-                                         lfs::core::Device::GPU, lfs::core::DataType::UInt8)
-                                   : lfs::core::Tensor::empty(
-                                         lfs::core::TensorShape({3, H, W}),
-                                         lfs::core::Device::GPU, lfs::core::DataType::Float32);
-                    auto alpha = lfs::core::Tensor::empty(
-                        lfs::core::TensorShape({H, W}),
-                        lfs::core::Device::GPU, lfs::core::DataType::Float32);
-
-                    lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA)->rgba_split(gpu_uint8, rgb, alpha);
-
-                    gpu_uint8 = lfs::core::Tensor();
+                    const auto rgba = load_rgba_image_cpu_decoded(
+                        item.path, item.undistort ? 1 : item.params.resize_factor,
+                        item.undistort ? 0 : item.params.max_width, sidecar_stream, config_.use_16bit_color);
+                    const size_t H = rgba.shape()[1], W = rgba.shape()[2];
+                    auto rgb = rgba.slice(0, 0, 3).contiguous();
+                    auto alpha = rgba.slice(0, 3, 4).squeeze(0).contiguous();
+                    const auto* ops = lfs::core::shared_image_ops(lfs::core::GpuBackend::CUDA);
+                    if (item.params.output_uint8) {
+                        auto rgb_uint8 = lfs::core::Tensor::empty(rgb.shape(), lfs::core::Device::GPU, lfs::core::DataType::UInt8);
+                        ops->convert(rgb, rgb_uint8, lfs::gpu_ops::ImageConversion::F32CHWToU8CHW, H, W, 3, {});
+                        rgb = std::move(rgb_uint8);
+                    }
 
                     if (item.undistort) {
                         const auto scaled = lfs::core::prepare_undistort_params(
@@ -1250,12 +1183,20 @@ namespace lfs::io {
                         alpha = lfs::core::undistort_mask_area(alpha, scaled, sidecar_stream);
                     }
 
+                    // Match the first load to the lossless alpha cache's 16-bit grid.
+                    {
+                        const auto h = alpha.shape()[0], w = alpha.shape()[1];
+                        auto quantized = lfs::core::Tensor::empty(alpha.shape(), lfs::core::Device::GPU, lfs::core::DataType::Float16);
+                        ops->convert(alpha, quantized, lfs::gpu_ops::ImageConversion::F32HWCToU16HWC, h, w, 1, {});
+                        ops->convert(quantized, alpha, lfs::gpu_ops::ImageConversion::U16HWCToF32HWC, h, w, 1, {});
+                    }
+
                     if (is_nvcodec_available()) {
                         try {
                             write_derived_cache(*nvcodec, rgb, item.cache_key, lfs::core::getCurrentCUDAStream(), item.params);
 
                             const auto alpha_key = make_mask_cache_key(item.path, item.params);
-                            auto alpha_jpeg = nvcodec->encode_grayscale_to_jpeg2k(alpha, lfs::core::getCurrentCUDAStream(), true, true);
+                            auto alpha_jpeg = nvcodec->encode_grayscale_to_jpeg2k(alpha, lfs::core::getCurrentCUDAStream(), true, false);
                             put_in_jpeg_cache(alpha_key,
                                               std::make_shared<std::vector<uint8_t>>(std::move(alpha_jpeg)));
                         } catch (...) {

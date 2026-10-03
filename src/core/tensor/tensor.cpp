@@ -569,6 +569,14 @@ namespace lfs::core {
                     lazy->materializer = {};
 
                     try {
+                        // Materializers launch on the current stream. Without one they would
+                        // use the legacy stream, unordered with this tensor's declared home.
+#if LFS_HAS_CUDA
+                        std::optional<CUDAStreamGuard> home_stream;
+                        if (device_ == Device::GPU && internal::gpu_backend_tag(*this) == GpuBackend::CUDA && stream() != nullptr && getCurrentCUDAStream() == nullptr &&
+                            !is_stream_retired(stream()))
+                            home_stream.emplace(stream());
+#endif
                         materialized = internal::lazy_planner_execute_plan_for_tensor(*this, materializer);
                         validate_materialized(materialized);
                         lazy->result = materialized;

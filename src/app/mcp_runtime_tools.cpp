@@ -798,6 +798,9 @@ namespace lfs::app {
                     const auto snapshot = rendering->frameDemandLedger().snapshot();
                     frames = frame_snapshot_json(snapshot);
                     frames["view_ids"] = rendering->ledgerViews();
+                    const auto rates = rendering->getFrameRates();
+                    frames["ui_fps"] = rates.ui;
+                    frames["viewport_fps"] = rates.view;
                 }
             }
 
@@ -1180,6 +1183,9 @@ namespace lfs::app {
                 const auto snapshot = ledger.snapshot();
                 auto frames = frame_snapshot_json(snapshot);
                 frames["view_ids"] = rendering->ledgerViews();
+                const auto rates = rendering->getFrameRates();
+                frames["ui_fps"] = rates.ui;
+                frames["viewport_fps"] = rates.view;
                 return json{{"success", true}, {"frames", std::move(frames)}};
             });
 

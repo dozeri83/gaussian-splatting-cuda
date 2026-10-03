@@ -50,6 +50,8 @@ namespace lfs::core {
         const UndistortParams& params, float image_x, float image_y,
         float& normalized_x, float& normalized_y);
 
+    LFS_CORE_API Tensor inverse_distortion_sample_map(const UndistortParams& params, void* stream);
+
     LFS_CORE_API Tensor undistort_image(const Tensor& src, const UndistortParams& params,
                                         void* stream);
 

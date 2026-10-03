@@ -691,7 +691,13 @@ void distort_area_to_source_kernel(
     const uint stride = min(65535u, (count + 255u) / 256u) * 256u;
     for (uint index = tid.x; index < count; index += stride) {
         int x = int(index) % pc.width, y = int(index) / pc.width;
-        if (pc.mode == 0) {
+        if (pc.mode == 4) {
+            float ux, uy;
+            const bool valid = inverse_distortion((float(x) + 0.5 - params.src_cx) / params.src_fx,
+                                                  (float(y) + 0.5 - params.src_cy) / params.src_fy, params, ux, uy);
+            dst[2 * index] = valid ? ux : asfloat(0x7fc00000u);
+            dst[2 * index + 1] = valid ? uy : asfloat(0x7fc00000u);
+        } else if (pc.mode == 0) {
             if (pc.inverse != 0)
                 distort_image_to_source_kernel(src, dst, (Ptr<int, Access.ReadWrite>)pc.validity, pc.channels, x, y, params);
             else

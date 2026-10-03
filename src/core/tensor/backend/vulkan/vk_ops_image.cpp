@@ -41,7 +41,9 @@ namespace lfs::core::internal {
         const int width = inverse ? p.src_width : p.dst_width;
         const int height = inverse ? p.src_height : p.dst_height;
         const int channels = input.ndim() == 2 ? 1 : int(input.size(0));
-        auto output = Tensor::zeros(input.ndim() == 2 ? TensorShape{size_t(height), size_t(width)} : TensorShape{size_t(channels), size_t(height), size_t(width)}, Device::GPU);
+        auto output = Tensor::zeros(mode == 4 ? TensorShape{size_t(height), size_t(width), 2} : input.ndim() == 2 ? TensorShape{size_t(height), size_t(width)}
+                                                                                                                  : TensorShape{size_t(channels), size_t(height), size_t(width)},
+                                    Device::GPU);
         Tensor mask;
         if (validity) {
             // Use 32-bit stores so the warp does not require shaderInt8.

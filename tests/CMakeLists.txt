@@ -421,8 +421,15 @@ set_tests_properties(lichtfeld_format_tests PROPERTIES
     TIMEOUT 300
 )
 
-add_executable(lichtfeld_frame_tests test_frame_demand_ledger.cpp)
+add_executable(lichtfeld_frame_tests
+    test_frame_demand_ledger.cpp
+    test_framerate_controller.cpp
+    ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/framerate_controller.cpp)
+
+target_compile_definitions(lichtfeld_frame_tests PRIVATE LFS_STATIC_BUILD)
+
 target_include_directories(lichtfeld_frame_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core/include
     ${CMAKE_SOURCE_DIR}/src/visualizer/rendering
     ${CMAKE_SOURCE_DIR}/src/visualizer
     ${CMAKE_SOURCE_DIR}/src
@@ -777,6 +784,7 @@ set(TEST_FILES
     test_mask_loss.cpp
     test_mask_preprocess_fusion.cpp
     test_roi_weight_map.cpp
+    test_mesh_mask_kernels.cpp
     test_roi_weighted_losses.cpp
     test_checkpoint_resume.cpp
     test_component_config_serialization.cpp

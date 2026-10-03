@@ -590,7 +590,7 @@ namespace lfs::python {
         const auto* tm = get_trainer_manager();
         if (!tm)
             return false;
-        return tm->getState() == lfs::vis::TrainingState::Ready && tm->getCurrentIteration() == 0;
+        return tm->hasTrainer() && tm->isDatasetEditable();
     }
 
     core::param::DatasetConfig& PyDatasetConfig::params() {
@@ -1006,6 +1006,19 @@ namespace lfs::python {
                 [](PyOptimizationParams& self) { return self.params().eval_all; },
                 [](PyOptimizationParams&, bool v) { modify_params([v](auto& p) { p.eval_all = v; }); },
                 "Train on every image and evaluate all of them; no image is held out")
+            .def_prop_rw(
+                "eval_mask",
+                [](PyOptimizationParams& self) { return self.params().eval_mask; },
+                [](PyOptimizationParams&, const std::string& v) {
+                    modify_params([value = lfs::core::param::normalize_eval_mask_path(v)](
+                                      auto& p) { p.eval_mask = value; });
+                },
+                "Absolute mesh path used to select evaluated pixels")
+            .def_prop_rw(
+                "eval_mask_invert",
+                [](PyOptimizationParams& self) { return self.params().eval_mask_invert; },
+                [](PyOptimizationParams&, bool v) { modify_params([v](auto& p) { p.eval_mask_invert = v; }); },
+                "Evaluate pixels outside the mesh coverage")
             .def_prop_rw(
                 "background_improvements",
                 [](PyOptimizationParams& self) { return self.params().background_improvements; },

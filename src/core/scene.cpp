@@ -2638,7 +2638,7 @@ namespace lfs::core {
         std::lock_guard<std::mutex> lock(combined_model_mutex_);
         combined_model_allocator_ = std::move(allocator);
         model_cache_valid_.store(false, std::memory_order_release);
-        render_generation_.fetch_add(1, std::memory_order_acq_rel);
+        publishRenderInvalidation();
     }
 
     void Scene::rebuildModelCacheIfNeeded() const {

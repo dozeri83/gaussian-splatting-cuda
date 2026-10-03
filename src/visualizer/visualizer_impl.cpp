@@ -468,6 +468,18 @@ namespace lfs::vis {
         });
         callback_cleanup_.add([] { python::set_scene_generation_callback(nullptr); });
         app_store().scene_generation.set(python::get_scene_generation());
+        // RuntimeState writes publish view inputs just like native edits. Drain
+        // these subscriptions before planning the frame, including Python writes.
+        const auto bind_view_input = [this](auto& signal, const DirtyMask flags, const FrameReason reason) {
+            auto token = std::make_shared<core::reactive::SubscriptionToken>(
+                signal.subscribe([this, flags, reason](const auto&) {
+                    rendering_manager_->markDirty(flags, reason, "runtime_state");
+                }));
+            callback_cleanup_.add([token] { token->reset(); });
+        };
+        bind_view_input(app_store().scene_generation, DirtyFlag::ALL, FrameReason::SceneChange);
+        bind_view_input(app_store().selection_generation, DirtyFlag::SELECTION | DirtyFlag::OVERLAY, FrameReason::Selection);
+        bind_view_input(app_store().render_settings_generation, DirtyFlag::ALL, FrameReason::SettingsChange);
         auto active_tool_poll_cache_token = std::make_shared<core::reactive::SubscriptionToken>(
             app_store().active_tool.subscribe([](const std::string&) {
                 gui::PanelRegistry::instance().invalidate_poll_cache();
@@ -2535,6 +2547,8 @@ namespace lfs::vis {
                              "animation_cadence");
         }
         if (rendering_manager_) {
+            if (const auto deadline = rendering_manager_->fpsIdleDeadline())
+                consider_timeout(secondsUntilFrameDeadline(*deadline, FrameClock::now()), "fps_idle");
             if (const auto deadline = rendering_manager_->frameDemandLedger().nextDeadline(
                     std::chrono::steady_clock::now())) {
                 consider_timeout(secondsUntilFrameDeadline(*deadline, std::chrono::steady_clock::now()),
@@ -2653,6 +2667,9 @@ namespace lfs::vis {
             }
         }
 
+        if (gui_manager_)
+            gui_manager_->prepareLayout();
+
         // Update input controller with viewport bounds
         if (gui_manager_) {
             auto pos = gui_manager_->getViewportPos();
@@ -2722,6 +2739,7 @@ namespace lfs::vis {
             rendering_manager_->pollParkedArenaRetry();
         }
         const FrameDemand frame_demand = collectFrameDemand(viewport_export_locked, store_dirty);
+        rendering_manager_->refreshIdleFps(FrameClock::now());
         auto ledger_plan = rendering_manager_->frameDemandLedger().plan(
             std::chrono::steady_clock::now());
         if (!ledger_plan.present && frame_demand.shouldRenderFrame()) {
@@ -2750,7 +2768,16 @@ namespace lfs::vis {
         for (const auto id : visible_views) {
             auto& view = rendering_manager_->viewState(id);
             const auto mask = rendering_manager_->viewMask(id);
-            const auto dirty = view.dirty_mask_.load(std::memory_order_relaxed);
+            auto dirty = view.dirty_mask_.load(std::memory_order_relaxed);
+            // Reactive state updates can change view inputs without publishing a
+            // render event. Reconcile those inputs, while preserving existing
+            // surgical invalidations and deliberate deferrals.
+            if (const auto target = findView(id);
+                !dirty && target.valid() && view.has_rendered_input_fingerprint_ &&
+                !frame_demand.viewport_export_locked && !frame_demand.viewport_resize_deferring &&
+                rendering_manager_->viewInputFingerprint(*target.viewport, scene_manager_.get(), id) !=
+                    view.last_rendered_input_fingerprint_)
+                dirty = DirtyFlag::ALL;
             if (dirty) {
                 ledger_plan.present = true;
                 ledger_plan.render_views |= mask;
@@ -2827,6 +2854,7 @@ namespace lfs::vis {
         if (camera_frame)
             camera_animation_cadence_.startFrame(camera_frame_started);
 
+        rendering_manager_->sampleFrameRates(ledger_plan);
         std::optional<std::chrono::steady_clock::time_point>
             project_frame_started;
         if (ledger_plan.render_views != 0 && !viewport_export_locked && !interactive_transition_settling &&
@@ -2931,9 +2959,7 @@ namespace lfs::vis {
             window_manager_->updateWindowSize("pre_gui_render");
             presented_gui_frame = gui_manager_->render();
             window_manager_->refreshResizeCursor();
-            // Count presented frames (GUI-only included). Scene FPS still comes
-            // from framerate_controller_ inside renderVulkanFrame; this is
-            // measurement-only and does not affect pacing.
+            // Count only successful presents, including GUI-only frames.
             if (presented_gui_frame && rendering_manager_) {
                 rendering_manager_->countPresentedFrame(ledger_plan);
                 std::string reasons;
@@ -4668,26 +4694,20 @@ namespace lfs::vis {
     }
 
     void VisualizerImpl::handleLoadConfigFile(const std::filesystem::path& path) {
-        const auto current_params = trainer_manager_
-                                        ? trainer_manager_->getEditableTrainingParams(*parameter_manager_)
-                                        : parameter_manager_->createForDataset({}, {});
-        auto result = lfs::core::param::read_training_parameters_from_json(path, current_params);
+        const bool dataset_editable = !trainer_manager_ || trainer_manager_->isDatasetEditable();
+        auto result = parameter_manager_->importConfigFile(path, dataset_editable);
         if (!result) {
             state::ConfigLoadFailed{.path = path, .error = std::string(result.error().detail())}.emit();
             return;
         }
-        result->optimization.apply_step_scaling();
-        if (trainer_manager_) {
-            trainer_manager_->importTrainingParams(*result, *parameter_manager_);
-        } else {
-            parameter_manager_->importTrainingParams(*result);
-        }
-        parameter_manager_->markDirty();
 
         // Bump scene generation so all panels (e.g. training panel) pick up
         // the new parameter values.  Without this, importing a config after a
         // dataset is already loaded leaves the UI showing stale defaults.
         python::bump_scene_generation();
+        // The scene generation is a view input: refresh it once after import.
+        if (rendering_manager_)
+            rendering_manager_->markDirty(DirtyFlag::ALL, FrameReason::SceneChange);
     }
 
     void VisualizerImpl::handleTrainingCompleted([[maybe_unused]] const state::TrainingCompleted& event) {

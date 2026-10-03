@@ -32,6 +32,21 @@ namespace lfs::core::internal {
         }
         const bool scalar = input.ndim() == 2;
         const int channels = scalar ? 1 : int(input.size(0));
+        if (mode == 4) {
+            auto samples = Tensor::empty({size_t(p.src_height), size_t(p.src_width), 2}, Device::CPU);
+            auto* values = samples.ptr<float>();
+            for (int y = 0; y < p.src_height; ++y) {
+                for (int x = 0; x < p.src_width; ++x) {
+                    float nx, ny;
+                    if (!undistort_image_point(p, x + 0.5f, y + 0.5f, nx, ny))
+                        nx = ny = std::numeric_limits<float>::quiet_NaN();
+                    const auto i = 2 * (size_t(y) * p.src_width + x);
+                    values[i] = nx;
+                    values[i + 1] = ny;
+                }
+            }
+            return samples;
+        }
         const int width = inverse ? p.src_width : p.dst_width;
         const int height = inverse ? p.src_height : p.dst_height;
         auto output = Tensor::zeros(scalar ? TensorShape{size_t(height), size_t(width)} : TensorShape{size_t(channels), size_t(height), size_t(width)}, Device::CPU);
@@ -103,6 +118,15 @@ namespace lfs::core {
 #endif
 
 namespace lfs::core {
+    Tensor inverse_distortion_sample_map(const UndistortParams& params, void* stream) {
+#if LFS_HAS_CUDA
+        if (default_gpu_backend() == GpuBackend::CUDA)
+            return cuda::inverse_distortion_sample_map(params, static_cast<cudaStream_t>(stream));
+#endif
+        auto source = Tensor::empty({1}, Device::GPU);
+        return internal::backend_ops_for(source).image_warp(source, params, 4, true, nullptr, internal::ExecContext{});
+    }
+
     Tensor undistort_image(const Tensor& src, const UndistortParams& params, void* stream) {
 #if LFS_HAS_CUDA
         if (gpu_backend_of(src) == GpuBackend::CUDA)

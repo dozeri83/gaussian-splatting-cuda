@@ -134,6 +134,7 @@ namespace lfs::vis {
             // extent in the current request. Internal reconstruction resolution
             // may differ from that extent.
             bool matches_viewport_extent = false;
+            bool rendered = false; // Fresh output; cached and deferred results stay false.
 
             // Split-view right panel. The left panel reuses the `image` slot above
             // (rideshares the existing scene-image interop). When this is set, the
@@ -480,17 +481,37 @@ namespace lfs::vis {
         void clearLatestCameraMetrics();
 
         // FPS monitoring (scene renders vs. swapchain-presented GUI frames)
-        float getAverageFPS() const { return this->state().framerate_controller_.getAverageFPS(); }
-        float getPresentedAverageFPS() const {
-            return presented_framerate_controller_.getAverageFPS();
+        FrameRates getFrameRates() const { return frame_rates_.sample(); }
+        float getAverageFPS() const { return getFrameRates().view; }
+        float getPresentedAverageFPS() const { return getFrameRates().ui; }
+        void sampleFrameRates(const FramePlan& plan) {
+            gui_frame_rates_ = getFrameRates();
+            auto activity = plan.reasons;
+            activity.reset(static_cast<std::size_t>(FrameReason::FpsIdle));
+            fps_idle_frame_ = activity.none();
         }
         [[nodiscard]] std::uint32_t temporalConvergenceRemaining() const {
             return this->state().temporal_convergence_.remaining();
         }
         // Measurement only — does not affect scene render pacing/limiting.
+        FrameRates guiFrameRates() const { return gui_frame_rates_; }
+        bool isFpsIdleFrame() const { return fps_idle_frame_; }
         void countPresentedFrame(const FramePlan& plan) {
-            presented_framerate_controller_.beginFrame();
+            frame_rates_.countPresented(plan);
             frame_demand_ledger_.countPresented(plan);
+        }
+        void countViewRendered(const FramePlan& plan) {
+            frame_rates_.countView();
+            frame_demand_ledger_.countViewRendered(plan.render_views, plan);
+        }
+        std::optional<FrameClock::time_point> fpsIdleDeadline() const { return frame_rates_.idleDeadline(); }
+        void refreshIdleFps(const FrameClock::time_point now) {
+            if (frame_rates_.idleDue(now)) {
+                frame_demand_ledger_.request({.reason = FrameReason::FpsIdle,
+                                              .scope = FrameScope::Gui,
+                                              .views = 0,
+                                              .detail = "fps_window_expired"});
+            }
         }
 
         // Access to the auxiliary rendering engine used by point-cloud, mesh, and readback paths.
@@ -891,10 +912,9 @@ namespace lfs::vis {
 
         // Core components
         std::unique_ptr<lfs::rendering::RenderingEngine> engine_;
-
-        // Parallel presented-frame counter (GUI-only frames included). Does not
-        // drive pacing — scene path still uses this->state().framerate_controller_ alone.
-        mutable FramerateController presented_framerate_controller_;
+        FrameRateTracker frame_rates_;
+        FrameRates gui_frame_rates_;
+        bool fps_idle_frame_ = false;
 
         RenderTargetRegistry render_targets_;
         RenderTargetId preview_render_target_ = render_targets_.allocate();

@@ -33,4 +33,6 @@ namespace lfs::core::cuda {
 
     LFS_CORE_API Tensor undistort_mask(const Tensor& src, const UndistortParams& params, cudaStream_t stream);
 
+    Tensor inverse_distortion_sample_map(const UndistortParams& params, cudaStream_t stream);
+
 } // namespace lfs::core::cuda

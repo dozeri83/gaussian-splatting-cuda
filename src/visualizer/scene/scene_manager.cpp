@@ -455,6 +455,11 @@ namespace lfs::vis {
 
     SceneManager::SceneManager() {
         modifier_manager_ = std::make_unique<ModifierManager>(*this);
+        scene_.setRenderInvalidationCallback([] {
+            if (auto* rendering = services().renderingOrNull())
+                rendering->markDirty(DirtyFlag::SPLATS | DirtyFlag::MESH | DirtyFlag::OVERLAY,
+                                     FrameReason::SceneChange, "scene_cache");
+        });
         core::prop::set_undo_callback(
             [](const std::string& property_path,
                const std::any& old_value,

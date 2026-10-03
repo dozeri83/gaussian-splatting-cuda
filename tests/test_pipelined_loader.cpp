@@ -1,9 +1,11 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "core/cuda/lanczos_resize/lanczos_resize.hpp"
 #include "core/cuda/undistort/undistort.hpp"
 #include "core/image_io.hpp"
 #include "core/tensor_serialization.hpp"
+#include "core/tensor_upload.hpp"
 #include "cuda_backend_test.hpp"
 #include "io/nvcodec_image_loader.hpp"
 #include "io/pipelined_image_loader.hpp"
@@ -13,6 +15,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -22,8 +26,11 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <sstream>
+#include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -311,13 +318,15 @@ TEST_F(PipelinedImageLoaderTest, TrainingStartupOnlyPrefetchesBoundedBatch) {
     }
 }
 
-TEST_F(PipelinedImageLoaderTest, PngMaxWidthUsesOneDecode) {
+// Catches a CPU-decoded PNG still being downscaled by the host bilinear resampler
+// instead of the GPU Lanczos filter the JPEG path uses.
+TEST_F(PipelinedImageLoaderTest, PngMaxWidthUsesOneDecodeAndGpuLanczos) {
     PipelinedImageLoader loader(config());
     const auto before = loader.get_stats().cpu_decode_calls;
 
     LoadParams params;
     params.max_width = 16;
-    params.output_uint8 = true;
+    params.output_uint8 = false;
     const auto tensor = loader.load_image_immediate(mask_path_, params);
 
     const auto after = loader.get_stats().cpu_decode_calls;
@@ -325,6 +334,163 @@ TEST_F(PipelinedImageLoaderTest, PngMaxWidthUsesOneDecode) {
     ASSERT_TRUE(tensor.is_valid());
     ASSERT_EQ(tensor.shape().rank(), 3U);
     EXPECT_LE(std::max(tensor.shape()[1], tensor.shape()[2]), 16U);
+
+    auto [source, width, height, channels] = lfs::core::load_image(mask_path_);
+    ASSERT_NE(source, nullptr);
+    ASSERT_EQ(channels, 3);
+    const auto expected = lfs::core::lanczos_resize(
+        Tensor::from_blob(source, TensorShape({static_cast<size_t>(height), static_cast<size_t>(width), 3}),
+                          Device::CPU, DataType::UInt8)
+            .to(Device::CUDA),
+        static_cast<int>(tensor.shape()[1]), static_cast<int>(tensor.shape()[2]), 2, nullptr);
+    lfs::core::free_image(source);
+    ASSERT_EQ(expected.shape(), tensor.shape());
+    EXPECT_EQ(expected.cpu().to_vector(), tensor.cpu().to_vector());
+}
+
+// Catches the 16-bit path truncating to 8 bits or resizing on the host before upload.
+TEST_F(PipelinedImageLoaderTest, SixteenBitPngDownscalesWithGpuLanczosAtFullPrecision) {
+    constexpr int WIDTH = 31;
+    constexpr int HEIGHT = 23;
+    const lfs::test::licht::TemporaryDirectory temp("lfs-u16-downscale");
+    const auto png_path = temp.path / "image.png";
+    std::vector<uint16_t> pixels(static_cast<size_t>(WIDTH) * HEIGHT * 3);
+    for (size_t index = 0; index < pixels.size(); ++index)
+        pixels[index] = static_cast<uint16_t>((index * 3253 + index / 5) % 65536);
+    ASSERT_TRUE(save_png(png_path, pixels.data(), WIDTH, HEIGHT, 3, 16, 1));
+
+    auto settings = config();
+    settings.use_16bit_color = true;
+    PipelinedImageLoader loader(settings);
+    LoadParams params;
+    params.max_width = 17;
+    params.output_uint8 = false;
+    const auto actual = loader.load_image_immediate(png_path, params);
+    const auto [target_width, target_height] = lfs::core::resized_image_dimensions(WIDTH, HEIGHT, 1, params.max_width);
+    ASSERT_EQ(actual.shape(), TensorShape({3, static_cast<size_t>(target_height), static_cast<size_t>(target_width)}));
+
+    std::vector<float> source(pixels.size());
+    std::ranges::transform(pixels, source.begin(), [](const uint16_t value) { return value * (1.0f / 65535.0f); });
+    const auto expected = lfs::core::lanczos_resize(
+        Tensor::from_blob(source.data(), TensorShape({HEIGHT, WIDTH, 3}), Device::CPU, DataType::Float32).to(Device::CUDA),
+        target_height, target_width, 2, nullptr);
+    EXPECT_EQ(expected.cpu().to_vector(), actual.cpu().to_vector());
+}
+
+// Catches the alpha-as-mask path resizing RGBA on the host: its RGB would then differ
+// from the Lanczos result every other training image gets.
+TEST_F(PipelinedImageLoaderTest, AlphaAsMaskRgbUsesGpuLanczos) {
+    constexpr int WIDTH = 64;
+    constexpr int HEIGHT = 48;
+    const lfs::test::licht::TemporaryDirectory temp("lfs-rgba-downscale");
+    const auto image_path = temp.path / "image.png";
+    std::vector<uint8_t> rgba(static_cast<size_t>(WIDTH) * HEIGHT * 4);
+    for (size_t index = 0; index < rgba.size(); ++index)
+        rgba[index] = static_cast<uint8_t>((index * 73 + index / 11) % 256);
+    ASSERT_TRUE(save_png(image_path, rgba.data(), WIDTH, HEIGHT, 4, 8, 1));
+
+    PipelinedImageLoader loader(config());
+    ImageRequest request{};
+    request.sequence_id = 3;
+    request.path = image_path;
+    request.params.resize_factor = 2;
+    request.extract_alpha_as_mask = true;
+    loader.prefetch({request});
+    const auto ready = loader.try_get_for(std::chrono::seconds(20));
+    ASSERT_TRUE(ready.has_value());
+    ASSERT_TRUE(ready->error.empty()) << ready->error;
+    ASSERT_TRUE(ready->mask.has_value());
+    ASSERT_EQ(ready->tensor.shape(), TensorShape({3, HEIGHT / 2, WIDTH / 2}));
+    ASSERT_EQ(ready->mask->shape(), TensorShape({HEIGHT / 2, WIDTH / 2}));
+
+    const auto expected = lfs::core::lanczos_resize(
+        Tensor::from_blob(rgba.data(), TensorShape({HEIGHT, WIDTH, 4}), Device::CPU, DataType::UInt8).to(Device::CUDA),
+        HEIGHT / 2, WIDTH / 2, 2, nullptr);
+    EXPECT_EQ(expected.slice(0, 0, 3).contiguous().cpu().to_vector(), ready->tensor.cpu().to_vector());
+}
+
+namespace {
+    // Loads one alpha-as-mask request twice; the second load is served from the derived caches.
+    std::array<std::pair<std::vector<float>, std::vector<float>>, 2> load_rgba_twice(
+        PipelinedImageLoader& loader, const std::filesystem::path& path, const LoadParams& params) {
+        std::array<std::pair<std::vector<float>, std::vector<float>>, 2> loads;
+        for (size_t pass = 0; pass < loads.size(); ++pass) {
+            ImageRequest request{};
+            request.sequence_id = pass;
+            request.path = path;
+            request.params = params;
+            request.extract_alpha_as_mask = true;
+            loader.prefetch({request});
+            const auto ready = loader.try_get_for(std::chrono::seconds(20));
+            EXPECT_TRUE(ready.has_value());
+            if (!ready)
+                return loads;
+            EXPECT_TRUE(ready->error.empty()) << ready->error;
+            EXPECT_TRUE(ready->mask.has_value());
+            if (!ready->mask)
+                return loads;
+            loads[pass] = {ready->tensor.to(DataType::Float32).cpu().to_vector(), ready->mask->cpu().to_vector()};
+        }
+        EXPECT_EQ(loader.get_stats().hot_path_hits, 1U);
+        return loads;
+    }
+} // namespace
+
+// Catches the alpha-as-mask path decoding 16-bit RGBA through an 8-bit buffer, or caching its alpha at 8 bits
+// so that later epochs see a different alpha than the first.
+TEST_F(PipelinedImageLoaderTest, AlphaAsMaskKeepsSixteenBitColorAndAlpha) {
+    constexpr int WIDTH = 19;
+    constexpr int HEIGHT = 13;
+    const lfs::test::licht::TemporaryDirectory temp("lfs-u16-rgba");
+    const auto image_path = temp.path / "image.png";
+    std::vector<uint16_t> rgba(static_cast<size_t>(WIDTH) * HEIGHT * 4);
+    for (size_t index = 0; index < rgba.size(); ++index)
+        rgba[index] = static_cast<uint16_t>((index * 3253 + index / 5) % 65536);
+    ASSERT_TRUE(save_png(image_path, rgba.data(), WIDTH, HEIGHT, 4, 16, 1));
+
+    auto settings = config();
+    settings.use_16bit_color = true;
+    PipelinedImageLoader loader(settings);
+    LoadParams params;
+    params.resize_factor = 1;
+    params.output_uint8 = false;
+    const auto loads = load_rgba_twice(loader, image_path, params);
+    constexpr size_t PIXELS = static_cast<size_t>(WIDTH) * HEIGHT;
+    for (size_t pass = 0; pass < loads.size(); ++pass) {
+        const auto& [rgb, alpha] = loads[pass];
+        ASSERT_EQ(rgb.size(), 3 * PIXELS) << "pass " << pass;
+        ASSERT_EQ(alpha.size(), PIXELS) << "pass " << pass;
+        for (size_t pixel = 0; pixel < PIXELS; ++pixel) {
+            for (size_t c = 0; c < 3; ++c)
+                EXPECT_NEAR(rgb[c * PIXELS + pixel], rgba[pixel * 4 + c] / 65535.0f, 1e-6f)
+                    << "pass " << pass << " c=" << c << " pixel=" << pixel;
+            EXPECT_NEAR(alpha[pixel], rgba[pixel * 4 + 3] / 65535.0f, 1e-6f) << "pass " << pass << " pixel=" << pixel;
+        }
+    }
+}
+
+// Catches an alpha that differs between the first load and later cache hits (an 8-bit cache, or a first load off
+// the cache's 16-bit grid), which can flip a thresholded mask between epochs.
+TEST_F(PipelinedImageLoaderTest, AlphaAsMaskCacheKeepsResizedAlpha) {
+    constexpr int WIDTH = 64;
+    constexpr int HEIGHT = 48;
+    const lfs::test::licht::TemporaryDirectory temp("lfs-u8-rgba-cache");
+    const auto image_path = temp.path / "image.png";
+    std::vector<uint8_t> rgba(static_cast<size_t>(WIDTH) * HEIGHT * 4);
+    for (size_t index = 0; index < rgba.size(); ++index)
+        rgba[index] = static_cast<uint8_t>((index * 73 + index / 11) % 256);
+    ASSERT_TRUE(save_png(image_path, rgba.data(), WIDTH, HEIGHT, 4, 8, 1));
+
+    PipelinedImageLoader loader(config());
+    LoadParams params;
+    params.resize_factor = 2;
+    const auto loads = load_rgba_twice(loader, image_path, params);
+    const auto& first = loads[0].second;
+    const auto& cached = loads[1].second;
+    ASSERT_EQ(first.size(), static_cast<size_t>(WIDTH / 2) * (HEIGHT / 2));
+    ASSERT_EQ(cached.size(), first.size());
+    for (size_t pixel = 0; pixel < first.size(); ++pixel)
+        EXPECT_EQ(cached[pixel], first[pixel]) << "pixel=" << pixel;
 }
 
 TEST_F(PipelinedImageLoaderTest, ImmediateCacheHitDoesNotRepeatResize) {
@@ -629,4 +795,75 @@ TEST(SidecarResumeSampler, DeterministicCameraStreamContinuesAtCheckpointOffset)
         ASSERT_TRUE(actual.has_value());
         EXPECT_EQ(*actual, *expected) << "camera stream diverged at post-resume sample " << i;
     }
+}
+
+// Fails when the immediate CPU decode converts or caches the image on the legacy default stream:
+// the caller's non-blocking stream then reads the image before it is written, or the call waits
+// behind unrelated legacy-stream work (held here by a host callback until the watchdog fires).
+TEST_F(PipelinedImageLoaderTest, ImmediateCpuDecodeStaysOnTheCallerStream) {
+    constexpr int HEIGHT = 48, WIDTH = 64;
+    constexpr size_t PIXELS = static_cast<size_t>(WIDTH) * HEIGHT;
+    std::vector<uint8_t> pixels(PIXELS * 3);
+    std::vector<float> expected(pixels.size());
+    for (size_t i = 0; i < pixels.size(); ++i) {
+        pixels[i] = static_cast<uint8_t>((i * 7 + i / 192) % 256);
+        expected[(i % 3) * PIXELS + i / 3] = pixels[i] * (1.0f / 255.0f);
+    }
+    const lfs::test::licht::TemporaryDirectory temp("lfs-immediate-stream");
+    // The warm-up file primes the decoder, encoder and allocations so the gated call allocates nothing new; its
+    // pixels differ so a reused buffer cannot pass for the checked image.
+    const auto warm = temp.path / "warm.png";
+    const auto png = temp.path / "image.png";
+    std::vector<uint8_t> warm_pixels(pixels.size());
+    std::ranges::transform(pixels, warm_pixels.begin(), [](const uint8_t value) { return static_cast<uint8_t>(~value); });
+    ASSERT_TRUE(save_png(warm, warm_pixels.data(), WIDTH, HEIGHT, 3, 8, 1));
+    ASSERT_TRUE(save_png(png, pixels.data(), WIDTH, HEIGHT, 3, 8, 1));
+
+    lfs::core::TensorWorkQueue caller_queue(lfs::core::GpuBackend::CUDA);
+    const auto caller = static_cast<cudaStream_t>(caller_queue.native_handle());
+    std::optional<PipelinedImageLoader> loader;
+    {
+        const lfs::core::TensorWorkQueue::Scope scope(caller_queue);
+        loader.emplace(config());
+        ASSERT_TRUE(loader->load_image_immediate(warm, LoadParams{}).cpu().is_valid());
+    }
+    std::atomic<bool> released{false};
+    ASSERT_EQ(cudaLaunchHostFunc(
+                  cudaStreamLegacy,
+                  [](void* flag) {
+                      while (!static_cast<std::atomic<bool>*>(flag)->load())
+                          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                  },
+                  &released),
+              cudaSuccess);
+    std::thread watchdog([&released] {
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        released = true;
+    });
+
+    std::vector<float> loaded;
+    std::chrono::steady_clock::duration elapsed{};
+    {
+        const lfs::core::TensorWorkQueue::Scope scope(caller_queue);
+        const auto start = std::chrono::steady_clock::now();
+        const auto image = loader->load_image_immediate(png, LoadParams{});
+        elapsed = std::chrono::steady_clock::now() - start;
+        // Read back on the caller stream alone while the legacy stream is still held.
+        EXPECT_EQ(image.dtype(), DataType::Float32);
+        if (image.dtype() == DataType::Float32) {
+            loaded.resize(image.numel());
+            EXPECT_EQ(cudaMemcpyAsync(loaded.data(), image.ptr<float>(), loaded.size() * sizeof(float),
+                                      cudaMemcpyDeviceToHost, caller),
+                      cudaSuccess);
+            EXPECT_EQ(cudaStreamSynchronize(caller), cudaSuccess);
+        }
+        EXPECT_FALSE(released.load()) << "the readback finished after the watchdog released the legacy stream";
+    }
+    released = true;
+    watchdog.join();
+    ASSERT_EQ(cudaStreamSynchronize(cudaStreamLegacy), cudaSuccess);
+    loader.reset();
+
+    EXPECT_LT(elapsed, std::chrono::seconds(2));
+    EXPECT_EQ(loaded, expected);
 }

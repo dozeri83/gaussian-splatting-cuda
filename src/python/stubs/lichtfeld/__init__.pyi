@@ -2180,6 +2180,20 @@ class OptimizationParams:
     def eval_all(self, arg: bool, /) -> None: ...
 
     @property
+    def eval_mask(self) -> str:
+        """Absolute mesh path used to select evaluated pixels"""
+
+    @eval_mask.setter
+    def eval_mask(self, arg: str, /) -> None: ...
+
+    @property
+    def eval_mask_invert(self) -> bool:
+        """Evaluate pixels outside the mesh coverage"""
+
+    @eval_mask_invert.setter
+    def eval_mask_invert(self, arg: bool, /) -> None: ...
+
+    @property
     def background_improvements(self) -> bool:
         """
         Improve distant background reconstruction (MRNF): far-field seeding and splits, decay relief, growth cap, per-splat position steps, visibility-ratio growth ranking, paced capacity fill
@@ -2521,14 +2535,18 @@ class OptimizationParams:
 
     @property
     def undistort(self) -> bool:
-        """Remove lens distortion before training: each image and its mask, depth and normal map are resampled once from full resolution into a distortion-free pinhole camera, which training then uses. Alternative to --gut for distorted or non-pinhole cameras"""
+        """
+        Remove lens distortion before training: each image and its mask, depth and normal map are resampled once from full resolution into a distortion-free pinhole camera, which training then uses. Alternative to --gut for distorted or non-pinhole cameras
+        """
 
     @undistort.setter
     def undistort(self, arg: bool, /) -> None: ...
 
     @property
     def eval_space(self) -> EvalSpace:
-        """Reference images for evaluation with --undistort: distorted = the original images, with the render warped into the original lens; undistorted = the undistorted training images"""
+        """
+        Reference images for evaluation with --undistort: distorted = the original images, with the render warped into the original lens; undistorted = the undistorted training images
+        """
 
     @eval_space.setter
     def eval_space(self, arg: EvalSpace, /) -> None: ...
@@ -2687,8 +2705,15 @@ def run(path: str) -> None:
 def list_scene() -> None:
     """Print the scene graph tree"""
 
-def on_frame(callback: Callable) -> None:
-    """Register a callback to be called each frame with delta time (seconds)"""
+def on_frame(callback: Callable, duration_s: object | None = None) -> None:
+    """
+    Register a frame callback with an optional positive lifetime in seconds (defaults to 10 seconds).
+    """
+
+def set_frame_callback(callback: Callable, duration_s: object | None = None) -> None:
+    """
+    Register a frame callback with an optional positive lifetime in seconds (defaults to 10 seconds).
+    """
 
 def stop_animation() -> None:
     """Stop any running animation (clears frame callback)"""
