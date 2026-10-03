@@ -515,7 +515,8 @@ body.fit-9 #status-message-section {
     overflow: hidden;
 }
 
-body.fit-9 #status-left {
+body.fit-9 #status-left,
+body.fit-9 #input-device-toggle {
     display: none;
 }
 

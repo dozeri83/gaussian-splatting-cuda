@@ -561,10 +561,9 @@ TEST(MetricsEvaluatorUndistort, UndistortedGroundTruthEqualsTrainingLoaderImage)
 
 // Catches the evaluation reference being downscaled by the host bilinear decoder while
 // training images get the GPU Lanczos filter.
-TEST(MetricsEvaluatorImages, DownscaledGroundTruthMatchesGpuLanczos) {
-    if (!torch::cuda::is_available()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
+class MetricsEvaluatorImages : public lfs::test::CudaBackendTest {};
+
+TEST_F(MetricsEvaluatorImages, DownscaledGroundTruthMatchesGpuLanczos) {
     ensure_image_loader();
 
     const auto tmp = std::filesystem::temp_directory_path() / "lfs_downscaled_eval_gt";
@@ -613,10 +612,7 @@ TEST(MetricsEvaluatorImages, DownscaledGroundTruthMatchesGpuLanczos) {
 
 // Catches an RGBA reference that keeps the colour stored under transparent pixels, a binarised alpha, or a
 // reference composited over the configured colour instead of the background the render uses.
-TEST(MetricsEvaluatorImages, RgbaReferenceShowsTheRenderBackgroundWhereTransparent) {
-    if (!torch::cuda::is_available()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
+TEST_F(MetricsEvaluatorImages, RgbaReferenceShowsTheRenderBackgroundWhereTransparent) {
     ensure_image_loader();
 
     const auto tmp = std::filesystem::temp_directory_path() / "lfs_rgba_eval_reference";
@@ -789,11 +785,11 @@ TEST(MetricsEvaluatorUndistort, SharedPreparationMatchesCachedInteractiveInputsI
     std::filesystem::remove_all(tmp);
 }
 
-// A keep-mask narrower than the 11x11 SSIM window has no complete window after erosion; the
-// view must stay measured (SSIM over partial windows) instead of being dropped or reported as 0.
+class MetricsEvaluatorStreams : public lfs::test::CudaBackendTest {};
+
 // Catches evaluation reading render outputs on the caller's stream before the render stream has
 // produced them: the render waits behind a gate while the evaluation work is queued.
-TEST(MetricsEvaluatorUndistort, WaitsForRenderOutputsFromAnotherStream) {
+TEST_F(MetricsEvaluatorStreams, WaitsForRenderOutputsFromAnotherStream) {
     ensure_image_loader();
     const auto tmp = std::filesystem::temp_directory_path() / "lfs_eval_render_stream";
     std::filesystem::remove_all(tmp);
@@ -861,6 +857,8 @@ TEST(MetricsEvaluatorUndistort, WaitsForRenderOutputsFromAnotherStream) {
     std::filesystem::remove_all(tmp);
 }
 
+// A keep-mask narrower than the 11x11 SSIM window has no complete window after erosion; the
+// view must stay measured (SSIM over partial windows) instead of being dropped or reported as 0.
 TEST(MetricsEvaluatorUndistort, ThinMaskFallsBackToPartialSsimWindows) {
     ensure_image_loader();
 
