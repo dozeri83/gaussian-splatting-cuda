@@ -1088,6 +1088,7 @@ list(APPEND TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/mcp_node_tools.cpp
     ${CMAKE_SOURCE_DIR}/src/app/mcp_node_resources.cpp
     ${CMAKE_SOURCE_DIR}/src/app/mcp_node_editor_tools.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/mcp_pointer_tool.cpp
     ${CMAKE_SOURCE_DIR}/src/app/mcp_operator_schema.cpp
     ${CMAKE_SOURCE_DIR}/src/app/converter.cpp
     ${CMAKE_SOURCE_DIR}/src/app/converter_output_paths.cpp
