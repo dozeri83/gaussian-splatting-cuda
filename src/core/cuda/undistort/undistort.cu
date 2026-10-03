@@ -225,8 +225,10 @@ namespace lfs::core {
                 return 1.0f;
             constexpr float PI = 3.14159265358979323846f;
             const float pi_value = PI * value;
-            return sinf(pi_value) / pi_value *
-                   (sinf(pi_value / static_cast<float>(LANCZOS_RADIUS)) /
+            // Preserve sinc zeros near integer taps even with CUDA fast math.
+            // Border renormalization amplifies sine argument-reduction error.
+            return sinpif(value) / pi_value *
+                   (sinpif(value / static_cast<float>(LANCZOS_RADIUS)) /
                     (pi_value / static_cast<float>(LANCZOS_RADIUS)));
         }
 
