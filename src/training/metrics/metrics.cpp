@@ -397,7 +397,7 @@ namespace lfs::training {
     } // namespace
 
     lfs::core::Tensor ssim_evaluation_mask(const lfs::core::Tensor& mask, const bool complete_windows_only,
-                                          const std::string_view camera_name) {
+                                           const std::string_view camera_name) {
         if (!complete_windows_only || !mask.is_valid())
             return mask;
         auto complete_windows = lfs::training::erode_metrics_mask(mask, 5);
