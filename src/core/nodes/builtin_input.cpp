@@ -54,9 +54,9 @@ namespace lfs::nodes {
             const auto count = context.size();
             if (captured && count != size)
                 throw FieldNodeError(node_name, std::format(
-                    "Stored selection was captured on {} splats but receives {} — a node or modifier before it "
-                    "changes the count; recapture or move it before that change.",
-                    core::format_count(size), core::format_count(count)));
+                                                    "Stored selection was captured on {} splats but receives {} — a node or modifier before it "
+                                                    "changes the count; recapture or move it before that change.",
+                                                    core::format_count(size), core::format_count(count)));
             if (!cache->device_values.is_valid() || cache->device_values.device() != context.device() ||
                 core::gpu_backend_of(cache->device_values) != core::gpu_backend_of(positions)) {
                 if (!size) {
