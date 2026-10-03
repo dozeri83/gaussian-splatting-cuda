@@ -881,7 +881,7 @@ namespace lfs::core {
                 // from the old home before changing allocator ownership metadata.
                 internal::backend_ops_for(*this).bridge(
                     internal::ExecContext{state_->stream}, internal::ExecContext{stream});
-                if (!has_external_storage()) {
+                if (!has_external_storage() && data_ != nullptr) {
                     internal::backend_ops_for(*this).rehome_stream(
                         internal::storage_ref(*this), internal::ExecContext{stream});
                 }
