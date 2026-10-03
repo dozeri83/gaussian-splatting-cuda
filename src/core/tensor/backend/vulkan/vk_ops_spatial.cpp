@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstddef>
+#include <vector>
 
 namespace lfs::core::internal {
     namespace {
@@ -19,12 +20,14 @@ namespace lfs::core::internal {
             uint64_t heads;
             uint64_t next;
             uint64_t output;
+            uint64_t queries;
             uint32_t count;
             uint32_t bucket_mask;
             float radius;
-            uint32_t padding;
+            uint32_t exclude_self;
+            uint32_t query_begin, query_end;
         };
-        static_assert(sizeof(RadiusPush) == 56);
+        static_assert(sizeof(RadiusPush) == 72);
 
         struct ProjectionPush {
             std::array<float, 4> row0;
@@ -49,20 +52,22 @@ namespace lfs::core::internal {
         static_assert(offsetof(ProjectionPush, scale) == 88);
     } // namespace
 
-    void VulkanBackendOps::radius_neighbors(const StorageRef points, const StorageRef references,
-                                            const StorageRef heads, const StorageRef next, const StorageRef output,
-                                            const size_t count, const size_t buckets, const float radius, ExecContext) {
-        LFS_FACADE_TRACE(radius_neighbors);
+    static void radiusQuery(const StorageRef points, const StorageRef references,
+                            const StorageRef heads, const StorageRef next, const StorageRef output,
+                            const size_t count, const size_t buckets, const float radius, const bool exclude_self,
+                            const std::optional<StorageRef> queries, const int32_t max_count, const bool spacing = false) {
         const auto context = acquire_vulkan_context();
-        const RadiusPush push{
+        RadiusPush push{
             .points = vk::address(points),
             .references = vk::address(references),
             .heads = vk::address(heads),
             .next = vk::address(next),
             .output = vk::address(output),
+            .queries = queries ? vk::address(*queries) : 0,
             .count = static_cast<uint32_t>(count),
             .bucket_mask = static_cast<uint32_t>(buckets - 1),
             .radius = radius,
+            .exclude_self = static_cast<uint32_t>(max_count ? max_count : exclude_self),
         };
         const auto dispatch = [&](const uint32_t mode, const std::span<const StorageRef> reads,
                                   const std::span<const StorageRef> writes, const size_t work) {
@@ -76,11 +81,52 @@ namespace lfs::core::internal {
         };
         const std::array build_reads{points, references, heads};
         const std::array build_writes{heads, next};
-        dispatch(0, build_reads, build_writes, count);
-        const std::array query_reads{points, references, heads, next};
+        const size_t batch = exclude_self && !max_count ? 8192 : count;
+        for (size_t begin = 0; begin < count; begin += batch) {
+            push.query_begin = static_cast<uint32_t>(begin);
+            push.query_end = static_cast<uint32_t>(std::min(begin + batch, count));
+            dispatch(0, build_reads, build_writes, push.query_end - begin);
+            if (exclude_self && !max_count)
+                context->wait(context->recorders().flush_current());
+        }
+        std::vector<StorageRef> query_reads{points, references, heads, next};
+        if (queries)
+            query_reads.push_back(*queries);
         const std::array query_writes{output};
-        // Four byte results per invocation: one owner writes each output word.
-        dispatch(1, query_reads, query_writes, (count + 3) / 4);
+        // Boolean mode packs four results per output word. Counts own one Int32.
+        const size_t query_batch = exclude_self && !max_count ? 8192 : count;
+        const uint32_t mode = spacing ? 3u : (max_count ? 2u : 1u);
+        for (size_t begin = 0; begin < count; begin += query_batch) {
+            push.query_begin = static_cast<uint32_t>(begin);
+            push.query_end = static_cast<uint32_t>(std::min(begin + query_batch, count));
+            const size_t work = max_count || spacing ? push.query_end - begin : (push.query_end - begin + 3) / 4;
+            dispatch(mode, query_reads, query_writes, work);
+            if (exclude_self && !max_count)
+                context->wait(context->recorders().flush_current());
+        }
+    }
+
+    void VulkanBackendOps::point_neighbor_spacing(const StorageRef points, const StorageRef references,
+                                                  const StorageRef heads, const StorageRef next, const StorageRef output,
+                                                  const size_t count, const size_t buckets, const float cell_width, ExecContext) {
+        LFS_FACADE_TRACE(point_neighbor_spacing);
+        radiusQuery(points, references, heads, next, output, count, buckets, cell_width, false, std::nullopt, 0, true);
+    }
+
+    void VulkanBackendOps::radius_neighbors(const StorageRef points, const StorageRef references,
+                                            const StorageRef heads, const StorageRef next, const StorageRef output,
+                                            const size_t count, const size_t buckets, const float radius, const bool exclude_self,
+                                            const std::optional<StorageRef> queries, ExecContext) {
+        LFS_FACADE_TRACE(radius_neighbors);
+        radiusQuery(points, references, heads, next, output, count, buckets, radius, exclude_self, queries, 0);
+    }
+
+    void VulkanBackendOps::radius_neighbor_counts(const StorageRef points, const StorageRef references,
+                                                  const StorageRef heads, const StorageRef next, const StorageRef output,
+                                                  const size_t count, const size_t buckets, const float radius, const int32_t max_count,
+                                                  const std::optional<StorageRef> queries, ExecContext) {
+        LFS_FACADE_TRACE(radius_neighbor_counts);
+        radiusQuery(points, references, heads, next, output, count, buckets, radius, true, queries, max_count);
     }
 
     void VulkanBackendOps::rasterize_points(const PointRasterProgram& program, ExecContext) {

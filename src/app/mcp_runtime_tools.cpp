@@ -4,6 +4,7 @@
 #include "app/mcp_runtime_tools.hpp"
 #include "app/mcp_app_utils.hpp"
 #include "app/mcp_event_handlers.hpp"
+#include "app/mcp_node_tools.hpp"
 
 #include "core/event_bridge/scoped_handler.hpp"
 #include "core/events.hpp"
@@ -74,7 +75,8 @@ namespace lfs::app {
                         {"live_holders", std::move(holders)}};
         }
 
-        constexpr std::array<std::string_view, 7> kRuntimeJobIds = {
+        constexpr std::array<std::string_view, 8> kRuntimeJobIds = {
+            "nodes.evaluate",
             "editor.python",
             "training.main",
             "export.scene",
@@ -109,6 +111,8 @@ namespace lfs::app {
         }
 
         std::string_view runtime_job_label(const std::string_view job_id) {
+            if (job_id == "nodes.evaluate")
+                return "Node evaluation";
             if (job_id == "editor.python") {
                 return "Python Editor";
             }
@@ -134,6 +138,8 @@ namespace lfs::app {
         }
 
         json runtime_job_event_types_json(const std::string_view job_id) {
+            if (job_id == "nodes.evaluate")
+                return json::array({"nodes.evaluation.started", "nodes.evaluation.progress", "nodes.evaluation.completed", "nodes.evaluation.failed"});
             if (job_id == "editor.python") {
                 return json::array({"editor.started", "editor.completed"});
             }
@@ -205,6 +211,11 @@ namespace lfs::app {
                 });
             }
 
+            json node_tools = json::array();
+            for (const auto& tool : mcp::ToolRegistry::instance().list_tools())
+                if (tool.metadata.category == "nodes")
+                    node_tools.push_back(mcp::tool_to_json(tool).at("name"));
+
             return json{
                 {"catalog_uri", "lichtfeld://runtime/catalog"},
                 {"state_uri", "lichtfeld://runtime/state"},
@@ -214,6 +225,7 @@ namespace lfs::app {
                 {"supported_event_types", supported_runtime_event_types_json()},
                 {"jobs", std::move(jobs)},
                 {"events", std::move(events)},
+                {"nodes", {{"tools", std::move(node_tools)}, {"resources", json::array({"lichtfeld://nodes/types", "lichtfeld://nodes/trees", "lichtfeld://nodes/trees/<uuid>", "lichtfeld://nodes/stacks", "lichtfeld://nodes/stacks/<node uuid>", "lichtfeld://nodes/editor"})}, {"job_id", "nodes.evaluate"}}},
             };
         }
 
@@ -698,6 +710,12 @@ namespace lfs::app {
             }
 
             auto* const gui = viewer_impl->getGuiManager();
+
+            if (job_id == "nodes.evaluate") {
+                auto result = node_evaluation_job(*viewer_impl);
+                add_runtime_job_links(result);
+                return result;
+            }
 
             if (job_id == "editor.python") {
                 return editor_job_json(include_output, output_max_chars, output_tail);

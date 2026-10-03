@@ -263,6 +263,21 @@ set(CORE_SOURCES
         tensor_debug.cpp
         training_snapshot.cpp
         mesh_data.cpp
+        nodes/types.cpp
+        nodes/registry.cpp
+        nodes/tree.cpp
+        nodes/evaluator.cpp
+        nodes/device.cpp
+        nodes/builtin.cpp
+        nodes/builtin_text.cpp
+        nodes/builtin_common.cpp
+        nodes/builtin_input.cpp
+        nodes/builtin_utilities.cpp
+        nodes/builtin_selection.cpp
+        nodes/builtin_geometry.cpp
+        nodes/builtin_splat.cpp
+        nodes/builtin_cleanup.cpp
+        nodes/builtin_conversion.cpp
         system_info.cpp
         user_paths.cpp
         legacy_settings_migration.cpp
@@ -301,6 +316,15 @@ add_dependencies(lfs_core lfs_core_abi_stamp)
 target_include_directories(lfs_core BEFORE PRIVATE "${LFS_CORE_ABI_INCLUDE_DIR}")
 
 target_compile_definitions(lfs_core PRIVATE LFS_CORE_EXPORTS LFS_TENSOR_PRIVATE_ACCESS)
+
+# Keep headless descriptors and the English UI catalogue identical, including
+# before the localisation manager is initialised.
+set(_node_locale "${CMAKE_SOURCE_DIR}/src/visualizer/gui/resources/locales/en.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_node_locale}")
+file(READ "${_node_locale}" _node_locale_json)
+string(JSON LFS_NODE_TEXT GET "${_node_locale_json}" nodes)
+configure_file(nodes/builtin_text.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/builtin_text.hpp" @ONLY)
+target_include_directories(lfs_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_include_directories(lfs_core
     PUBLIC

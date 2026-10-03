@@ -107,6 +107,9 @@ namespace lfs::vis {
         // Input bindings (customizable hotkeys/mouse)
         input::InputBindings& getBindings() { return bindings_; }
         const input::InputBindings& getBindings() const { return bindings_; }
+        [[nodiscard]] bool isPanDrag(input::MouseButton button, int modifiers) const {
+            return bindings_.getActionForDrag(getCurrentToolMode(), button, modifiers, held_keys_) == input::Action::CAMERA_PAN;
+        }
         void loadInputProfile(const std::string& name) { bindings_.loadProfile(name); }
         [[nodiscard]] CameraNavigationMode cameraNavigationMode() const { return camera_navigation_mode_; }
         void setCameraNavigationMode(CameraNavigationMode mode);
@@ -116,6 +119,8 @@ namespace lfs::vis {
         // Trackpad navigation reads two-finger swipes over the viewport as
         // orbit/pan/zoom. Mouse drags and pinch zoom work in both modes.
         [[nodiscard]] const TrackpadPreferenceState& trackpadPreferences() const { return trackpad_; }
+        [[nodiscard]] int trackpadTouchCount() const { return trackpad_touches_; }
+        [[nodiscard]] float wheelZoomSpeed() const { return viewport().camera.getZoomSpeed(); }
         void setTrackpadPreferences(const TrackpadPreferenceState& state) { trackpad_ = state; }
         void restoreProjectNavigation(
             CameraNavigationMode mode,

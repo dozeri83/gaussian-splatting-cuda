@@ -54,6 +54,7 @@
 #include "tools/selection_tool.hpp"
 #include "tools/unified_tool_registry.hpp"
 #include "visualizer/app_store.hpp"
+#include "visualizer/nodes/modifier_manager.hpp"
 #include "visualizer_impl.hpp"
 #include "window/vulkan_context.hpp"
 #include <SDL3/SDL_events.h>
@@ -2992,6 +2993,11 @@ namespace lfs::vis {
             vksplat_spirv_preload_future_ = std::async(
                 std::launch::async, [] { preloadVkSplatSpirvFiles(); });
         }
+        if (scene_manager_ && presented_gui_frame)
+            scene_manager_->modifierManager().recordViewerFrame(
+                std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - now).count(),
+                project_frame_started.has_value());
+
         // Render-on-demand: demand owns cadence; MAILBOX only retires GPU work.
         // The demand walk is the expensive part of the frame loop (notably the
         // visible Python panel traversal). Reuse the demand collected before the
