@@ -60,6 +60,7 @@ namespace lfs::training {
             .photometric_weight = photometric_weight,
             .opacity_penalty = opacity_penalty,
             .alpha_consistency = alpha_consistency,
+            .mesh_coverage = mesh_coverage,
         };
     } // namespace
 

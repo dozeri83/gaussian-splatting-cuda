@@ -255,7 +255,7 @@ TEST_F(SelectionServiceInteractionsTest, ColourPickMapsEvaluatedElementBackToSto
     service_->setTestingHoveredGaussianId(1);
 
     const auto picked = service_->pickAtScreen(50.0f, 50.0f);
-    ASSERT_TRUE(picked.has_value()) << picked.error();
+    ASSERT_TRUE(picked.has_value()) << picked.error().message;
     EXPECT_TRUE(picked->colour_from_stored_payload);
     ASSERT_EQ(picked->stored_index, std::optional<std::size_t>(1));
     EXPECT_NEAR(picked->colour.r, 0.8f, 1e-5f);
@@ -280,7 +280,7 @@ TEST_F(SelectionServiceInteractionsTest, ColourPickFallsBackToEvaluatedPayloadWh
     service_->setTestingHoveredGaussianId(0);
 
     const auto picked = service_->pickAtScreen(50.0f, 50.0f);
-    ASSERT_TRUE(picked.has_value()) << picked.error();
+    ASSERT_TRUE(picked.has_value()) << picked.error().message;
     EXPECT_FALSE(picked->colour_from_stored_payload);
     EXPECT_FALSE(picked->stored_index.has_value());
     EXPECT_NEAR(picked->colour.r, 0.25f, 1e-5f);

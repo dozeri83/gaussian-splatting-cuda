@@ -240,7 +240,8 @@ namespace lfs::io {
             using namespace lfs::core;
             const size_t H = hwc.shape()[0], W = hwc.shape()[1], C = hwc.shape()[2];
             const bool sixteen_bit = hwc.dtype() == DataType::Float16;
-            const auto* ops = shared_image_ops(default_gpu_backend());
+            // The caller's backend scope decides where the upload landed.
+            const auto* ops = shared_image_ops(gpu_backend_of(hwc).value_or(default_gpu_backend()));
             const auto [target_width, target_height] = resized_image_dimensions(
                 static_cast<int>(W), static_cast<int>(H), resize_factor, max_width);
             if (static_cast<size_t>(target_width) != W || static_cast<size_t>(target_height) != H) {
