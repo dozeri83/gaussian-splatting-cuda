@@ -207,215 +207,201 @@ bool seed_inverse_distortion(
     if (model == 4 && num_dist > 4)
         return inverse_thin_prism_seed(xd, yd, dist, num_dist, ux, uy);
     if (model == 2 || model == 4)
+        return inverse_fisheye_radial(xd, yd, dist, ux, uy);
+    ux = xd;
+    uy = yd;
+    return true;
+}
 
-        void apply_distortion(
-            const float x, const float y,
-            const int model,
-            float dist[12], const int num_dist,
-            out float dx, out float dy) {
+void apply_distortion_thin_prism_fisheye(
+    const float x, const float y,
+    float dist[12], const int num_dist,
+    out float dx, out float dy) {
 
-            switch (model) {
-            case 0:
-                apply_distortion_pinhole(x, y, dist, num_dist, dx, dy);
-                break;
-            case 2:
-                apply_distortion_fisheye(x, y, dist, num_dist, dx, dy);
-                break;
-            case 4:
-                apply_distortion_thin_prism_fisheye(x, y, dist, num_dist, dx, dy);
-                break;
-            default:
-                dx = x;
-                dy = y;
-                break;
-            }
-        }
-
-    float bilinear_sample_renormalized(
-        Ptr<float, Access.Read> src,
-        const int width, const int height, const int stride,
-        const float sx, const float sy,
-        const bool positive_only = false) {
-        const int x0 = int(floor(sx));
-        const int y0 = int(floor(sy));
-        const float fx = sx - float(x0);
-        const float fy = sy - float(y0);
-        float value = 0.0f;
-        float weight_sum = 0.0f;
-        for (int dy = 0; dy < 2; ++dy) {
-            const int y = y0 + dy;
-            const float wy = dy == 0 ? 1.0f - fy : fy;
-            for (int dx = 0; dx < 2; ++dx) {
-                const int x = x0 + dx;
-                if (x < 0 || x >= width || y < 0 || y >= height)
-                    continue;
-                const float sample = src[y * stride + x];
-                if (!isfinite(sample) || (positive_only && sample <= 0.0f))
-                    continue;
-                const float wx = dx == 0 ? 1.0f - fx : fx;
-                const float weight = wx * wy;
-                value += sample * weight;
-                weight_sum += weight;
-            }
-        }
-        if (weight_sum > 1.0e-8f)
-            return value / weight_sum;
-        if (positive_only)
-            return 0.0f;
-        const int nearest_x = min(max(int(floor(sx + 0.5f)), 0), width - 1);
-        const int nearest_y = min(max(int(floor(sy + 0.5f)), 0), height - 1);
-        return src[nearest_y * stride + nearest_x];
+    const float r = sqrt(x * x + y * y);
+    if (r < 1e-8f) {
+        dx = x;
+        dy = y;
+        return;
     }
 
-    float lanczos3_weight(const float value) {
-        const float absolute_value = abs(value);
-        if (absolute_value >= float(LANCZOS_RADIUS))
-            return 0.0f;
-        if (absolute_value < 1.0e-6f)
-            return 1.0f;
-        static const float PI = 3.14159265358979323846f;
-        const float pi_value = PI * value;
-        return sin(pi_value) / pi_value *
-               (sin(pi_value / float(LANCZOS_RADIUS)) /
-                (pi_value / float(LANCZOS_RADIUS)));
+    const float theta_over_r = atan(r) / r;
+    thin_prism_fisheye_from_theta_point(
+        x * theta_over_r, y * theta_over_r, dist, num_dist, dx, dy);
+}
+
+void apply_distortion(
+    const float x, const float y,
+    const int model,
+    float dist[12], const int num_dist,
+    out float dx, out float dy) {
+
+    switch (model) {
+    case 0:
+        apply_distortion_pinhole(x, y, dist, num_dist, dx, dy);
+        break;
+    case 2:
+        apply_distortion_fisheye(x, y, dist, num_dist, dx, dy);
+        break;
+    case 4:
+        apply_distortion_thin_prism_fisheye(x, y, dist, num_dist, dx, dy);
+        break;
+    default:
+        dx = x;
+        dy = y;
+        break;
+    }
+}
+
+float bilinear_sample_renormalized(
+    Ptr<float, Access.Read> src,
+    const int width, const int height, const int stride,
+    const float sx, const float sy,
+    const bool positive_only = false) {
+    const int x0 = int(floor(sx));
+    const int y0 = int(floor(sy));
+    const float fx = sx - float(x0);
+    const float fy = sy - float(y0);
+    float value = 0.0f;
+    float weight_sum = 0.0f;
+    for (int dy = 0; dy < 2; ++dy) {
+        const int y = y0 + dy;
+        const float wy = dy == 0 ? 1.0f - fy : fy;
+        for (int dx = 0; dx < 2; ++dx) {
+            const int x = x0 + dx;
+            if (x < 0 || x >= width || y < 0 || y >= height)
+                continue;
+            const float sample = src[y * stride + x];
+            if (!isfinite(sample) || (positive_only && sample <= 0.0f))
+                continue;
+            const float wx = dx == 0 ? 1.0f - fx : fx;
+            const float weight = wx * wy;
+            value += sample * weight;
+            weight_sum += weight;
+        }
+    }
+    if (weight_sum > 1.0e-8f)
+        return value / weight_sum;
+    if (positive_only)
+        return 0.0f;
+    const int nearest_x = min(max(int(floor(sx + 0.5f)), 0), width - 1);
+    const int nearest_y = min(max(int(floor(sy + 0.5f)), 0), height - 1);
+    return src[nearest_y * stride + nearest_x];
+}
+
+float lanczos3_weight(const float value) {
+    const float absolute_value = abs(value);
+    if (absolute_value >= float(LANCZOS_RADIUS))
+        return 0.0f;
+    if (absolute_value < 1.0e-6f)
+        return 1.0f;
+    static const float PI = 3.14159265358979323846f;
+    const float pi_value = PI * value;
+    return sin(pi_value) / pi_value *
+           (sin(pi_value / float(LANCZOS_RADIUS)) /
+            (pi_value / float(LANCZOS_RADIUS)));
+}
+
+bool lanczos3_sample(
+    Ptr<float, Access.Read> src,
+    const int width, const int height, const int channels,
+    const float sx, const float sy,
+    inout float values[4], out float absolute_inside, out float absolute_full) {
+    const int base_x = int(floor(sx));
+    const int base_y = int(floor(sy));
+    float weights_x[6];
+    float weights_y[6];
+    for (int i = 0; i < 6; ++i) {
+        weights_x[i] = lanczos3_weight(sx - float(base_x + i - 2));
+        weights_y[i] = lanczos3_weight(sy - float(base_y + i - 2));
     }
 
-    bool lanczos3_sample(
-        Ptr<float, Access.Read> src,
-        const int width, const int height, const int channels,
-        const float sx, const float sy,
-        inout float values[4], out float absolute_inside, out float absolute_full) {
-        const int base_x = int(floor(sx));
-        const int base_y = int(floor(sy));
-        float weights_x[6];
-        float weights_y[6];
+    float weighted[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float signed_inside = 0.0f;
+    absolute_inside = 0.0f;
+    absolute_full = 0.0f;
+    const int plane = width * height;
+    for (int j = 0; j < 6; ++j) {
+        const int y = base_y + j - 2;
         for (int i = 0; i < 6; ++i) {
-            weights_x[i] = lanczos3_weight(sx - float(base_x + i - 2));
-            weights_y[i] = lanczos3_weight(sy - float(base_y + i - 2));
-        }
-
-        float weighted[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        float signed_inside = 0.0f;
-        absolute_inside = 0.0f;
-        absolute_full = 0.0f;
-        const int plane = width * height;
-        for (int j = 0; j < 6; ++j) {
-            const int y = base_y + j - 2;
-            for (int i = 0; i < 6; ++i) {
-                const int x = base_x + i - 2;
-                const float weight = weights_x[i] * weights_y[j];
-                absolute_full += abs(weight);
-                if (x < 0 || x >= width || y < 0 || y >= height)
-                    continue;
-                signed_inside += weight;
-                absolute_inside += abs(weight);
-                const int index = y * width + x;
-                for (int channel = 0; channel < channels; ++channel)
-                    weighted[channel] += src[channel * plane + index] * weight;
-            }
-        }
-
-        if (abs(signed_inside) > MIN_SIGNED_WEIGHT_RATIO * absolute_inside) {
+            const int x = base_x + i - 2;
+            const float weight = weights_x[i] * weights_y[j];
+            absolute_full += abs(weight);
+            if (x < 0 || x >= width || y < 0 || y >= height)
+                continue;
+            signed_inside += weight;
+            absolute_inside += abs(weight);
+            const int index = y * width + x;
             for (int channel = 0; channel < channels; ++channel)
-                values[channel] = weighted[channel] / signed_inside;
-            return true;
+                weighted[channel] += src[channel * plane + index] * weight;
         }
-
-        for (int channel = 0; channel < channels; ++channel) {
-            values[channel] = bilinear_sample_renormalized(
-                src + channel * plane, width, height, width, sx, sy);
-        }
-        return false;
     }
 
-    void undistort_image_kernel(
-        Ptr<float, Access.Read> src,
-        Ptr<float, Access.ReadWrite> dst,
-        const int channels,
-        const int ox, const int oy,
-        const int quadrature,
-        const UndistortParams params) {
-        if (ox >= params.dst_width || oy >= params.dst_height)
-            return;
-
-        float result[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        for (int qy = 0; qy < quadrature; ++qy) {
-            for (int qx = 0; qx < quadrature; ++qx) {
-                const float pixel_x = float(ox) +
-                                      (float(qx) + 0.5f) / quadrature;
-                const float pixel_y = float(oy) +
-                                      (float(qy) + 0.5f) / quadrature;
-                const float nx = (pixel_x - params.dst_cx) / params.dst_fx;
-                const float ny = (pixel_y - params.dst_cy) / params.dst_fy;
-                float dnx, dny;
-                apply_distortion(nx, ny, params.model_type, params.distortion,
-                                 params.num_distortion, dnx, dny);
-                const float sx = dnx * params.src_fx + params.src_cx - PIXEL_CENTER_OFFSET;
-                const float sy = dny * params.src_fy + params.src_cy - PIXEL_CENTER_OFFSET;
-                float sample[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                float absolute_inside = 0.0f;
-                float absolute_full = 0.0f;
-                lanczos3_sample(
-                    src, params.src_width, params.src_height, channels,
-                    sx, sy, sample, absolute_inside, absolute_full);
-                for (int channel = 0; channel < channels; ++channel)
-                    result[channel] += sample[channel];
-            }
-        }
-
-        const int output_index = oy * params.dst_width + ox;
-        const int output_plane = params.dst_width * params.dst_height;
-        const float inverse_samples = 1.0f / float(quadrature * quadrature);
+    if (abs(signed_inside) > MIN_SIGNED_WEIGHT_RATIO * absolute_inside) {
         for (int channel = 0; channel < channels; ++channel)
-            dst[channel * output_plane + output_index] = result[channel] * inverse_samples;
-    }
-
-    // The fisheye radial model is one-dimensional in the incidence angle: solving it in theta
-    // stays well conditioned up to the angle limit, where Newton in the image plane cannot reach
-    // the root because r = tan(theta) grows without bound.
-    bool inverse_fisheye_radial(
-        const float xd, const float yd, float dist[12],
-        out float ux, out float uy) {
-        ux = 0.0f;
-        uy = 0.0f;
-        const float theta_d = sqrt(xd * xd + yd * yd);
-        if (theta_d < 1e-8f) {
-            ux = xd;
-            uy = yd;
-            return true;
-        }
-        float theta = min(theta_d, MAX_FISHEYE_THETA);
-        for (int iter = 0; iter < MAX_NEWTON_ITERATIONS; ++iter) {
-            const float theta2 = theta * theta;
-            const float theta4 = theta2 * theta2;
-            const float theta6 = theta4 * theta2;
-            const float theta8 = theta4 * theta4;
-            const float residual = theta * (1.0f + dist[0] * theta2 + dist[1] * theta4 +
-                                            dist[2] * theta6 + dist[3] * theta8) -
-                                   theta_d;
-            const float slope = 1.0f + 3.0f * dist[0] * theta2 + 5.0f * dist[1] * theta4 +
-                                7.0f * dist[2] * theta6 + 9.0f * dist[3] * theta8;
-            if (!isfinite(residual) || !isfinite(slope) || abs(slope) < NEWTON_EPSILON)
-                return false;
-            const float step = residual / slope;
-            theta -= step;
-            if (abs(step) < 1e-7f)
-                break;
-        }
-        if (!(theta > 0.0f) || theta >= MAX_FISHEYE_THETA)
-            return false;
-        const float scale = tan(theta) / theta_d;
-        ux = xd * scale;
-        uy = yd * scale;
+            values[channel] = weighted[channel] / signed_inside;
         return true;
     }
 
-    bool inverse_distortion(
-        const float xd, const float yd, const UndistortParams params,
-        out float ux, out float uy) {
-        if (!seed_inverse_distortion(xd, yd, params.model_type, params.distortion,
-                                     params.num_distortion, ux, uy))
-            return false;
+    for (int channel = 0; channel < channels; ++channel) {
+        values[channel] = bilinear_sample_renormalized(
+            src + channel * plane, width, height, width, sx, sy);
+    }
+    return false;
+}
+
+void undistort_image_kernel(
+    Ptr<float, Access.Read> src,
+    Ptr<float, Access.ReadWrite> dst,
+    const int channels,
+    const int ox, const int oy,
+    const int quadrature,
+    const UndistortParams params) {
+    if (ox >= params.dst_width || oy >= params.dst_height)
+        return;
+
+    float result[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (int qy = 0; qy < quadrature; ++qy) {
+        for (int qx = 0; qx < quadrature; ++qx) {
+            const float pixel_x = float(ox) +
+                                  (float(qx) + 0.5f) / quadrature;
+            const float pixel_y = float(oy) +
+                                  (float(qy) + 0.5f) / quadrature;
+            const float nx = (pixel_x - params.dst_cx) / params.dst_fx;
+            const float ny = (pixel_y - params.dst_cy) / params.dst_fy;
+            float dnx, dny;
+            apply_distortion(nx, ny, params.model_type, params.distortion,
+                             params.num_distortion, dnx, dny);
+            const float sx = dnx * params.src_fx + params.src_cx - PIXEL_CENTER_OFFSET;
+            const float sy = dny * params.src_fy + params.src_cy - PIXEL_CENTER_OFFSET;
+            float sample[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            float absolute_inside = 0.0f;
+            float absolute_full = 0.0f;
+            lanczos3_sample(
+                src, params.src_width, params.src_height, channels,
+                sx, sy, sample, absolute_inside, absolute_full);
+            for (int channel = 0; channel < channels; ++channel)
+                result[channel] += sample[channel];
+        }
+    }
+
+    const int output_index = oy * params.dst_width + ox;
+    const int output_plane = params.dst_width * params.dst_height;
+    const float inverse_samples = 1.0f / float(quadrature * quadrature);
+    for (int channel = 0; channel < channels; ++channel)
+        dst[channel * output_plane + output_index] = result[channel] * inverse_samples;
+}
+
+// The fisheye radial model is one-dimensional in the incidence angle: solving it in theta
+// stays well conditioned up to the angle limit, where Newton in the image plane cannot reach
+// the root because r = tan(theta) grows without bound.
+
+bool inverse_distortion(
+    const float xd, const float yd, const UndistortParams params,
+    out float ux, out float uy) {
+    if (!seed_inverse_distortion(xd, yd, params.model_type, params.distortion,
+                                 params.num_distortion, ux, uy))
+        return false;
 
     float previous_error_px = asfloat(0x7f800000u);
     for (int iter = 0; iter < MAX_NEWTON_ITERATIONS; ++iter) {
