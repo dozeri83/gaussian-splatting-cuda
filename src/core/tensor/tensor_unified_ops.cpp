@@ -2591,6 +2591,8 @@ namespace lfs::core {
 
             // Copy additional tensors into the reserved space
             if (first_device == Device::GPU) {
+                for (size_t i = 1; i < tensors.size(); ++i)
+                    prepare_inputs_for_stream({&tensors[i]}, result.stream());
                 size_t offset = first_size * row_size * element_size;
                 LOG_DEBUG("  Starting CUDA memcpy for {} additional tensors, initial offset={} bytes",
                           tensors.size() - 1, offset);
@@ -2609,7 +2611,7 @@ namespace lfs::core {
                                 internal::storage_ref(result), offset),
                             .bytes = bytes,
                             .synchronous = true,
-                            .context = internal::ExecContext{nullptr},
+                            .context = internal::ExecContext{result.stream()},
                         });
                     offset += bytes;
                 }
@@ -2640,6 +2642,9 @@ namespace lfs::core {
 
         if (result.numel() == 0)
             return result;
+        if (first_device == Device::GPU)
+            for (const auto& tensor : tensors)
+                prepare_inputs_for_stream({&tensor}, result.stream());
 
         size_t element_size = dtype_size(first_dtype);
 
@@ -2657,7 +2662,7 @@ namespace lfs::core {
                                 internal::storage_ref(result), offset),
                             .bytes = bytes,
                             .synchronous = true,
-                            .context = internal::ExecContext{nullptr},
+                            .context = internal::ExecContext{result.stream()},
                         });
                     offset += bytes;
                 }
@@ -2898,6 +2903,7 @@ namespace lfs::core {
 
         if (device_ == Device::GPU) {
             if (dtype_ == DataType::Float32) {
+                prepare_inputs_for_stream({this, &result}, result.stream());
                 internal::backend_ops_for(*this).clamp_fused(
                     internal::storage_ref(*this), internal::storage_ref(result),
                     internal::scalar_operand(min_val), internal::scalar_operand(max_val),

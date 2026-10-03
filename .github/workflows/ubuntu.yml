@@ -179,6 +179,11 @@ jobs:
         run: |
           uv run --python 3.12 --no-project --with numpy --with pillow --with pytest python -m pytest -q tests/python/test_scene_reconstruction_benchmark.py
 
+      - name: Build and run EXR image codec tests
+        run: |
+          cmake --build build --target lichtfeld_image_codec_tests -j $(nproc)
+          ctest --test-dir build --output-on-failure -R '^lichtfeld_image_codec_tests$'
+
       - name: Build and run frame-demand CPU tests
         run: |
           cmake --build build --target lichtfeld_frame_tests -j $(nproc)
