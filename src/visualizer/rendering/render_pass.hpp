@@ -163,6 +163,7 @@ namespace lfs::vis {
     };
 
     struct CachedRenderMetadata {
+        std::optional<lfs::rendering::ViewerBackend> viewer_backend;
         std::array<CachedRenderPanelMetadata, 2> depth_panels{};
         size_t depth_panel_count = 0;
         bool valid = false;
@@ -178,6 +179,7 @@ namespace lfs::vis {
 
     [[nodiscard]] inline CachedRenderMetadata makeCachedRenderMetadata(const lfs::rendering::FrameMetadata& result) {
         CachedRenderMetadata metadata{
+            .viewer_backend = result.viewer_backend,
             .depth_panel_count = result.depth_panel_count,
             .valid = result.valid,
             .depth_is_ndc = result.depth_is_ndc,

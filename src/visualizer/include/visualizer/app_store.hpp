@@ -8,6 +8,7 @@
 #include "core/reactive/observable.hpp"
 #include "core/reactive/store.hpp"
 #include "rendering/rendering_types.hpp"
+#include "rendering/viewer_backend.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -224,6 +225,7 @@ namespace lfs::vis {
             GalleryStateValue,
             DepthWindowDrawGeneration,
             DepthWindowDrawCommitValue,
+            ViewerBackendValue,
         };
 
         AppStore();
@@ -266,6 +268,8 @@ namespace lfs::vis {
         lfs::core::reactive::Observable<std::uint64_t> viewport_toolbar_generation;
         lfs::core::reactive::Observable<std::uint64_t> depth_window_draw_generation;
         lfs::core::reactive::Observable<DepthWindowDrawCommit> depth_window_draw_commit;
+        // Actual scene API of the published output; empty means no scene frame.
+        lfs::core::reactive::Observable<std::optional<lfs::rendering::ViewerBackend>> viewer_backend;
 
     private:
         lfs::core::reactive::Store store_;

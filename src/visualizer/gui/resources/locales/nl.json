@@ -890,12 +890,12 @@
     "zoom": "Zoom"
   },
   "preferences": {
-    "tensor_auto": "Automatisch",
+    "tensor_auto": "Auto",
     "tensor_cuda": "CUDA",
     "tensor_vulkan": "Vulkan",
     "tensor_metal": "Metal",
     "tensor_backend": "Tensor backend",
-    "tensor_restart": "Changes apply after restarting LichtFeld Studio. Automatic picks CUDA where it is built, else Metal where the GPU supports it, else Vulkan. Vulkan and Metal support viewing and inference; training requires CUDA.",
+    "tensor_restart": "Regelt GPU-tensorberekeningen onafhankelijk van de viewer-renderer. Wijzigingen worden toegepast na het herstarten van LichtFeld Studio. Automatisch kiest CUDA, Metal of Vulkan op basis van deze build en de GPU.",
     "tensor_device": "Vulkan device",
     "tensor_device_hint": "Leave empty for automatic selection, or enter a device index or UUID. CUDA rendering must use the CUDA device.",
     "tensor_validation": "Vulkan diagnostics",
@@ -1018,7 +1018,10 @@
     "reset_all_settings_confirmation": "Taal, thema, UI-schaal, scènereconstructie, invoervoorkeuren, MCP-server, indeling en vensterstatus naar de standaardwaarden herstellen? Dit wordt onmiddellijk toegepast. Als een .licht-project open is, wordt de opgeslagen indeling bij de volgende opslag vervangen; projectinhoud, datasets, exports, plugins en cache blijven ongewijzigd.",
     "reset_all_settings_success": "Alle voorkeuren, de indeling en de vensterstatus zijn onmiddellijk gereset.",
     "window_manager_unavailable": "Vensterbeheer is niet beschikbaar.",
-    "window_state_reset_failed": "De standaardvenstergeometrie kon niet worden hersteld."
+    "window_state_reset_failed": "De standaardvenstergeometrie kon niet worden hersteld.",
+    "viewer_backend": "Viewer-backend",
+    "viewer_backend_description": "Wordt direct toegepast. Auto geeft de voorkeur aan Metal op compatibele Macs en elders aan Vulkan. Niet-ondersteunde frames gebruiken Vulkan.",
+    "backend_unavailable": "De geselecteerde backend is niet beschikbaar op dit apparaat. Uw instellingen zijn niet gewijzigd."
   },
   "main_panel": {
     "console": "Console",
@@ -2129,7 +2132,16 @@
     "split": "Splitsing:",
     "mcp_name": "MCP",
     "ui": "UI",
-    "view": "Beeld"
+    "view": "Beeld",
+    "renderer_backend": "Renderer",
+    "tensor_backend": "Tensoren",
+    "renderer_backend_tooltip": "Backend voor scènerendering.",
+    "tensor_backend_tooltip": "Backend voor tensorberekeningen.",
+    "backend_requested": "Gevraagd: {}",
+    "backend_no_frame": "Ingestelde renderer; nog geen scèneframe.",
+    "backend_fallback": "Metal is niet beschikbaar voor dit frame; Vulkan wordt gebruikt.",
+    "renderer_backend_short": "R",
+    "tensor_backend_short": "T"
   },
   "plugin_manager": {
     "github_url_or_shorthand": "GitHub-URL of verkorte vorm:",

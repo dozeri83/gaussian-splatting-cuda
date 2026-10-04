@@ -1,4 +1,5 @@
 #if LFS_BUILD_TRAINER
+#include "rendering/scene_renderer_factory.hpp"
 #include "training/trainer.hpp"
 #endif
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
@@ -46,8 +47,8 @@
 #include "python/runner.hpp"
 #include "rendering/coordinate_conventions.hpp"
 #include "rendering/model_renderability.hpp"
+#include "rendering/scene_renderer.hpp"
 #include "rendering/scene_upscaler_registry.hpp"
-#include "rendering/vksplat_viewport_renderer.hpp"
 #include "scene/scene_manager.hpp"
 #include "tools/align_tool.hpp"
 #include "tools/builtin_tools.hpp"
@@ -2953,6 +2954,7 @@ namespace lfs::vis {
                                 : vulkan_frame.image_generation,
                             vulkan_frame.completion_semaphore, vulkan_frame.completion_value);
                     }
+                    interop.addFrameCompletions(vulkan_frame.additional_completions);
                     if (vulkan_frame.split_right_image) {
                         interop.setSplitRightImage(vulkan_frame.split_right_image,
                                                    vulkan_frame.split_right_size,
@@ -3056,7 +3058,7 @@ namespace lfs::vis {
         if (first_gui_frame) {
             pipeline_cache_flush_due_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
             vksplat_spirv_preload_future_ = std::async(
-                std::launch::async, [] { preloadVkSplatSpirvFiles(); });
+                std::launch::async, [] { preloadSceneRenderer(); });
         }
         if (scene_manager_ && presented_gui_frame)
             scene_manager_->modifierManager().recordViewerFrame(

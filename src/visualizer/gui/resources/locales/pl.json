@@ -890,12 +890,12 @@
     "zoom": "Zoom"
   },
   "preferences": {
-    "tensor_auto": "Automatyczny",
+    "tensor_auto": "Auto",
     "tensor_cuda": "CUDA",
     "tensor_vulkan": "Vulkan",
     "tensor_metal": "Metal",
     "tensor_backend": "Tensor backend",
-    "tensor_restart": "Changes apply after restarting LichtFeld Studio. Automatic picks CUDA where it is built, else Metal where the GPU supports it, else Vulkan. Vulkan and Metal support viewing and inference; training requires CUDA.",
+    "tensor_restart": "Steruje obliczeniami tensorowymi GPU niezależnie od renderera przeglądarki. Zmiany są stosowane po ponownym uruchomieniu LichtFeld Studio. Automatyczny wybiera CUDA, Metal lub Vulkan zależnie od kompilacji i GPU.",
     "tensor_device": "Vulkan device",
     "tensor_device_hint": "Leave empty for automatic selection, or enter a device index or UUID. CUDA rendering must use the CUDA device.",
     "tensor_validation": "Vulkan diagnostics",
@@ -1018,7 +1018,10 @@
     "reset_all_settings_confirmation": "Przywrócić język, motyw, skalę interfejsu, rekonstrukcję sceny, preferencje wejścia, serwer MCP, układ i stan okna do wartości domyślnych? Zostanie to zastosowane natychmiast. Jeśli projekt .licht jest otwarty, jego zapisany układ zostanie zastąpiony przy następnym zapisie; zawartość projektu, zestawy danych, eksporty, wtyczki i pamięć podręczna nie zostaną zmienione.",
     "reset_all_settings_success": "Wszystkie preferencje, układ i stan okna zostały natychmiast zresetowane.",
     "window_manager_unavailable": "Menedżer okien jest niedostępny.",
-    "window_state_reset_failed": "Nie udało się przywrócić domyślnej geometrii okna."
+    "window_state_reset_failed": "Nie udało się przywrócić domyślnej geometrii okna.",
+    "viewer_backend": "Backend przeglądarki",
+    "viewer_backend_description": "Zmiana działa natychmiast. Auto preferuje Metal na zgodnych Macach, a na innych systemach Vulkan. Nieobsługiwane klatki używają Vulkan.",
+    "backend_unavailable": "Wybrany backend nie jest dostępny na tym urządzeniu. Ustawienia nie zostały zmienione."
   },
   "main_panel": {
     "console": "Konsola",
@@ -2129,7 +2132,16 @@
     "split": "Podział:",
     "mcp_name": "MCP",
     "ui": "UI",
-    "view": "Widok"
+    "view": "Widok",
+    "renderer_backend": "Renderer",
+    "tensor_backend": "Tensory",
+    "renderer_backend_tooltip": "Backend renderowania sceny.",
+    "tensor_backend_tooltip": "Backend obliczeń tensorowych.",
+    "backend_requested": "Żądany: {}",
+    "backend_no_frame": "Skonfigurowany renderer; brak klatki sceny.",
+    "backend_fallback": "Metal jest niedostępny dla tej klatki; używany jest Vulkan.",
+    "renderer_backend_short": "R",
+    "tensor_backend_short": "T"
   },
   "plugin_manager": {
     "github_url_or_shorthand": "URL GitHub lub skrót:",

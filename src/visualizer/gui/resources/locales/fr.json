@@ -890,12 +890,12 @@
     "zoom": "Zoom"
   },
   "preferences": {
-    "tensor_auto": "Automatique",
+    "tensor_auto": "Auto",
     "tensor_cuda": "CUDA",
     "tensor_vulkan": "Vulkan",
     "tensor_metal": "Metal",
     "tensor_backend": "Tensor backend",
-    "tensor_restart": "Changes apply after restarting LichtFeld Studio. Automatic picks CUDA where it is built, else Metal where the GPU supports it, else Vulkan. Vulkan and Metal support viewing and inference; training requires CUDA.",
+    "tensor_restart": "Contrôle le calcul des tenseurs sur le GPU, indépendamment du moteur de rendu du visualiseur. Les modifications prennent effet après le redémarrage de LichtFeld Studio. Automatique choisit CUDA, Metal ou Vulkan selon cette version et le GPU.",
     "tensor_device": "Vulkan device",
     "tensor_device_hint": "Leave empty for automatic selection, or enter a device index or UUID. CUDA rendering must use the CUDA device.",
     "tensor_validation": "Vulkan diagnostics",
@@ -1018,7 +1018,10 @@
     "reset_all_settings_confirmation": "Rétablir la langue, le thème, l'échelle de l'interface, la reconstruction de la scène, les préférences de saisie, le serveur MCP, la disposition et l'état de la fenêtre à leurs valeurs par défaut ? Cela s'applique immédiatement. Si un projet .licht est ouvert, sa disposition enregistrée sera remplacée au prochain enregistrement ; le contenu du projet, les jeux de données, les exportations, les plugins et le cache ne sont pas affectés.",
     "reset_all_settings_success": "Toutes les préférences, la disposition et l'état de la fenêtre ont été réinitialisés immédiatement.",
     "window_manager_unavailable": "Le gestionnaire de fenêtres n'est pas disponible.",
-    "window_state_reset_failed": "La géométrie par défaut de la fenêtre n'a pas pu être restaurée."
+    "window_state_reset_failed": "La géométrie par défaut de la fenêtre n'a pas pu être restaurée.",
+    "viewer_backend": "Backend du visualiseur",
+    "viewer_backend_description": "Application immédiate. Auto privilégie Metal sur les Mac compatibles et Vulkan ailleurs. Les images non prises en charge utilisent Vulkan.",
+    "backend_unavailable": "Le backend sélectionné n’est pas disponible sur cet appareil. Vos paramètres n’ont pas été modifiés."
   },
   "main_panel": {
     "console": "Console",
@@ -2129,7 +2132,16 @@
     "split": "Division :",
     "mcp_name": "MCP",
     "ui": "IU",
-    "view": "Vue"
+    "view": "Vue",
+    "renderer_backend": "Rendu",
+    "tensor_backend": "Tenseurs",
+    "renderer_backend_tooltip": "Backend de rendu de la scène.",
+    "tensor_backend_tooltip": "Backend de calcul des tenseurs.",
+    "backend_requested": "Demandé : {}",
+    "backend_no_frame": "Moteur configuré ; aucune image de scène pour le moment.",
+    "backend_fallback": "Metal est indisponible pour cette image ; Vulkan est utilisé.",
+    "renderer_backend_short": "R",
+    "tensor_backend_short": "T"
   },
   "plugin_manager": {
     "github_url_or_shorthand": "URL GitHub ou raccourci :",

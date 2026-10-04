@@ -890,12 +890,12 @@
     "zoom": "Zoom"
   },
   "preferences": {
-    "tensor_auto": "Automatico",
+    "tensor_auto": "Auto",
     "tensor_cuda": "CUDA",
     "tensor_vulkan": "Vulkan",
     "tensor_metal": "Metal",
     "tensor_backend": "Tensor backend",
-    "tensor_restart": "Changes apply after restarting LichtFeld Studio. Automatic picks CUDA where it is built, else Metal where the GPU supports it, else Vulkan. Vulkan and Metal support viewing and inference; training requires CUDA.",
+    "tensor_restart": "Controlla il calcolo dei tensori sulla GPU, indipendentemente dal renderer del viewer. Le modifiche si applicano dopo il riavvio di LichtFeld Studio. Automatico sceglie CUDA, Metal o Vulkan in base alla build e alla GPU.",
     "tensor_device": "Vulkan device",
     "tensor_device_hint": "Leave empty for automatic selection, or enter a device index or UUID. CUDA rendering must use the CUDA device.",
     "tensor_validation": "Vulkan diagnostics",
@@ -1018,7 +1018,10 @@
     "reset_all_settings_confirmation": "Ripristinare lingua, tema, scala dell'interfaccia, ricostruzione della scena, preferenze di input, server MCP, layout e stato della finestra ai valori predefiniti? L'azione viene applicata subito. Se è aperto un progetto .licht, il layout salvato verrà sostituito al prossimo salvataggio; contenuti del progetto, dataset, esportazioni, plugin e cache non vengono modificati.",
     "reset_all_settings_success": "Tutte le preferenze, il layout e lo stato della finestra sono stati reimpostati immediatamente.",
     "window_manager_unavailable": "Il gestore della finestra non è disponibile.",
-    "window_state_reset_failed": "Non è stato possibile ripristinare la geometria predefinita della finestra."
+    "window_state_reset_failed": "Non è stato possibile ripristinare la geometria predefinita della finestra.",
+    "viewer_backend": "Backend del viewer",
+    "viewer_backend_description": "Si applica subito. Auto preferisce Metal sui Mac compatibili e Vulkan sugli altri sistemi. I fotogrammi non supportati usano Vulkan.",
+    "backend_unavailable": "Il backend selezionato non è disponibile su questo dispositivo. Le impostazioni non sono state modificate."
   },
   "main_panel": {
     "console": "Console",
@@ -2129,7 +2132,16 @@
     "split": "Divisione:",
     "mcp_name": "MCP",
     "ui": "UI",
-    "view": "Vista"
+    "view": "Vista",
+    "renderer_backend": "Renderer",
+    "tensor_backend": "Tensori",
+    "renderer_backend_tooltip": "Backend di rendering della scena.",
+    "tensor_backend_tooltip": "Backend di calcolo dei tensori.",
+    "backend_requested": "Richiesto: {}",
+    "backend_no_frame": "Renderer configurato; nessun fotogramma della scena.",
+    "backend_fallback": "Metal non è disponibile per questo fotogramma; è in uso Vulkan.",
+    "renderer_backend_short": "R",
+    "tensor_backend_short": "T"
   },
   "plugin_manager": {
     "github_url_or_shorthand": "URL GitHub o forma breve:",

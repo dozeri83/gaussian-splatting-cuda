@@ -890,12 +890,12 @@
     "zoom": "Zoom"
   },
   "preferences": {
-    "tensor_auto": "Automático",
+    "tensor_auto": "Auto",
     "tensor_cuda": "CUDA",
     "tensor_vulkan": "Vulkan",
     "tensor_metal": "Metal",
     "tensor_backend": "Tensor backend",
-    "tensor_restart": "Changes apply after restarting LichtFeld Studio. Automatic picks CUDA where it is built, else Metal where the GPU supports it, else Vulkan. Vulkan and Metal support viewing and inference; training requires CUDA.",
+    "tensor_restart": "Controla el cálculo de tensores en la GPU, independientemente del renderizador del visor. Los cambios se aplican al reiniciar LichtFeld Studio. Automático elige CUDA, Metal o Vulkan según esta compilación y la GPU.",
     "tensor_device": "Vulkan device",
     "tensor_device_hint": "Leave empty for automatic selection, or enter a device index or UUID. CUDA rendering must use the CUDA device.",
     "tensor_validation": "Vulkan diagnostics",
@@ -1018,7 +1018,10 @@
     "reset_all_settings_confirmation": "¿Restablecer idioma, tema, escala de interfaz, reconstrucción de la escena, preferencias de entrada, servidor MCP, diseño y estado de la ventana a sus valores predeterminados? Se aplica inmediatamente. Si hay un proyecto .licht abierto, su diseño guardado se sustituirá la próxima vez que se guarde; el contenido del proyecto, los conjuntos de datos, las exportaciones, los plugins y la caché no se verán afectados.",
     "reset_all_settings_success": "Todas las preferencias, el diseño y el estado de la ventana se restablecieron inmediatamente.",
     "window_manager_unavailable": "El gestor de ventanas no está disponible.",
-    "window_state_reset_failed": "No se pudo restaurar la geometría predeterminada de la ventana."
+    "window_state_reset_failed": "No se pudo restaurar la geometría predeterminada de la ventana.",
+    "viewer_backend": "Backend del visor",
+    "viewer_backend_description": "Se aplica de inmediato. Auto prefiere Metal en los Mac compatibles y Vulkan en otros sistemas. Los fotogramas no compatibles usan Vulkan.",
+    "backend_unavailable": "El backend seleccionado no está disponible en este dispositivo. La configuración no se ha modificado."
   },
   "main_panel": {
     "console": "Consola",
@@ -2129,7 +2132,16 @@
     "split": "División:",
     "mcp_name": "MCP",
     "ui": "IU",
-    "view": "Vista"
+    "view": "Vista",
+    "renderer_backend": "Renderizador",
+    "tensor_backend": "Tensores",
+    "renderer_backend_tooltip": "Backend de renderizado de la escena.",
+    "tensor_backend_tooltip": "Backend de cálculo de tensores.",
+    "backend_requested": "Solicitado: {}",
+    "backend_no_frame": "Renderizador configurado; aún no hay fotograma.",
+    "backend_fallback": "Metal no está disponible para este fotograma; se utiliza Vulkan.",
+    "renderer_backend_short": "R",
+    "tensor_backend_short": "T"
   },
   "plugin_manager": {
     "github_url_or_shorthand": "URL de GitHub o forma abreviada:",

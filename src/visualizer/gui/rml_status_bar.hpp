@@ -9,8 +9,10 @@
 #include "gui/error_surface_types.hpp"
 #include "gui/gpu_memory_query.hpp"
 #include "gui/panel_registry.hpp"
+#include "gui/rmlui/rml_tooltip.hpp"
 #include "gui/rmlui/rmlui_manager.hpp"
 #include "gui/status_bar_mining.hpp"
+#include "rendering/viewer_backend.hpp"
 #include "visualizer/rendering/rendering_types.hpp"
 #include "visualizer/visualizer.hpp"
 #include <RmlUi/Core/DataModelHandle.h>
@@ -83,8 +85,8 @@ namespace lfs::vis::gui {
             std::chrono::steady_clock::time_point now) const;
         [[nodiscard]] LFS_VIS_API std::optional<double> secondsUntilAnimationFrame(
             std::chrono::steady_clock::time_point now) const;
-        void processInput(const PanelInputState& input, float bar_x, float bar_y,
-                          float bar_w, float bar_h);
+        LFS_VIS_API void processInput(const PanelInputState& input, float bar_x, float bar_y,
+                                      float bar_w, float bar_h);
         [[nodiscard]] LFS_VIS_API float overlayHeight() const;
         [[nodiscard]] LFS_VIS_API bool isOverlayPoint(float local_x, float local_y,
                                                       float bar_w) const;
@@ -100,6 +102,13 @@ namespace lfs::vis::gui {
         };
 
         bool updateContent(const PanelDrawContext& ctx);
+        LFS_VIS_API void updateBackendContent();
+        LFS_VIS_API void updateBackendContent(std::optional<rendering::ViewerBackend> published_backend);
+        LFS_VIS_API bool applyHoverTooltip(int doc_w, int bar_h, int maximum_overlay_height,
+                                           bool force_position = false);
+        void updateHoverTooltip();
+        void updateTooltipScheduling();
+        void resetTooltip();
         bool updateTheme();
         bool layoutFits(float reserve_px) const;
         LFS_VIS_API void fitToAvailableWidth(bool allow_expand);
@@ -140,6 +149,22 @@ namespace lfs::vis::gui {
         Rml::Context* rml_context_ = nullptr;
         Rml::ElementDocument* document_ = nullptr;
         bool document_registered_ = false;
+        RmlTooltipController tooltip_;
+        Rml::Element* tooltip_target_ = nullptr;
+        std::string tooltip_text_;
+        struct BackendStatusStamp {
+            std::optional<rendering::ViewerBackend> published_backend;
+            int configured;
+            int tensor;
+            uint64_t language;
+            bool operator==(const BackendStatusStamp&) const = default;
+        };
+        std::optional<BackendStatusStamp> backend_status_stamp_;
+        float tooltip_overlay_height_ = 0.0f;
+        int last_mouse_x_ = 0;
+        int last_mouse_bar_y_ = 0;
+        int last_mouse_modifiers_ = 0;
+        bool pointer_inside_ = false;
         Rml::DataModelHandle model_handle_;
         Rml::EventListener* git_commit_listener_ = nullptr;
         Rml::EventListener* gpu_icon_listener_ = nullptr;
@@ -259,6 +284,8 @@ namespace lfs::vis::gui {
             std::string fps_value;
             std::string fps_color;
             std::string fps_label;
+            std::string renderer_label, renderer_value, renderer_tooltip;
+            std::string tensor_label, tensor_value, tensor_tooltip;
             bool preview_reduced = false;
             std::string preview_reduced_text;
             std::string git_commit;
