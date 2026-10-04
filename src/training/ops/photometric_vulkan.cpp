@@ -46,8 +46,6 @@ namespace lfs::training {
                 if (path == PhotoPath::SSIM)
                     sizes.push_back(4 * e);
                 sizes.push_back(4 * e);
-                if (decoupled(path))
-                    sizes.push_back(4 * e);
                 sizes.push_back(masked(path) ? 8192 : 4096);
                 sizes.push_back(4);
                 if (masked(path))
@@ -79,7 +77,12 @@ namespace lfs::training {
                 if (path == PhotoPath::SSIM)
                     offset = aligned(offset) + 4 * e;
                 gradient = field(4 * e, dims);
-                raw_gradient = decoupled(path) ? field(4 * e, dims) : Tensor{};
+                // The arena mirrors the CUDA loss arena, which leaves the raw-render gradient to the appearance
+                // backward; these kernels still write it, so it lives beside the arena.
+                if (decoupled(path))
+                    ensure_buffer(raw_gradient, dims);
+                else
+                    raw_gradient = {};
                 ensure_buffer(cs, map_shape);
             }
         };
