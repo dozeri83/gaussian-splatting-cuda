@@ -820,6 +820,7 @@ set(TEST_FILES
     test_initial_scales.cpp
     test_system_info.cpp
     test_parameter_manager.cpp
+    test_training_manager_events.cpp
     test_mcp_protocol.cpp
     test_mcp_training_state.cpp
     test_training_command_masks.cpp
