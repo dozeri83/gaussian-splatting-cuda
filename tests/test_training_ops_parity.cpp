@@ -479,6 +479,10 @@ namespace {
                     Tensor loss, grad, raw_gradient;
                     table->evaluate(saved, prediction, path.raw ? raw_image : absent, byte_target,
                                     path.mask ? soft : absent, {path.path, path.weight, true}, loss, grad, raw_gradient);
+                    if (path.raw && table->add_raw_gradient != nullptr) {
+                        raw_gradient = Tensor::zeros(prediction.shape(), Device::GPU);
+                        table->add_raw_gradient(saved, raw_gradient);
+                    }
                     const std::string prefix = std::format("photo.edge.{}.{}.{}.{}.{}", n, h, w, zero_mask, path.name);
                     keep(out.snapshot, backend, prefix + ".loss", loss, kReduce);
                     keep(out.snapshot, backend, prefix + ".gradient", grad, kReduce);
