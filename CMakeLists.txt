@@ -94,6 +94,21 @@ endif()
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/VcpkgProfiles.cmake")
 lfs_validate_vcpkg_profile()
 
+# Set the application baseline before compiler and dependency detection. A
+# newer host SDK must not silently raise the minimum supported macOS version.
+if(CMAKE_HOST_APPLE AND (NOT CMAKE_SYSTEM_NAME OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        if(DEFINED ENV{MACOSX_DEPLOYMENT_TARGET} AND NOT "$ENV{MACOSX_DEPLOYMENT_TARGET}" STREQUAL "")
+            set(CMAKE_OSX_DEPLOYMENT_TARGET "$ENV{MACOSX_DEPLOYMENT_TARGET}" CACHE STRING "Minimum supported macOS version" FORCE)
+        else()
+            set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum supported macOS version" FORCE)
+        endif()
+    endif()
+    if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "26.0")
+        message(FATAL_ERROR "The native macOS viewer requires CMAKE_OSX_DEPLOYMENT_TARGET >= 26.0 (Metal 4 resident tensor access)")
+    endif()
+endif()
+
 # APPLE is only defined after project(); the host variable exists before it.
 # Default ON except on Apple, where the trainer and CUDA language stay off.
 option(LFS_ENABLE_CUDA "Build the CUDA language, toolkit, and CUDA trainer kernels" ON)
@@ -1082,7 +1097,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMENT "Creating resource directory structure"
 )
 
-if(TARGET lfs_vulkan_rasterizer)
+if(TARGET lfs_vulkan_rasterizer AND NOT APPLE)
     get_target_property(_LFS_VULKAN_RASTERIZER_SPV_DIR
         lfs_vulkan_rasterizer
         LFS_VULKAN_RASTERIZER_SPV_DIR)

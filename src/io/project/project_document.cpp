@@ -565,7 +565,8 @@ namespace lfs::io::project {
         std::shared_ptr<ProjectReader> reader;
         std::optional<ChunkInfo> source;
         std::optional<CleanProof> proof;
-        std::shared_ptr<const std::vector<std::byte>> owned;
+        std::shared_ptr<const void> owned;
+        std::span<const std::byte> owned_bytes;
         // Cache of container-decompressed logical bytes for Zstd /
         // ByteShuffleZstd sources. visit_stream prefers a bounded decode
         // stream and does not populate this. read_at still materializes
@@ -575,7 +576,7 @@ namespace lfs::io::project {
 
         [[nodiscard]] std::uint64_t size() const noexcept {
             if (owned) {
-                return owned->size();
+                return owned_bytes.size();
             }
             if (inflated) {
                 return inflated->size();
@@ -586,8 +587,8 @@ namespace lfs::io::project {
         [[nodiscard]] lfs::Result<std::span<const std::byte>>
         logical_owned_or_inflated() const {
             if (owned) {
-                return std::span<const std::byte>(owned->data(),
-                                                  owned->size());
+                return std::span<const std::byte>(owned_bytes.data(),
+                                                  owned_bytes.size());
             }
             if (inflated) {
                 return std::span<const std::byte>(inflated->data(),
@@ -629,7 +630,16 @@ namespace lfs::io::project {
     LazyChunkValue::from_owned(
         std::shared_ptr<const std::vector<std::byte>> bytes,
         const lfs::core::Uuid& snapshot_uuid) {
-        if (!bytes) {
+        const auto view = bytes ? std::span<const std::byte>(*bytes) : std::span<const std::byte>{};
+        return from_owned(std::move(bytes), view, snapshot_uuid);
+    }
+
+    lfs::Result<LazyChunkValue>
+    LazyChunkValue::from_owned(
+        std::shared_ptr<const void> owner,
+        const std::span<const std::byte> bytes,
+        const lfs::core::Uuid& snapshot_uuid) {
+        if (!owner || (!bytes.empty() && !bytes.data())) {
             return fail<LazyChunkValue>(
                 lfs::ErrorCode::InvalidArgument,
                 "The staged chapter storage is missing.",
@@ -644,7 +654,8 @@ namespace lfs::io::project {
                 "lazy_chunk.snapshot_uuid");
         }
         auto impl = std::make_unique<Impl>();
-        impl->owned = std::move(bytes);
+        impl->owned = std::move(owner);
+        impl->owned_bytes = bytes;
         impl->snapshot_uuid = snapshot_uuid;
         return LazyChunkValue(std::move(impl));
     }
@@ -672,6 +683,7 @@ namespace lfs::io::project {
         clone->source = impl_->source;
         clone->proof = impl_->proof;
         clone->owned = impl_->owned;
+        clone->owned_bytes = impl_->owned_bytes;
         clone->snapshot_uuid = impl_->snapshot_uuid;
         return LazyChunkValue(std::move(clone));
     }
@@ -715,7 +727,7 @@ namespace lfs::io::project {
         if (impl_->owned) {
             std::memcpy(
                 destination.data(),
-                impl_->owned->data() + offset,
+                impl_->owned_bytes.data() + offset,
                 destination.size());
             return {};
         }
@@ -753,9 +765,9 @@ namespace lfs::io::project {
         }
         if (impl_->owned) {
             SpanStreambuf buffer(std::span<const std::byte>(
-                impl_->owned->data(), impl_->owned->size()));
+                impl_->owned_bytes.data(), impl_->owned_bytes.size()));
             std::istream stream(&buffer);
-            return visitor(stream, impl_->owned->size());
+            return visitor(stream, impl_->owned_bytes.size());
         }
         if (!impl_->reader || !impl_->source) {
             return fail<void>(
@@ -843,7 +855,7 @@ namespace lfs::io::project {
         }
         if (impl_->owned) {
             std::memcpy(
-                destination.data(), impl_->owned->data(), destination.size());
+                destination.data(), impl_->owned_bytes.data(), destination.size());
             return {};
         }
         if (impl_->inflated) {
@@ -4592,7 +4604,7 @@ namespace lfs::io::project {
                     const auto options =
                         lazy_binary_options(fourcc, payload.size());
                     if (auto written = writer->write_chunk(
-                            key, *payload.impl_->owned, options);
+                            key, payload.impl_->owned_bytes, options);
                         !written) {
                         return written;
                     }

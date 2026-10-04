@@ -87,8 +87,8 @@ namespace lfs::vis::op {
 
 namespace lfs::vis {
     class VulkanContext;
-    class VksplatViewportRenderer;
-    class PointCloudVulkanRenderer;
+    class SceneRenderer;
+    class PointSceneRenderer;
     struct VulkanViewportPassParams;
 
     class SceneManager;
@@ -122,6 +122,8 @@ namespace lfs::vis {
             std::uint64_t external_image_generation = 0;
             VkSemaphore completion_semaphore = VK_NULL_HANDLE;
             std::uint64_t completion_value = 0;
+            // Mixed panels may come from independent native command queues.
+            std::vector<ViewportInteropService::FrameCompletion> additional_completions;
             // Bumps only when the underlying image content changes (fresh render).
             // Cache-HIT frames keep the previous value so downstream consumers
             // (e.g. CUDA→Vulkan interop upload) can skip work by generation.
@@ -481,6 +483,9 @@ namespace lfs::vis {
         void clearLatestCameraMetrics();
 
         // FPS monitoring (scene renders vs. swapchain-presented GUI frames)
+        [[nodiscard]] std::optional<lfs::rendering::ViewerBackend> activeViewerBackend() const {
+            return this->state().viewport_artifact_service_.viewerBackend();
+        }
         FrameRates getFrameRates() const { return frame_rates_.sample(); }
         float getAverageFPS() const { return getFrameRates().view; }
         float getPresentedAverageFPS() const { return getFrameRates().ui; }
@@ -951,8 +956,8 @@ namespace lfs::vis {
         unsigned import_render_frames_ = 0;
         std::optional<std::string> import_render_result_;
         [[nodiscard]] float trainingRefreshIntervalSec(const ViewRenderState& view) const;
-        std::unique_ptr<VksplatViewportRenderer> vksplat_viewport_renderer_;
-        std::unique_ptr<PointCloudVulkanRenderer> point_cloud_vulkan_renderer_;
+        std::unique_ptr<SceneRenderer> scene_renderer_;
+        std::unique_ptr<PointSceneRenderer> point_scene_renderer_;
         std::unique_ptr<SparkLodController> lod_controller_;
         const lfs::core::SplatData* lod_controller_model_ = nullptr;
         bool lod_controller_needs_sync_traversal_ = false;

@@ -890,12 +890,12 @@
     "zoom": "缩放"
   },
   "preferences": {
-    "tensor_auto": "自动",
+    "tensor_auto": "Auto",
     "tensor_cuda": "CUDA",
     "tensor_vulkan": "Vulkan",
     "tensor_metal": "Metal",
     "tensor_backend": "Tensor backend",
-    "tensor_restart": "Changes apply after restarting LichtFeld Studio. Automatic picks CUDA where it is built, else Metal where the GPU supports it, else Vulkan. Vulkan and Metal support viewing and inference; training requires CUDA.",
+    "tensor_restart": "独立于查看器渲染器控制 GPU 张量计算。更改在重启 LichtFeld Studio 后生效。自动模式根据此构建和 GPU 选择 CUDA、Metal 或 Vulkan。",
     "tensor_device": "Vulkan device",
     "tensor_device_hint": "Leave empty for automatic selection, or enter a device index or UUID. CUDA rendering must use the CUDA device.",
     "tensor_validation": "Vulkan diagnostics",
@@ -1018,7 +1018,10 @@
     "reset_all_settings_confirmation": "将语言、主题、界面缩放、场景重建、输入偏好、MCP 服务器、布局和窗口状态恢复为默认值？将立即应用。如果当前打开了 .licht 项目，下次保存时将替换其已存储的布局；项目内容、数据集、导出、插件和缓存不会受到影响。",
     "reset_all_settings_success": "所有偏好、布局和窗口状态已立即重置。",
     "window_manager_unavailable": "窗口管理器不可用。",
-    "window_state_reset_failed": "无法将窗口恢复为默认位置和大小。"
+    "window_state_reset_failed": "无法将窗口恢复为默认位置和大小。",
+    "viewer_backend": "查看器后端",
+    "viewer_backend_description": "立即生效。Auto 在兼容的 Mac 上优先使用 Metal，在其他系统上使用 Vulkan。不支持的帧使用 Vulkan。",
+    "backend_unavailable": "所选后端在此设备上不可用。设置未更改。"
   },
   "main_panel": {
     "console": "控制台",
@@ -2129,7 +2132,16 @@
     "split": "分割：",
     "mcp_name": "MCP",
     "ui": "界面",
-    "view": "视图"
+    "view": "视图",
+    "renderer_backend": "渲染器",
+    "tensor_backend": "张量",
+    "renderer_backend_tooltip": "场景渲染后端。",
+    "tensor_backend_tooltip": "张量计算后端。",
+    "backend_requested": "请求：{}",
+    "backend_no_frame": "已配置的渲染器；尚无场景帧。",
+    "backend_fallback": "此帧无法使用 Metal，正在使用 Vulkan。",
+    "renderer_backend_short": "R",
+    "tensor_backend_short": "T"
   },
   "plugin_manager": {
     "github_url_or_shorthand": "GitHub URL 或简写：",
