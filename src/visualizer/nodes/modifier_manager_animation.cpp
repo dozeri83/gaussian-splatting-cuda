@@ -146,8 +146,8 @@ namespace lfs::vis {
             // A scrub may replace pending animated work, but must not discard
             // pending ordinary graph/scene edits on unrelated static hosts.
             const bool animation_only = animation_only_request_ ||
-                (requested_generation_ == last_installed_generation_ &&
-                 std::ranges::none_of(runtime_, [](const auto& item) { return item.second.dirty; }));
+                                        (requested_generation_ == last_installed_generation_ &&
+                                         std::ranges::none_of(runtime_, [](const auto& item) { return item.second.dirty; }));
             markDirty();
             animation_only_request_ = animation_only;
         } else if (last_time_dependent_) {
