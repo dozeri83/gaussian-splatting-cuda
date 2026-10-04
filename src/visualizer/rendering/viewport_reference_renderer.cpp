@@ -12,7 +12,8 @@ namespace lfs::vis {
         return state ? state->sceneOutputGeneration() : std::nullopt;
     }
     void clearViewportReferenceOutput(ViewRenderState& view) {
-        if (view.reference_state_) view.reference_state_->clearSceneOutput();
+        if (view.reference_state_)
+            view.reference_state_->clearSceneOutput();
     }
     struct ViewportReferenceResources::Impl {
         std::shared_ptr<SharedViewportGpuAssets> assets = std::make_shared<SharedViewportGpuAssets>();

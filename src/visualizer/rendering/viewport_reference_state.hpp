@@ -12,4 +12,4 @@ namespace lfs::vis {
     [[nodiscard]] LFS_VIS_API std::optional<std::uint64_t>
     referenceSceneOutputGeneration(const ViewRenderState&);
     LFS_VIS_API void clearViewportReferenceOutput(ViewRenderState&);
-}
+} // namespace lfs::vis
