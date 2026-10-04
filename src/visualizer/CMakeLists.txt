@@ -6,8 +6,9 @@
 include(${CMAKE_SOURCE_DIR}/cmake/FetchLibvterm.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/CompileShaders.cmake)
 
-# SHARED on Windows and macOS to avoid singleton duplication across module boundaries
-if(WIN32 OR APPLE)
+# SHARED on Windows and macOS to avoid singleton duplication across module
+# boundaries, or when checking the Windows DLL export boundary on Linux.
+if(WIN32 OR APPLE OR LFS_HIDDEN_SYMBOLS)
     set(LFS_VIS_LIB_TYPE SHARED)
 else()
     set(LFS_VIS_LIB_TYPE STATIC)
@@ -25,6 +26,15 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         core/job_registry.cpp
         core/parameter_manager.cpp
         core/services.cpp
+
+        # Geometry node modifiers
+        nodes/modifier_manager.cpp
+        nodes/node_animation.cpp
+        nodes/modifier_manager_animation.cpp
+        nodes/camera_nodes.cpp
+        nodes/viewport_coordinates.cpp
+        nodes/modifier_manager_evaluation.cpp
+        nodes/modifier_evaluation_worker.cpp
 
         # Project session chapters
         project/session_state.cpp
@@ -48,7 +58,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         rendering/rendering_manager_vulkan.cpp
         rendering/display_tensors.cpp
         rendering/rendering_manager_viewport.cpp
-        rendering/nvidia_dlss_plugin.cpp
+        rendering/scene_upscaler_plugin.cpp
         rendering/scene_upscaler_registry.cpp
         rendering/scene_temporal_coordinator.cpp
         rendering/scene_temporal_plan.cpp
@@ -70,9 +80,9 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         rendering/passes/vulkan_viewport_pass.cpp
         rendering/passes/vulkan_mesh_pass.cpp
         rendering/passes/vulkan_scene_motion_pass.cpp
-        rendering/passes/vulkan_scene_dlss_depth_pass.cpp
-        rendering/passes/vulkan_scene_dlss_pipeline_contract.cpp
-        rendering/passes/vulkan_scene_dlss_pipeline.cpp
+        rendering/passes/vulkan_scene_plugin_depth_pass.cpp
+        rendering/passes/vulkan_scene_plugin_pipeline_contract.cpp
+        rendering/passes/vulkan_scene_plugin_pipeline.cpp
         rendering/passes/vulkan_scene_depth_history_pass.cpp
         rendering/passes/vulkan_scene_temporal_resolve_pass.cpp
         rendering/passes/vulkan_scene_temporal_pipeline_contract.cpp
@@ -105,6 +115,9 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/layout_state.cpp
         gui/screen_host.cpp
         gui/area_editors.cpp
+        gui/node_canvas_interaction.cpp
+        gui/node_canvas_layout.cpp
+        gui/node_canvas_routing.cpp
         gui/async_task_manager.cpp
         gui/gallery_scene_publication.cpp
         gui/bounds_gizmo.cpp
@@ -164,6 +177,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         input/input_controller.cpp
         input/input_router.cpp
         input/input_bindings.cpp
+        input/injected_pointer.cpp
         input/sdl_key_mapping.cpp
 
         # Training integration
@@ -233,8 +247,17 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/rmlui/rml_tooltip.cpp
         gui/rmlui/elements/chromaticity_element.cpp
         gui/rmlui/elements/color_picker_element.cpp
+        gui/rmlui/elements/colour_offset_element.cpp
+        gui/rmlui/elements/node_curve_element.cpp
         gui/rmlui/elements/crf_curve_element.cpp
         gui/rmlui/elements/loss_graph_element.cpp
+        gui/rmlui/elements/node_canvas_element.cpp
+        gui/rmlui/elements/node_canvas_widgets.cpp
+        gui/rmlui/elements/node_canvas_fields.cpp
+        gui/rmlui/elements/node_canvas_dom.cpp
+        gui/rmlui/elements/node_canvas_status.cpp
+        gui/rmlui/elements/node_canvas_menu.cpp
+        gui/rmlui/elements/node_canvas_help.cpp
         gui/rmlui/elements/vram_timeline_element.cpp
         gui/rmlui/elements/python_editor_element.cpp
         gui/rmlui/elements/scene_graph_element.cpp
@@ -316,10 +339,15 @@ endif()
 target_sources(lfs_visualizer
         PRIVATE
         gui/rmlui/rmlui_vk_backend.cpp
+        rendering/scene_renderer.cpp
         rendering/vksplat_input_packer.cpp
-        rendering/vksplat_viewport_renderer.cpp
         rendering/vulkan_external_tensor.cpp
-        rendering/point_cloud_vulkan_renderer.cpp)
+        rendering/scene_overlay_params.cpp)
+if(NOT APPLE)
+    target_sources(lfs_visualizer PRIVATE
+        rendering/vksplat_viewport_renderer.cpp rendering/point_cloud_vulkan_renderer.cpp
+        rendering/vulkan_scene_renderer.cpp)
+endif()
 
 set(glslang_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/glslang"
     CACHE PATH "Path to vcpkg-installed glslang config" FORCE)
@@ -366,7 +394,7 @@ compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/split_view.frag
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/vksplat_compose.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/vksplat_compose.comp.spv.h" kVkSplatComposeCompSpv
     "${CMAKE_SOURCE_DIR}/src/rendering/rasterizer/vulkan/shader/src/slang/display_color.inc")
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/scene_motion_reproject.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/scene_motion_reproject.comp.spv.h" kSceneMotionReprojectCompSpv)
-compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/scene_dlss_depth.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/scene_dlss_depth.comp.spv.h" kSceneDlssDepthCompSpv)
+compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/scene_plugin_depth.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/scene_plugin_depth.comp.spv.h" kScenePluginDepthCompSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/scene_temporal_resolve.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/scene_temporal_resolve.comp.spv.h" kSceneTemporalResolveCompSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/scene_depth_history.comp" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/scene_depth_history.comp.spv.h" kSceneDepthHistoryCompSpv)
 compile_shader(lfs_visualizer "${LFS_VIEWPORT_SHADER_SOURCE_DIR}/point_cloud.vert" "${LFS_VIEWPORT_SHADER_BINARY_DIR}/point_cloud.vert.spv.h" kPointCloudVertSpv)
@@ -378,7 +406,26 @@ target_link_libraries(lfs_visualizer
         GPUOpen::VulkanMemoryAllocator
         volk::volk_headers
         ${CMAKE_DL_LIBS})
-target_link_libraries(lfs_visualizer PRIVATE lfs_vulkan_rasterizer)
+if(NOT APPLE)
+    target_link_libraries(lfs_visualizer PRIVATE lfs_vulkan_rasterizer)
+else()
+    target_link_libraries(lfs_visualizer PRIVATE lfs_vulkan_runtime)
+endif()
+if(APPLE)
+    enable_language(OBJCXX)
+    file(READ "${CMAKE_SOURCE_DIR}/src/rendering/rasterizer/vulkan/shader/src/slang/display_color.inc" LFS_METAL_DISPLAY_COLOR)
+    configure_file(rendering/metal_viewport_present.metal generated/metal_viewport_present.metal @ONLY)
+    file(READ "${CMAKE_CURRENT_BINARY_DIR}/generated/metal_viewport_present.metal" LFS_METAL_PRESENT_SOURCE)
+    configure_file(rendering/metal_present_source.hpp.in generated/metal_present_source.hpp @ONLY)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/src/rendering/rasterizer/vulkan/shader/src/slang/display_color.inc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/rendering/metal_viewport_present.metal")
+    target_sources(lfs_visualizer PRIVATE rendering/metal_viewport_renderer.mm rendering/metal_rad_pager.mm)
+    set_source_files_properties(rendering/metal_viewport_renderer.mm rendering/metal_rad_pager.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_target_properties(lfs_visualizer PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED YES)
+    target_include_directories(lfs_visualizer PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    target_link_libraries(lfs_visualizer PRIVATE lfs_metal_viewer)
+endif()
 if(WIN32)
     target_compile_definitions(lfs_visualizer PRIVATE VK_USE_PLATFORM_WIN32_KHR)
 endif()

@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -66,6 +67,10 @@ namespace lfs::core {
         bool external_memory = false;
         bool external_semaphore = false;
         bool metal_objects = false;
+        // The application's own queue on the device and the mutex it submits under.
+        // On MoltenVK memory is freed only after that queue has drained too.
+        void* consumer_queue = nullptr;
+        std::mutex* consumer_queue_mutex = nullptr;
     };
 
     // Fails when the backend already has a context (adopt before the first
@@ -76,6 +81,9 @@ namespace lfs::core {
     // device. Metal tensors reach the window through their own interop, so
     // adopting a device for them would only allocate an unused context.
     LFS_CORE_API bool tensor_backend_shares_vulkan_device();
+    // Native Metal readers accept resident Metal and exportable MoltenVK storage.
+    LFS_CORE_API bool tensor_supports_metal_access(const Tensor& tensor);
+    LFS_CORE_API bool tensor_backend_supports_metal_access();
     // Whether this session's tensors live on another API's device, which the
     // window's Vulkan device reaches through external memory and semaphores.
     LFS_CORE_API bool tensor_backend_needs_vulkan_interop();

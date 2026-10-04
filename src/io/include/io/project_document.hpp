@@ -59,6 +59,13 @@ namespace lfs::io::project {
         [[nodiscard]] static lfs::Result<LazyChunkValue>
         from_owned(std::vector<std::byte> bytes,
                    const lfs::core::Uuid& snapshot_uuid);
+        // Retain immutable contiguous storage supplied by a producer without
+        // copying it into a vector. The span must belong to owner and remain
+        // unchanged throughout the value's lifetime, including share().
+        [[nodiscard]] static lfs::Result<LazyChunkValue>
+        from_owned(std::shared_ptr<const void> owner,
+                   std::span<const std::byte> bytes,
+                   const lfs::core::Uuid& snapshot_uuid);
         // Independent owner of the same file-backed or owned bytes. Safe to
         // retain after the source ProjectDocument is closed or replaced.
         [[nodiscard]] lfs::Result<LazyChunkValue> share() const;
@@ -297,6 +304,8 @@ namespace lfs::io::project {
         [[nodiscard]] EditorSessionChapter& edit_editor() noexcept;
         [[nodiscard]] const SequencerSessionChapter& sequencer() const noexcept;
         [[nodiscard]] SequencerSessionChapter& edit_sequencer() noexcept;
+        [[nodiscard]] const NodesSessionChapter& nodes() const noexcept;
+        [[nodiscard]] NodesSessionChapter& edit_nodes() noexcept;
         [[nodiscard]] const MetricsChapter& metrics() const noexcept;
         [[nodiscard]] MetricsChapter& edit_metrics() noexcept;
 
@@ -333,6 +342,11 @@ namespace lfs::io::project {
         [[nodiscard]] lfs::Result<void>
         set_ppisp(const lfs::core::Uuid& instance_uuid,
                   LazyChunkValue payload);
+        // The single SfM observation chapter (SFMO), or null.
+        [[nodiscard]] const LazyChunkValue* find_sfm_observations() const noexcept;
+        // Replaces the SFMO chapter; nullopt removes it.
+        [[nodiscard]] lfs::Result<void>
+        set_sfm_observations(std::optional<LazyChunkValue> payload);
         [[nodiscard]] lfs::Result<void>
         set_georeference(const ProjectGeoreference& value);
         [[nodiscard]] lfs::Result<void>

@@ -205,7 +205,9 @@ namespace lfs::training {
             uint64_t means, scales, rotations, opacities, sh0, shN, sh_bounds, view, camera;
             uint64_t mean_box, conic_opacity, color_depth, tile_info, n_touched, normals, max_screen_share;
             uint32_t n, grid_w, grid_h, depth_bits;
-            uint32_t mip_filter, unused0, unused1, unused2;
+            uint32_t mip_filter;
+            float dilation_scale;
+            uint32_t unused1, unused2;
             float fx, fy, cx, cy;
             float clip_left, clip_right, clip_top, clip_bottom;
             float near_plane, far_plane;
@@ -381,7 +383,7 @@ namespace lfs::training {
                     .grid_h = f.grid_h,
                     .depth_bits = key_depth_bits,
                     .mip_filter = f.mip_filter ? 1u : 0u,
-                    .unused0 = 0,
+                    .dilation_scale = params.dilation_scale,
                     .unused1 = 0,
                     .unused2 = 0,
                     .fx = f.fx,
@@ -578,7 +580,7 @@ namespace lfs::training {
         };
 
         struct BackwardShParams {
-            uint64_t means, camera, shN, sh_bounds, n_touched, grads;
+            uint64_t means, camera, shN, sh_bounds, n_touched, color_depth, grads;
             AdamGroupParams sh0, shN_adam;
             float beta1, beta2, eps;
             uint32_t n;
@@ -724,13 +726,14 @@ namespace lfs::training {
             }
 
             const uint32_t blocks = div_up(f.n, 256);
-            std::vector<const Tensor*> uses{&f.means, &f.camera, &f.shN, &f.sh_bounds, &s.n_touched, &s.grads};
+            std::vector<const Tensor*> uses{&f.means, &f.camera, &f.shN, &f.sh_bounds, &s.n_touched, &s.color_depth, &s.grads};
             const BackwardShParams sh{
                 .means = mk::address(f.means),
                 .camera = mk::address(f.camera),
                 .shN = f.sh_bases > 1 ? address_if(f.shN) : 0,
                 .sh_bounds = address_if(f.sh_bounds),
                 .n_touched = mk::address(s.n_touched),
+                .color_depth = mk::address(s.color_depth),
                 .grads = mk::address(s.grads),
                 .sh0 = adam_group(group(AdamSlot::Sh0), uses),
                 .shN_adam = adam_group(group(AdamSlot::ShN), uses),

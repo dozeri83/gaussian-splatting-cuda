@@ -3,6 +3,14 @@
 
 # Testing module - comprehensive tests for all components
 
+if(BUILD_TESTS OR BUILD_FORMAT_TESTS OR BUILD_VISUALIZER_TESTS)
+    add_subdirectory(metal_viewer)
+endif()
+
+if(BUILD_TESTS OR BUILD_FORMAT_TESTS)
+    add_subdirectory(image_codecs)
+endif()
+
 # =============================================================================
 # Headless localization contracts (no LibTorch/CUDA)
 # =============================================================================
@@ -17,6 +25,14 @@ if(BUILD_LOCALIZATION_TESTS)
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         TIMEOUT 30
     )
+    add_test(NAME MacosPortableInventory
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/python/test_macos_portable_inventory.py)
+    set_tests_properties(MacosPortableInventory PROPERTIES TIMEOUT 30)
+    if(APPLE)
+        add_test(NAME MacosPortableResourcePaths
+            COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/python/test_macos_portable_resource_paths.py)
+        set_tests_properties(MacosPortableResourcePaths PROPERTIES TIMEOUT 30)
+    endif()
     add_custom_target(test_localization_contracts
         COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R LocalizationContracts
         DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/CTestTestfile.cmake
@@ -28,8 +44,27 @@ if(BUILD_LOCALIZATION_TESTS)
     endif()
 endif()
 
+if(BUILD_TESTS OR BUILD_VISUALIZER_TESTS)
+    add_subdirectory(vulkan_viewer)
+endif()
+
 # Find GTest
 find_package(GTest CONFIG REQUIRED)
+
+if(APPLE AND (BUILD_VISUALIZER_TESTS OR BUILD_TESTS))
+    # Cocoa delivers SDL drag events; this contract exercises the bridge without a GPU.
+    add_executable(mac_native_drag_drop_contracts EXCLUDE_FROM_ALL
+        test_mac_native_drag_drop.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/gui/utils/drag_drop_native.cpp)
+    target_compile_features(mac_native_drag_drop_contracts PRIVATE cxx_std_23)
+    target_include_directories(mac_native_drag_drop_contracts PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/visualizer)
+    target_link_libraries(mac_native_drag_drop_contracts PRIVATE
+        SDL3::SDL3 lfs_logger GTest::gtest_main)
+    add_test(NAME MacNativeDragDropContracts COMMAND mac_native_drag_drop_contracts)
+    set_tests_properties(MacNativeDragDropContracts PROPERTIES
+        LABELS "cpu;macos" TIMEOUT 30 ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+endif()
 
 # =============================================================================
 # CPU-only visualizer tests (no LibTorch)
@@ -49,18 +84,24 @@ if(BUILD_VISUALIZER_TESTS OR BUILD_TESTS)
         test_menu_bar_title.cpp
 
         test_preferences_migration.cpp
+        test_scene_upscaler_registry.cpp
         test_screen_layout.cpp
         test_screen.cpp
         test_view_render_state.cpp
         test_python_editor_input.cpp
         test_startup_overlay_geometry.cpp
+        test_status_bar_fit.cpp
+        test_viewer_backend_metadata.cpp
         test_trackpad_navigation.cpp
+        test_training_manager_capacity.cpp
         test_vram_hud_geometry.cpp
     )
     if(NOT LFS_HAS_CUDA)
         # CUDA builds run these in lichtfeld_tests.
         list(APPEND LICHTFELD_VISUALIZER_TEST_SOURCES
             test_gpu_memory_query.cpp
+            test_node_canvas_widgets.cpp
+            test_rml_static_style_boundaries.cpp
             test_viewer_gpu_memory.cpp)
     endif()
     add_executable(lichtfeld_visualizer_tests EXCLUDE_FROM_ALL
@@ -209,6 +250,7 @@ endif()
 # =============================================================================
 if(BUILD_TEMPORAL_CPU_TESTS)
     add_executable(lichtfeld_temporal_cpu_tests
+        test_scene_upscaler_plugin_api.cpp
         test_scene_motion_contract.cpp
         test_scene_temporal_coordinator.cpp
         test_scene_temporal_plan.cpp
@@ -218,7 +260,7 @@ if(BUILD_TEMPORAL_CPU_TESTS)
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_plan.cpp
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_resolve.cpp
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/temporal_frame_tracker.cpp
-        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/passes/vulkan_scene_dlss_pipeline_contract.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/passes/vulkan_scene_plugin_pipeline_contract.cpp
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/passes/vulkan_scene_temporal_pipeline_contract.cpp
     )
     target_include_directories(lichtfeld_temporal_cpu_tests PRIVATE
@@ -261,11 +303,14 @@ endif()
 
 # Headless SDL boundary regression tests, also built in the CPU-only CI configuration.
 # Do not link SDL itself: this isolated executable provides the four SDL state
-# queries used by the production coordinate helpers and frame finalization.
+# queries used by the production coordinate helpers and frame finalization, and
+# reports no injected MCP pointer.
 add_executable(lichtfeld_sdl_coordinate_tests test_sdl_pixel_coordinates.cpp)
 target_compile_features(lichtfeld_sdl_coordinate_tests PRIVATE cxx_std_23)
+target_compile_definitions(lichtfeld_sdl_coordinate_tests PRIVATE LFS_STATIC_BUILD)
 target_include_directories(lichtfeld_sdl_coordinate_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/visualizer
+    ${CMAKE_SOURCE_DIR}/src/core/include
 )
 target_link_libraries(lichtfeld_sdl_coordinate_tests PRIVATE
     GTest::gtest_main
@@ -315,6 +360,7 @@ set(LICHT_FORMAT_NON_WINDOWS_FILES
     ${CMAKE_SOURCE_DIR}/src/io/project/project_document.cpp
     ${CMAKE_SOURCE_DIR}/src/io/project/selection_chapter.cpp
     ${CMAKE_SOURCE_DIR}/src/io/project/session_chapters.cpp
+    ${CMAKE_SOURCE_DIR}/src/io/project/sfm_observation_chapter.cpp
     ${CMAKE_SOURCE_DIR}/src/io/project/splat_chapter.cpp
     ${CMAKE_SOURCE_DIR}/src/visualizer/gui/layout_state.cpp
 )
@@ -405,6 +451,37 @@ set_tests_properties(lichtfeld_format_tests PROPERTIES
     TIMEOUT 300
 )
 
+add_executable(lichtfeld_frame_tests
+    test_frame_demand_ledger.cpp
+    test_framerate_controller.cpp
+    ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/framerate_controller.cpp)
+
+target_compile_definitions(lichtfeld_frame_tests PRIVATE LFS_STATIC_BUILD)
+
+target_include_directories(lichtfeld_frame_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core/include
+    ${CMAKE_SOURCE_DIR}/src/visualizer/rendering
+    ${CMAKE_SOURCE_DIR}/src/visualizer
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
+)
+target_link_libraries(lichtfeld_frame_tests PRIVATE GTest::gtest_main Threads::Threads)
+set_target_properties(lichtfeld_frame_tests PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+if(COMMAND lfs_enable_fast_cxx_compile)
+    lfs_enable_fast_cxx_compile(lichtfeld_frame_tests)
+endif()
+add_test(NAME lichtfeld_frame_tests
+    COMMAND $<TARGET_FILE:lichtfeld_frame_tests> --gtest_color=no
+)
+set_tests_properties(lichtfeld_frame_tests PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    LABELS "fast;frame"
+    TIMEOUT 30
+)
+
 if(NOT BUILD_TESTS)
     message(STATUS "Building standalone CPU-only tests; full LibTorch/CUDA suite disabled")
     return()
@@ -469,6 +546,13 @@ if(NOT LFS_HAS_CUDA)
         test_tensor_vulkan_random.cpp
         test_tensor_vulkan_buffer.cpp
         test_tensor_backend_semantics.cpp
+        test_nodes_core.cpp
+        test_nodes_scene.cpp
+        test_nodes_modifier_manager.cpp
+        test_splat_simplify.cpp
+        test_node_canvas_interaction.cpp
+        test_mcp_node_tools.cpp
+        test_mcp_screen_tools.cpp
         test_tensor_metal.cpp
         test_camera_priors_portable.cpp
         test_pipelined_loader_backends.cpp
@@ -479,6 +563,7 @@ if(NOT LFS_HAS_CUDA)
             test_vulkan_trainer_start.cpp
             test_session_loader_storage.cpp
             test_training_command_masks.cpp
+            test_mesh_mask_kernels.cpp
             test_training_ops_parity.cpp
             test_training_ops_vulkan_gsplat.cpp
             test_tensor_vulkan_training_fault.cpp
@@ -489,12 +574,14 @@ if(NOT LFS_HAS_CUDA)
             test_training_ops_metal_losses.cpp
             test_training_ops_metal_adam_sh.cpp
             test_training_ops_metal_fast.cpp
+            test_training_snapshot_service.cpp
             test_ppisp_regularizer_portable.cpp)
     endif()
     if(APPLE)
         list(APPEND TEST_SOURCES test_video_videotoolbox.cpp test_mcp_render_capture_utils.cpp)
     endif()
     add_executable(lichtfeld_tests ${TEST_SOURCES})
+    target_compile_definitions(lichtfeld_tests PRIVATE PROJECT_ROOT_PATH="${CMAKE_SOURCE_DIR}")
     if(APPLE)
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(VIDEO_TEST_FFMPEG REQUIRED IMPORTED_TARGET
@@ -513,13 +600,23 @@ if(NOT LFS_HAS_CUDA)
         ${CMAKE_BINARY_DIR}/include
         ${CMAKE_SOURCE_DIR}/tests
         ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/visualizer
         ${CMAKE_SOURCE_DIR}/src/training
         ${CMAKE_SOURCE_DIR}/src/app/include
     )
     lfs_tensor_private_access(${TEST_SOURCES})
+    target_sources(lichtfeld_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/app/mcp_node_tools.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/mcp_node_resources.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/mcp_node_editor_tools.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/mcp_screen_tools.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/mcp_pointer_tool.cpp)
+    target_link_libraries(lichtfeld_tests PRIVATE lfs_mcp)
     target_link_libraries(lichtfeld_tests PRIVATE
         lfs_rendering_tensor
         lfs_core
+        lfs_io
+        lfs_visualizer
         GTest::gtest
         Vulkan::Vulkan
     )
@@ -557,6 +654,10 @@ message(STATUS "Tests: LibTorch ${Torch_VERSION} found for tensor comparison tes
 
 set(TEST_FILES
     licht_test_support.cpp
+    test_nodes_core.cpp
+    test_nodes_scene.cpp
+    test_nodes_modifier_manager.cpp
+    test_node_canvas_interaction.cpp
     test_assert_hardening.cpp
     test_cuda_error.cpp
     test_exportable_storage.cpp
@@ -676,6 +777,7 @@ set(TEST_FILES
     test_mcmc.cpp
     test_expression_templates.cpp
     test_lfs_scheduler.cpp
+    test_uncapped_compaction.cpp
     test_mrnf_strategy.cpp
     test_compact_splats_peak.cpp
     test_adam_capacity_invariant.cpp
@@ -693,6 +795,7 @@ set(TEST_FILES
     test_tensor_uint8_masking.cpp
     test_tensor_serialization.cpp
     test_tensor_cat_reduction_bug.cpp
+    test_percentile_bounds.cpp
     test_tensor_inplace_capacity.cpp
     test_sog_format.cpp
     test_ssog_format.cpp
@@ -716,6 +819,7 @@ set(TEST_FILES
     test_mask_loss.cpp
     test_mask_preprocess_fusion.cpp
     test_roi_weight_map.cpp
+    test_mesh_mask_kernels.cpp
     test_roi_weighted_losses.cpp
     test_checkpoint_resume.cpp
     test_component_config_serialization.cpp
@@ -739,8 +843,11 @@ set(TEST_FILES
     test_gpu_teardown_order.cpp
     test_logger.cpp
     test_exif.cpp
+    test_nanoflann_build.cpp
+    test_initial_scales.cpp
     test_system_info.cpp
     test_parameter_manager.cpp
+    test_training_manager_events.cpp
     test_mcp_protocol.cpp
     test_mcp_training_state.cpp
     test_training_command_masks.cpp
@@ -749,6 +856,7 @@ set(TEST_FILES
     test_mcp_shared_scene_tools.cpp
     test_mcp_sequencer_tools.cpp
     test_mcp_screen_tools.cpp
+    test_mcp_node_tools.cpp
     test_mcp_render_capture_utils.cpp
     test_tcp_publisher.cpp
     test_view_info_json.cpp
@@ -855,6 +963,7 @@ set(TEST_FILES
     test_rml_drag_payload.cpp
     test_context_menu_placement.cpp
     test_rml_static_style_boundaries.cpp
+    test_node_canvas_widgets.cpp
     test_sequencer_regressions.cpp
     test_tensor_storage_version.cpp
     test_tensor_backend_selection.cpp
@@ -875,6 +984,7 @@ set(TEST_FILES
     test_ppisp_checkpoint_roundtrip.cpp
     test_bilateral_grid_projection.cpp
     test_bilateral_grid_exposure_chroma.cpp
+    test_appearance_in_place.cpp
     test_ppisp_projection.cpp
     test_ppisp_cuda_vs_torch.cpp
     test_ppisp_banded_region.cpp
@@ -999,6 +1109,12 @@ list(APPEND TEST_FILES test_rad_meta_sidecar.cpp)
 # instead of silently dropping coverage from the executable.
 set(TEST_SOURCES test_main.cpp ${TEST_FILES})
 
+# Also exercise the portable appearance references in Linux CUDA/Vulkan builds.
+# Their _Float16 CPU oracle requires GCC or Clang.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND TEST_SOURCES test_training_ops_metal_appearance.cpp)
+endif()
+
 # PyModalRegistry and its native-modal dispatch path for regression tests.
 list(APPEND TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/python/lfs/py_error.cpp
@@ -1008,6 +1124,10 @@ list(APPEND TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/python/lfs/rml_im_mode_layout.cpp
     ${CMAKE_SOURCE_DIR}/src/app/mcp_sequencer_tools.cpp
     ${CMAKE_SOURCE_DIR}/src/app/mcp_screen_tools.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/mcp_node_tools.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/mcp_node_resources.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/mcp_node_editor_tools.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/mcp_pointer_tool.cpp
     ${CMAKE_SOURCE_DIR}/src/app/mcp_operator_schema.cpp
     ${CMAKE_SOURCE_DIR}/src/app/converter.cpp
     ${CMAKE_SOURCE_DIR}/src/app/converter_output_paths.cpp

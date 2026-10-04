@@ -1036,33 +1036,48 @@ namespace lfs::vis::gui {
                     }
                     const auto stage_started_at = std::chrono::steady_clock::now();
                     std::string user_error;
-                    auto result = splat_load_state_.batch_stopped.load()
-                                      ? std::expected<lfs::io::LoadResult, std::string>(std::unexpected(
-                                            splat_load_state_.batch_stop_reason))
-                                      : viewer_->getSceneManager()->stageSplatFile(
-                                            request.path,
-                                            [this, job, index, total = requests.size()](const float pct,
-                                                                                        const std::string& stage) {
-                                                jobs_.report(job,
-                                                             (static_cast<float>(index) + pct / 100.0F) /
-                                                                 static_cast<float>(total),
-                                                             stage);
-                                                publishImportOverlayState();
-                                                wakeMainThreadForAsyncWork();
-                                            },
-                                            [this, job, &stop_token]() {
-                                                return stop_token.stop_requested() || jobs_.cancelRequested(job);
-                                            },
-                                            request.active_sh_degree >= 0, &user_error);
+                    auto result = [&]() -> lfs::Result<lfs::io::LoadResult> {
+                        if (splat_load_state_.batch_stopped.load()) {
+                            return lfs::make_error(lfs::ErrorInit{
+                                .code = lfs::ErrorCode::ResourceExhausted,
+                                .domain = lfs::ErrorDomain::IO,
+                                .detail = splat_load_state_.batch_stop_reason,
+                                .detection = LFS_SOURCE_SITE_CURRENT(),
+                            });
+                        }
+                        return lfs::from_legacy_expected<lfs::io::LoadResult>(
+                            viewer_->getSceneManager()->stageSplatFile(
+                                request.path,
+                                [this, job, index, total = requests.size()](const float pct,
+                                                                            const std::string& stage) {
+                                    jobs_.report(job,
+                                                 (static_cast<float>(index) + pct / 100.0F) /
+                                                     static_cast<float>(total),
+                                                 stage);
+                                    publishImportOverlayState();
+                                    wakeMainThreadForAsyncWork();
+                                },
+                                [this, job, &stop_token]() {
+                                    return stop_token.stop_requested() || jobs_.cancelRequested(job);
+                                },
+                                request.active_sh_degree >= 0, &user_error),
+                            lfs::LegacyErrorContext{
+                                .code = lfs::ErrorCode::Internal,
+                                .domain = lfs::ErrorDomain::IO,
+                                .operation = "stageSplatFile",
+                                .source = LFS_SOURCE_SITE_CURRENT(),
+                            });
+                    }();
+
+                    const std::string error_message = result ? std::string{} : std::string(result.error().detail());
 
                     if (!result && splat_load_state_.validate_batch) {
                         // Legacy loader errors flatten the native allocation
                         // cause into text. Stop this batch after device OOM:
                         // trying later files can consume the space the renderer
                         // needs to keep the already accepted nodes interactive.
-                        const auto& error = result.error();
-                        if (isImportOutOfMemory(error)) {
-                            splat_load_state_.batch_stop_reason = error;
+                        if (isImportOutOfMemory(error_message)) {
+                            splat_load_state_.batch_stop_reason = error_message;
                             splat_load_state_.batch_stopped.store(true);
                         }
                     }
@@ -1070,7 +1085,7 @@ namespace lfs::vis::gui {
                     SplatLoadCompletion completion{
                         .request = request,
                         .result = result ? std::optional<lfs::io::LoadResult>(std::move(*result)) : std::nullopt,
-                        .error = result ? std::string{} : (splat_load_state_.validate_batch && !user_error.empty() && !isImportOutOfMemory(result.error()) ? user_error : result.error()),
+                        .error = result ? std::string{} : (splat_load_state_.validate_batch && !user_error.empty() && !isImportOutOfMemory(error_message) ? user_error : error_message),
                         .stage_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - stage_started_at)};
                     {
@@ -1693,7 +1708,8 @@ namespace lfs::vis::gui {
                                          bool rad_streamable,
                                          int spz_version,
                                          bool include_provenance,
-                                         int lod_levels, float lod_ratio, int chunk_count_k, float chunk_extent, int chunk_min_k, int kmeans_iterations) {
+                                         int lod_levels, float lod_ratio, int chunk_count_k, float chunk_extent, int chunk_min_k, int kmeans_iterations,
+                                         const bool apply_modifiers) {
         if (isExporting()) {
             if (lfs::vis::gui::isGalleryPublicationFormat(format))
                 throw std::runtime_error("Wait for the current export to finish before uploading.");
@@ -1770,8 +1786,10 @@ namespace lfs::vis::gui {
                 return;
             }
             if (node && node->type == core::NodeType::SPLAT && node->model) {
+                const auto evaluated = apply_modifiers ? node->evaluated_model : nullptr;
                 splats.push_back(ExportSplatSource{
-                    .data = node->model.get(),
+                    .data = evaluated ? evaluated.get() : node->model.get(),
+                    .owner = evaluated,
                     .transform = scene_coords::nodeDataWorldTransform(scene, node->id)});
             }
         }
@@ -1781,6 +1799,10 @@ namespace lfs::vis::gui {
         }
 
         auto borrow_plan = makeBorrowSingleIdentityExportPlan(*scene_manager, node_names);
+        if (std::ranges::any_of(splats, [](const auto& source) { return source.owner != nullptr; })) {
+            borrow_plan.storage_mode = core::Scene::MergeStorageMode::Clone;
+            borrow_plan.model_mutex = nullptr;
+        }
 
         auto provenance = include_provenance ? make_gui_export_stamp(*scene_manager)
                                              : core::make_minimal_provenance_stamp();
@@ -3223,14 +3245,23 @@ namespace lfs::vis::gui {
                         viewer,
                         [viewer, engine, scene_manager, rendering_manager, environment_state,
                          mesh_renderer_state, snapshot_ptr = &snapshot, render_settings, width, height,
+                         fps = static_cast<float>(export_options.framerate),
                          cam_state = frame_states[frame],
                          clip_time = start_time + static_cast<float>(frame) * time_step]()
                             -> std::expected<lfs::core::Tensor, std::string> {
                             if (lfs::python::has_scene_time_callback()) {
                                 lfs::python::tick_scene_time_callback(clip_time);
-                                refreshVideoExportMeshTransforms(
-                                    *snapshot_ptr, scene_manager->getScene());
                             }
+                            const auto evaluated = viewer->getGuiManager()->sequencer().prepareExportFrame(
+                                scene_manager->modifierManager(), clip_time, fps);
+                            if (!evaluated)
+                                return std::unexpected(evaluated.error().message);
+                            // Capture effective payloads only after this frame's worker fence.
+                            // Reusing the initial snapshot would freeze animated geometry.
+                            auto snapshot = captureVideoExportSceneSnapshot(*scene_manager);
+                            if (!snapshot)
+                                return std::unexpected(snapshot.error());
+                            *snapshot_ptr = std::move(*snapshot);
                             auto* const window_manager = viewer->getWindowManager();
                             auto* const vulkan_context =
                                 window_manager != nullptr ? window_manager->getVulkanContext() : nullptr;

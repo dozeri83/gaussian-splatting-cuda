@@ -37,6 +37,7 @@ namespace Rml {
 
 namespace lfs::vis {
     class WindowInputDispatchTest;
+    class McpNodeToolsTest;
     class VulkanContext;
 } // namespace lfs::vis
 
@@ -102,17 +103,17 @@ namespace lfs::vis::gui {
         LFS_VIS_API ~RmlUIManager();
 
         bool initVulkan(SDL_Window* window, lfs::vis::VulkanContext& vulkan_context, float dp_ratio = 1.0f);
-        void shutdown();
+        LFS_VIS_API void shutdown();
         [[nodiscard]] bool isInitialized() const { return initialized_; }
 
         float getDpRatio() const { return dp_ratio_; }
         void setDpRatio(float ratio);
 
-        Rml::Context* createContext(const std::string& name, int width, int height);
-        Rml::Context* getContext(const std::string& name);
-        void destroyContext(const std::string& name);
+        LFS_VIS_API Rml::Context* createContext(const std::string& name, int width, int height);
+        LFS_VIS_API Rml::Context* getContext(const std::string& name);
+        LFS_VIS_API void destroyContext(const std::string& name);
 
-        void ensureCjkFontsLoaded();
+        LFS_VIS_API void ensureCjkFontsLoaded();
         // Registers the system color emoji font as a fallback face once text
         // above U+FFFF has been shown; the file is read off the UI thread.
         void serviceEmojiFont();
@@ -178,7 +179,7 @@ namespace lfs::vis::gui {
             std::optional<std::chrono::steady_clock::time_point> deadline);
         // Seconds until the earliest pending tooltip is due across all contexts,
         // or empty when none is counting down.
-        [[nodiscard]] std::optional<double> secondsUntilTooltipReveal() const;
+        [[nodiscard]] LFS_VIS_API std::optional<double> secondsUntilTooltipReveal() const;
         RmlCursorRequest consumeCursorRequest();
         [[nodiscard]] LFS_VIS_API bool passiveMouseMoveNeedsRender(float window_x, float window_y) const;
         [[nodiscard]] LFS_VIS_API bool activeOverlayContainsPoint(float window_x,
@@ -189,8 +190,8 @@ namespace lfs::vis::gui {
 
         // Focus-state aggregators across all live RmlUi contexts so viewport input
         // suppression reflects the actual GUI surface the user is interacting with.
-        [[nodiscard]] bool wantsCaptureKeyboard() const;
-        [[nodiscard]] bool wantsTextInput() const;
+        [[nodiscard]] LFS_VIS_API bool wantsCaptureKeyboard() const;
+        [[nodiscard]] LFS_VIS_API bool wantsTextInput() const;
         [[nodiscard]] bool anyItemActive() const;
         bool refreshLocalizedDocuments();
 
@@ -208,6 +209,7 @@ namespace lfs::vis::gui {
 
     private:
         friend class lfs::vis::WindowInputDispatchTest;
+        friend class lfs::vis::McpNodeToolsTest;
         struct VulkanContextCommand {
             Rml::Context* context = nullptr;
             std::string context_name;
@@ -238,10 +240,10 @@ namespace lfs::vis::gui {
             std::optional<RmlRect> active_overlay;
         };
 
-        bool initWithRenderInterface(SDL_Window* window,
-                                     float dp_ratio,
-                                     std::unique_ptr<Rml::RenderInterface> render_interface,
-                                     RenderInterface_VK* vulkan_render_interface);
+        LFS_VIS_API bool initWithRenderInterface(SDL_Window* window,
+                                                 float dp_ratio,
+                                                 std::unique_ptr<Rml::RenderInterface> render_interface,
+                                                 RenderInterface_VK* vulkan_render_interface);
 
         LFS_VIS_API bool registerInput(Rml::Context* context, const PanelInputState& input,
                                        std::function<void(const PanelInputState&)> handler, bool exclusive,

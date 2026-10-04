@@ -10,22 +10,24 @@
 #include "core/tensor_backend.hpp"
 #include "operation/undo_entry.hpp"
 #include "operation/undo_history.hpp"
-#include "point_cloud_vulkan_renderer.hpp"
 #include "preferences.hpp"
 #include "rendering/export_post_process.hpp"
 #include "rendering/rendering.hpp"
 #include "rendering/scene_upscaler_registry.hpp"
 #include "rendering/selection_ops.hpp"
 #include "scene/scene_manager.hpp"
+#include "scene_renderer.hpp"
+#include "scene_renderer_factory.hpp"
+#include "scene_training_interop.hpp"
 #include "theme/theme.hpp"
 #if LFS_BUILD_TRAINER
 #include "training/trainer.hpp"
 #endif
 #include "core/training_manager.hpp"
 #include "visualizer/app_store.hpp"
-#include "vksplat_viewport_renderer.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cassert>
 #include <cmath>
 #include <mutex>
@@ -159,7 +161,7 @@ namespace lfs::vis {
                    old_settings.ppisp_overrides != new_settings.ppisp_overrides;
         }
 
-        constexpr std::uint32_t kVksplatIdleScratchReleaseFrames = 30;
+        constexpr auto kVksplatIdleScratchReleaseDelay = std::chrono::seconds{3};
 
         [[nodiscard]] bool applySparkLodViewerDefaults(RenderSettings& settings) {
             bool changed = false;
@@ -231,6 +233,19 @@ namespace lfs::vis {
     RenderingManager::RenderingManager(ViewSource& views) : view_source_(views) {
         screen_epoch_ = views.screenEpoch();
 
+        frame_demand_ledger_.request(FrameRequest{.reason = FrameReason::Startup,
+                                                  .scope = FrameScope::All,
+                                                  .flags = DirtyFlag::ALL,
+                                                  .detail = "startup"});
+        frame_demand_ledger_.setWakeCallback([this] {
+            std::function<void()> wake_callback;
+            {
+                std::scoped_lock lock(wake_callback_mutex_);
+                wake_callback = wake_callback_;
+            }
+            if (wake_callback)
+                wake_callback();
+        });
         gt_comparison_image_worker_ = std::jthread([this](std::stop_token stop_token) {
             gtComparisonImageWorkerLoop(stop_token);
         });
@@ -300,10 +315,6 @@ namespace lfs::vis {
         LOG_INFO("Auxiliary rendering engine initialized successfully");
     }
 
-    void RenderingManager::markDirty() {
-        markDirty(DirtyFlag::ALL);
-    }
-
     ViewRenderState& RenderingManager::viewState(ViewId id) const {
         std::lock_guard lock(views_mutex_);
         auto& entry = view_states_[id];
@@ -323,17 +334,77 @@ namespace lfs::vis {
         return viewState(view_source_.activeView());
     }
 
-    void RenderingManager::markDirty(const DirtyMask flags) {
+    void RenderingManager::markDirty(const DirtyMask flags, const FrameReason reason, std::string detail) {
         std::lock_guard lock(views_mutex_);
         for (auto& [id, view] : view_states_)
             view->dirty_mask_.fetch_or(flags, std::memory_order_relaxed);
+        if (flags)
+            frame_demand_ledger_.request({.reason = reason, .scope = FrameScope::All, .flags = flags, .detail = std::move(detail)});
     }
 
-    void RenderingManager::markViewDirty(ViewId view, DirtyMask flags) {
+    ViewMask RenderingManager::viewMask(ViewId view) const {
+        std::lock_guard lock(views_mutex_);
+        const auto it = std::find(ledger_views_.begin(), ledger_views_.end(), view);
+        return it == ledger_views_.end() ? 0 : ViewMask{1} << std::distance(ledger_views_.begin(), it);
+    }
+
+    ViewMask RenderingManager::visibleViewMask() const {
+        std::lock_guard lock(views_mutex_);
+        return ledger_views_.size() == kMaxViews ? ~ViewMask{0} : (ViewMask{1} << ledger_views_.size()) - 1;
+    }
+
+    void RenderingManager::markViewDirty(ViewId view, DirtyMask flags, FrameReason reason, std::string detail) {
         viewState(view).dirty_mask_.fetch_or(flags, std::memory_order_relaxed);
+        if (const auto mask = viewMask(view); flags && mask)
+            frame_demand_ledger_.request({.reason = reason, .scope = FrameScope::View, .views = mask, .flags = flags, .detail = std::move(detail)});
     }
 
-    void RenderingManager::markCameraPoseChanged(ViewId view) { markViewDirty(view, DirtyFlag::CAMERA); }
+    void RenderingManager::requestViewportResize(const ViewId id, const glm::ivec2 size) {
+        auto& view = viewState(id);
+        if (view.requested_viewport_size_ == size)
+            return;
+        view.requested_viewport_size_ = size;
+        // Layout can finish after the command's redraw used the old extent.
+        markViewDirty(id, DirtyFlag::VIEWPORT | DirtyFlag::CAMERA | DirtyFlag::OVERLAY,
+                      FrameReason::ViewportResize);
+    }
+
+    std::uint64_t RenderingManager::viewInputFingerprint(const Viewport& viewport,
+                                                         const SceneManager* scene_manager, const ViewId view) const {
+        std::uint64_t hash = 1469598103934665603ULL;
+        const auto append = [&hash](const std::uint64_t value) {
+            hash ^= value;
+            hash *= 1099511628211ULL;
+        };
+        for (int column = 0; column < 3; ++column) {
+            for (int row = 0; row < 3; ++row)
+                append(std::bit_cast<std::uint32_t>(viewport.getRotationMatrix()[column][row]));
+        }
+        const auto translation = viewport.getTranslation();
+        for (int axis = 0; axis < 3; ++axis)
+            append(std::bit_cast<std::uint32_t>(translation[axis]));
+        append(static_cast<std::uint32_t>(viewport.windowSize.x));
+        append(static_cast<std::uint32_t>(viewport.windowSize.y));
+        append(static_cast<std::uint32_t>(viewport.frameBufferSize.x));
+        append(static_cast<std::uint32_t>(viewport.frameBufferSize.y));
+        // These generations cover inputs that do not live on Viewport:
+        // loaded/model data, selection, and render settings (including
+        // depth, split/GT comparison, and overlay toggles).
+        const auto& store = app_store();
+        append(store.scene_generation.get());
+        append(store.selection_generation.get());
+        if (scene_manager) {
+            // Cache invalidation also advances between scheduled training previews.
+            // Published scene mutations are covered by scene_generation above.
+            // A cache revision alone does not require an immediate redraw.
+            append(scene_manager->getScene().selectionGeneration());
+            append(scene_manager->selectionState().generation());
+        }
+        append(static_cast<std::uint64_t>(settingsForView(view).split_view_mode));
+        return hash;
+    }
+
+    void RenderingManager::markCameraPoseChanged(ViewId view) { markViewDirty(view, DirtyFlag::CAMERA, lfs::vis::FrameReason::CameraMotion); }
 
     void RenderingManager::markCameraCut(ViewId view) {
         viewState(view).temporal_camera_cut_generation_.fetch_add(1, std::memory_order_release);
@@ -343,7 +414,7 @@ namespace lfs::vis {
     DirtyMask RenderingManager::pendingDirtyMask() const {
         std::lock_guard lock(views_mutex_);
         DirtyMask mask = 0;
-        for (auto& [id, view] : view_states_)
+        for (const auto& [id, view] : view_states_)
             mask |= view->dirty_mask_.load(std::memory_order_relaxed);
         return mask;
     }
@@ -351,10 +422,14 @@ namespace lfs::vis {
     bool RenderingManager::pollDirtyState() {
         std::lock_guard lock(views_mutex_);
         for (auto& [id, view] : view_states_)
-            view->dirty_mask_.fetch_or(view->animation_state_.pollDirtyState(), std::memory_order_relaxed);
+            if (const auto flags = view->animation_state_.pollDirtyState())
+                markViewDirty(id, flags, FrameReason::Overlay);
         if (lod_controller_ && lod_controller_->hasReadyResults())
-            markDirty(DirtyFlag::CAMERA);
-        return pendingDirtyMask() != 0;
+            markDirty(DirtyFlag::CAMERA, lfs::vis::FrameReason::CameraMotion);
+        for (const auto id : ledger_views_)
+            if (viewState(id).dirty_mask_.load(std::memory_order_relaxed) != 0)
+                return true;
+        return false;
     }
 
     bool RenderingManager::releaseViewTargets(ViewRenderState& view) {
@@ -362,8 +437,8 @@ namespace lfs::vis {
         for (auto* target : {&view.main_render_target_, &view.split_left_render_target_, &view.split_right_render_target_}) {
             if (!target->valid())
                 continue;
-            const bool splat_ready = !vksplat_viewport_renderer_ || vksplat_viewport_renderer_->releaseRenderTarget(*target);
-            const bool point_ready = !point_cloud_vulkan_renderer_ || point_cloud_vulkan_renderer_->releaseRenderTarget(*target);
+            const bool splat_ready = !scene_renderer_ || scene_renderer_->releaseRenderTarget(*target);
+            const bool point_ready = !point_scene_renderer_ || point_scene_renderer_->releaseRenderTarget(*target);
             if (splat_ready && point_ready) {
                 render_targets_.release(*target);
                 *target = {};
@@ -389,6 +464,8 @@ namespace lfs::vis {
             dropViewStates();
             screen_epoch_ = epoch;
         }
+        ledger_views_ = visible;
+        frame_demand_ledger_.setVisibleViews(visibleViewMask());
         const auto now = std::chrono::steady_clock::now();
         for (auto id : visible)
             viewState(id).last_visible = now;
@@ -409,7 +486,7 @@ namespace lfs::vis {
     }
 
     void RenderingManager::requestViewFollowUp(ViewRenderState& view, const DirtyMask flags) {
-        view.dirty_mask_.fetch_or(flags, std::memory_order_relaxed);
+        markViewDirty(view.id, flags, FrameReason::AsyncCompletion);
 
         std::function<void()> wake_callback;
         {
@@ -422,7 +499,7 @@ namespace lfs::vis {
     }
 
     void RenderingManager::notifyAsyncLodResultsReady() {
-        markDirty(DirtyFlag::CAMERA);
+        markDirty(DirtyFlag::CAMERA, lfs::vis::FrameReason::CameraMotion);
         std::function<void()> wake;
         {
             std::lock_guard lock(wake_callback_mutex_);
@@ -435,7 +512,7 @@ namespace lfs::vis {
     void RenderingManager::setViewportResizeActive(bool active, ViewportResizeRenderPolicy policy) {
         std::lock_guard lock(views_mutex_);
         for (auto& [id, view] : view_states_)
-            view->dirty_mask_.fetch_or(view->frame_lifecycle_service_.setViewportResizeActive(active, policy));
+            markViewDirty(id, view->frame_lifecycle_service_.setViewportResizeActive(active, policy), FrameReason::ViewportResize);
     }
 
     void RenderingManager::setLodAvailable(bool available) {
@@ -481,8 +558,8 @@ namespace lfs::vis {
             render_scale_setting = settings_.lod_render_scale;
         }
 
-        if (gpu_selection_eligible && vksplat_viewport_renderer_) {
-            const auto gpu = vksplat_viewport_renderer_->gpuLodSelectionStatus(this->state().main_render_target_);
+        if (gpu_selection_eligible && scene_renderer_) {
+            const auto gpu = scene_renderer_->gpuLodSelectionStatus(this->state().main_render_target_);
             if (gpu.active) {
                 // The CPU controller is frozen at its bootstrap cut in GPU
                 // mode; report the selector's live numbers instead.
@@ -535,11 +612,11 @@ namespace lfs::vis {
         ++point_cloud_data_revision_;
         ++point_cloud_preview_selection_revision_;
 
-        if (vksplat_viewport_renderer_) {
-            vksplat_viewport_renderer_->releaseSceneResources();
+        if (scene_renderer_) {
+            scene_renderer_->releaseSceneResources();
         }
-        if (point_cloud_vulkan_renderer_) {
-            point_cloud_vulkan_renderer_->reset();
+        if (point_scene_renderer_) {
+            point_scene_renderer_->reset();
         }
     }
 
@@ -566,22 +643,22 @@ namespace lfs::vis {
         point_cloud_colors_cache_size_ = 0;
         ++point_cloud_data_revision_;
         ++point_cloud_preview_selection_revision_;
-        if (vksplat_viewport_renderer_)
-            vksplat_viewport_renderer_->reset();
-        if (point_cloud_vulkan_renderer_)
-            point_cloud_vulkan_renderer_->reset();
+        if (scene_renderer_)
+            scene_renderer_->reset();
+        if (point_scene_renderer_)
+            point_scene_renderer_->reset();
         if (lfs::core::gpu_backend_available(lfs::core::GpuBackend::CUDA))
             lfs::core::Tensor::trim_memory_pool();
     }
 
-    void RenderingManager::noteVksplatIdleFrame(const bool training_active) {
-        if (!vksplat_viewport_renderer_) {
-            vksplat_idle_frame_count_ = 0;
+    void RenderingManager::releaseIdleVksplatScratch(const bool training_active) {
+        if (!scene_renderer_) {
+            vksplat_idle_since_ = {};
             return;
         }
         // A parked refresh polls for its turn on the training arena; releasing
         // here would cancel the reservation it is waiting on.
-        if (this->state().parked_arena_retry_ != 0) {
+        if (hasParkedArenaRetry()) {
             return;
         }
 
@@ -592,25 +669,37 @@ namespace lfs::vis {
 #endif
 
         if (!training_active) {
-            vksplat_idle_frame_count_ = 0;
+            vksplat_idle_since_ = {};
             if (under_pressure) {
-                vksplat_viewport_renderer_->releaseScratchOnIdle(true);
+                rendererTrainingInterop(*scene_renderer_).releaseScratchOnIdle(true);
             }
             return;
         }
 
-        if (vksplat_idle_frame_count_ < kVksplatIdleScratchReleaseFrames) {
-            ++vksplat_idle_frame_count_;
-        }
-        if (under_pressure || vksplat_idle_frame_count_ >= kVksplatIdleScratchReleaseFrames) {
+        const auto now = std::chrono::steady_clock::now();
+        if (vksplat_idle_since_ == std::chrono::steady_clock::time_point{})
+            vksplat_idle_since_ = now;
+        const bool release_private_scratch = now - vksplat_idle_since_ >= kVksplatIdleScratchReleaseDelay;
+        if (under_pressure || release_private_scratch) {
             // During training the shared arena is owned by FastGS. Only release
             // private viewer allocations here; the terminal callback below is
             // the point at which the shared import may be relinquished.
-            vksplat_viewport_renderer_->releaseScratchOnIdle(
-                false,
-                vksplat_idle_frame_count_ >= kVksplatIdleScratchReleaseFrames);
-            vksplat_idle_frame_count_ = 0;
+            rendererTrainingInterop(*scene_renderer_).releaseScratchOnIdle(false, release_private_scratch);
+            vksplat_idle_since_ = now;
         }
+    }
+
+    void RenderingManager::retainVksplatScratch() {
+        vksplat_idle_since_ = std::chrono::steady_clock::now();
+    }
+
+    double RenderingManager::secondsUntilVksplatScratchRelease() const {
+        if (!scene_renderer_ || hasParkedArenaRetry())
+            return std::numeric_limits<double>::infinity();
+        if (vksplat_idle_since_ == std::chrono::steady_clock::time_point{})
+            return std::chrono::duration<double>(kVksplatIdleScratchReleaseDelay).count();
+        const auto due = vksplat_idle_since_ + kVksplatIdleScratchReleaseDelay;
+        return std::max(0.0, std::chrono::duration<double>(due - std::chrono::steady_clock::now()).count());
     }
 
     void RenderingManager::updateSettings(const RenderSettings& new_settings) {
@@ -740,9 +829,9 @@ namespace lfs::vis {
             const bool scene_changed = settings_ != settings.scene();
             storeActiveSettingsLocked(settings);
             if (scene_changed)
-                markDirty(dirty_flags);
+                markDirty(dirty_flags, lfs::vis::FrameReason::SceneChange);
             else
-                markViewDirty(view_source_.activeView(), dirty_flags);
+                markViewDirty(view_source_.activeView(), dirty_flags, FrameReason::SettingsChange);
             break;
         }
 
@@ -773,7 +862,7 @@ namespace lfs::vis {
     void RenderingManager::editViewSettings(ViewId view, const std::function<void(ViewSettings&)>& edit) {
         std::lock_guard lock(settings_mutex_);
         if (view_source_.editViewSettings(view, edit))
-            markViewDirty(view, DirtyFlag::ALL);
+            markViewDirty(view, DirtyFlag::ALL, lfs::vis::FrameReason::SceneChange);
     }
 
     RenderSettings RenderingManager::settingsForView(const ViewId view) const {
@@ -801,12 +890,17 @@ namespace lfs::vis {
         // a full-resolution native frame. TEMPORAL deliberately avoids restarting
         // the convergence sequence as CAMERA would.
         if (changed)
-            markViewDirty(id, DirtyFlag::TEMPORAL);
+            markViewDirty(id, DirtyFlag::TEMPORAL, lfs::vis::FrameReason::SceneChange);
     }
 
     SceneUpscalerSelection RenderingManager::sceneUpscalerRuntimeSelection(const ViewId view) const {
         std::lock_guard lock(settings_mutex_);
         return viewState(view == kNoView ? view_source_.activeView() : view).scene_upscaler_runtime_selection_;
+    }
+
+    bool RenderingManager::sceneUpscalerModeUnsupported(const ViewId view) const {
+        std::lock_guard lock(settings_mutex_);
+        return viewState(view).scene_upscaler_mode_unsupported_;
     }
 
     void RenderingManager::setOrthographic(const bool enabled, const float viewport_height, const float distance_to_pivot) {
@@ -890,7 +984,7 @@ namespace lfs::vis {
     void RenderingManager::beginDepthWindowPreview(ViewId view) {
         std::lock_guard lock(settings_mutex_);
         ++viewState(view).depth_window_preview_count_;
-        markViewDirty(viewState(view).id, DirtyFlag::OVERLAY);
+        markViewDirty(viewState(view).id, DirtyFlag::OVERLAY, lfs::vis::FrameReason::Overlay);
     }
 
     void RenderingManager::endDepthWindowPreview(ViewId view) {
@@ -898,7 +992,7 @@ namespace lfs::vis {
             return;
         std::lock_guard lock(settings_mutex_);
         viewState(view).depth_window_preview_count_ = std::max(0, viewState(view).depth_window_preview_count_ - 1);
-        markViewDirty(viewState(view).id, DirtyFlag::OVERLAY);
+        markViewDirty(viewState(view).id, DirtyFlag::OVERLAY, lfs::vis::FrameReason::Overlay);
     }
 
     bool RenderingManager::depthWindowDragPreview(const ViewId view) const {
@@ -933,7 +1027,7 @@ namespace lfs::vis {
         applyDepthWindowProjectionLocked(this->state().id, clamped);
         this->state().depth_window_drag_owner_ = 0;
         this->state().depth_window_drag_backup_.reset();
-        markViewDirty(this->state().id, DirtyFlag::ALL);
+        markViewDirty(this->state().id, DirtyFlag::ALL, lfs::vis::FrameReason::SceneChange);
     }
 
     bool RenderingManager::applyDepthWindowIfEpoch(ViewId view, const DepthWindowState& state,
@@ -946,7 +1040,7 @@ namespace lfs::vis {
             viewState(view).depth_window_drag_owner_ != drag_token)
             return false;
         applyDepthWindowProjectionLocked(view, clamped);
-        markViewDirty(viewState(view).id, DirtyFlag::ALL);
+        markViewDirty(viewState(view).id, DirtyFlag::ALL, lfs::vis::FrameReason::SceneChange);
         return true;
     }
 
@@ -969,7 +1063,7 @@ namespace lfs::vis {
         viewState(view).depth_window_drag_owner_ = 0;
         viewState(view).depth_window_drag_backup_.reset();
         out_snapshot = depthWindowSnapshotLocked(view);
-        markViewDirty(viewState(view).id, DirtyFlag::ALL);
+        markViewDirty(viewState(view).id, DirtyFlag::ALL, lfs::vis::FrameReason::SceneChange);
         return true;
     }
 
@@ -1030,7 +1124,7 @@ namespace lfs::vis {
         ++view.depth_window_projection_generation_;
         view.depth_window_drag_owner_ = 0;
         view.depth_window_drag_backup_.reset();
-        markViewDirty(snapshot.view, DirtyFlag::ALL);
+        markViewDirty(snapshot.view, DirtyFlag::ALL, lfs::vis::FrameReason::SceneChange);
         return true;
     }
 
@@ -1186,7 +1280,7 @@ namespace lfs::vis {
 
         if (cached_app_metrics) {
             app_store().camera_metrics.set(std::move(cached_app_metrics));
-            markDirty(DirtyFlag::OVERLAY);
+            markDirty(DirtyFlag::OVERLAY, lfs::vis::FrameReason::Overlay);
             return;
         }
         if (!should_queue) {
@@ -1265,7 +1359,7 @@ namespace lfs::vis {
 
             if (applied) {
                 app_store().camera_metrics.set(std::move(app_metrics));
-                markDirty(DirtyFlag::OVERLAY);
+                markDirty(DirtyFlag::OVERLAY, lfs::vis::FrameReason::Overlay);
             }
         }
     }
@@ -1313,7 +1407,7 @@ namespace lfs::vis {
             event.emit();
         }
         if (result.render_settings_changed) {
-            markDirty(DirtyFlag::OVERLAY);
+            markDirty(DirtyFlag::OVERLAY, lfs::vis::FrameReason::Overlay);
             auto& render_settings_generation = app_store().render_settings_generation;
             render_settings_generation.set(render_settings_generation.get() + 1);
         }
@@ -1327,12 +1421,12 @@ namespace lfs::vis {
         this->state().viewport_overlay_service_.setCursorPreview(active, x, y, radius, add_mode, selection_tensor,
                                                                  saturation_mode, saturation_amount, panel, focused_gaussian_id);
         if (request_render)
-            markViewDirty(this->state().id, DirtyFlag::SELECTION);
+            markViewDirty(this->state().id, DirtyFlag::SELECTION, lfs::vis::FrameReason::Selection);
     }
 
     void RenderingManager::clearCursorPreviewState() {
         this->state().viewport_overlay_service_.clearCursorPreview();
-        markViewDirty(this->state().id, DirtyFlag::SELECTION);
+        markViewDirty(this->state().id, DirtyFlag::SELECTION, lfs::vis::FrameReason::Selection);
     }
 
     void RenderingManager::setRectPreview(float x0, float y0, float x1, float y1, bool add_mode,
@@ -1376,7 +1470,7 @@ namespace lfs::vis {
                                  overlay.isPolygonPreviewActive() || overlay.isLassoPreviewActive() || overlay.cursorPreview().preview_selection;
         overlay.clearSelectionPreviews();
         if (had_preview)
-            markViewDirty(this->state().id, DirtyFlag::SELECTION);
+            markViewDirty(this->state().id, DirtyFlag::SELECTION, lfs::vis::FrameReason::Selection);
     }
 
 } // namespace lfs::vis

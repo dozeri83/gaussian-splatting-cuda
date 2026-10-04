@@ -69,6 +69,7 @@ namespace lfs::vis {
         ViewportOverlayService viewport_overlay_service_;
         ViewId id = kNoView;
         glm::ivec2 last_nonzero_viewport_size_{0, 0};
+        glm::ivec2 requested_viewport_size_{0, 0};
         std::chrono::steady_clock::time_point last_visible{};
         std::optional<RenderSettings> rendered_settings;
         lfs::rendering::ScreenOverlayRenderer screen_overlay_renderer_;
@@ -78,7 +79,17 @@ namespace lfs::vis {
         std::string last_logged_vksplat_render_error_;
         StaleFrameGuard vksplat_stale_frame_guard_;
         DirtyMask parked_arena_retry_ = 0;
+        // Over-budget navigation: render when the camera has rested.
+        bool camera_settle_pending_ = false;
+        glm::mat3 last_navigation_rotation_{1.0f};
+        glm::vec3 last_navigation_translation_{0.0f};
+        bool navigation_pose_valid_ = false;
+        std::chrono::steady_clock::time_point camera_settle_deadline_{};
         std::atomic<DirtyMask> training_refresh_dirty_{0};
+        int last_training_preview_iteration_ = -1;
+        bool has_training_preview_iteration_ = false;
+        std::uint64_t last_rendered_input_fingerprint_ = 0;
+        bool has_rendered_input_fingerprint_ = false;
         std::uint64_t viewport_projection_generation_ = 1;
         std::uint64_t temporal_scene_revision_ = 1;
         TemporalConvergenceController temporal_convergence_;
@@ -135,6 +146,8 @@ namespace lfs::vis {
         uint64_t depth_window_projection_generation_ = 0;
         uint64_t depth_window_mode_epoch_ = 0;
         SceneUpscalerSelection scene_upscaler_runtime_selection_{};
+        // The requested reconstruction cannot serve the current view mode.
+        bool scene_upscaler_mode_unsupported_ = false;
         mutable std::mutex depth_window_transition_mutex_;
         mutable std::mutex vulkan_mesh_frame_mutex_;
         VulkanMeshFrame vulkan_mesh_frame_;

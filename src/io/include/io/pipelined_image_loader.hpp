@@ -154,6 +154,21 @@ namespace lfs::io {
         SidecarTally sidecars;
     };
 
+    /// Holds the GPU image decoders that loaders with this decoder pool size share, created up front so
+    /// the first loader's first batch does not wait for decoder setup.
+    class LFS_IO_API ImageDecoderWarmup {
+    public:
+        explicit ImageDecoderWarmup(size_t decoder_pool_size);
+        ~ImageDecoderWarmup();
+
+        ImageDecoderWarmup(const ImageDecoderWarmup&) = delete;
+        ImageDecoderWarmup& operator=(const ImageDecoderWarmup&) = delete;
+
+    private:
+        size_t decoder_pool_size_ = 0;
+        bool retained_ = false;
+    };
+
     class LFS_IO_API PipelinedImageLoader {
     public:
         struct GpuMemoryStats {
@@ -438,7 +453,8 @@ namespace lfs::io {
         void write_derived_cache(NvCodecImageLoader& nvcodec,
                                  const lfs::core::Tensor& tensor,
                                  const std::string& cache_key,
-                                 void* cuda_stream);
+                                 void* cuda_stream,
+                                 const LoadParams& params);
 
         enum class SidecarCacheFormat : uint8_t {
             Depth,

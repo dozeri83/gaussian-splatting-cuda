@@ -432,6 +432,7 @@ namespace lfs::core {
         Device device = Device::GPU;
         DataType dtype = DataType::Float32;
         bool use_pinned = true;
+        std::optional<uint64_t> random_seed;
         std::variant<
             std::monostate,
             float,
@@ -525,6 +526,7 @@ namespace lfs::core {
         // backend that was never initialized is not brought up to be trimmed.
         LFS_LOCAL_SYMBOL void trim_live_gpu_backends();
         LFS_LOCAL_SYMBOL void trim_live_gpu_backends_if_reserved_unused_exceeds(size_t threshold_bytes);
+        LFS_LOCAL_SYMBOL void hold_freed_gpu_memory(bool hold);
         LFS_CORE_API Tensor allocate_like(const Tensor& input,
                                           const TensorShape& shape,
                                           DataType dtype);
@@ -991,16 +993,19 @@ namespace lfs::core {
                            DataType dtype = DataType::Float32);
         static Tensor randn(TensorShape shape, Device device = Device::GPU,
                             DataType dtype = DataType::Float32);
+        // Explicit seeds are local to the call and leave the global RNG untouched.
         static Tensor uniform(TensorShape shape, float low = 0.0f, float high = 1.0f,
-                              Device device = Device::GPU, DataType dtype = DataType::Float32);
+                              Device device = Device::GPU, DataType dtype = DataType::Float32,
+                              std::optional<uint64_t> seed = std::nullopt);
         static Tensor normal(TensorShape shape, float mean = 0.0f, float std = 1.0f,
                              Device device = Device::GPU, DataType dtype = DataType::Float32);
         static Tensor randint(TensorShape shape, int low, int high,
                               Device device = Device::GPU, DataType dtype = DataType::Int32);
         static Tensor bernoulli(TensorShape shape, float p = 0.5f,
                                 Device device = Device::GPU, DataType dtype = DataType::Float32);
+        // Explicit seeds are local to the call and leave the global RNG untouched.
         static Tensor multinomial(const Tensor& weights, int num_samples,
-                                  bool replacement = false);
+                                  bool replacement = false, std::optional<uint64_t> seed = std::nullopt);
         static Tensor arange(float end);
         static Tensor arange(float start, float end, float step = 1.0f);
         static Tensor linspace(float start, float end, size_t steps, Device device = Device::GPU);
@@ -1147,6 +1152,10 @@ namespace lfs::core {
 
         static void trim_memory_pool();
         static void trim_memory_pool_if_reserved_unused_exceeds(size_t threshold_bytes);
+        // While held, freed device memory stays pooled across synchronizations instead of returning to
+        // the system; releasing the last hold trims the pool back. Holds nest and may span threads.
+        static void hold_freed_memory();
+        static void release_freed_memory();
         // CUDA device pool only; leaves the pinned host cache intact.
         static void trim_device_memory_pool();
         static void shutdown_memory_pool();

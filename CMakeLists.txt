@@ -94,6 +94,21 @@ endif()
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/VcpkgProfiles.cmake")
 lfs_validate_vcpkg_profile()
 
+# Set the application baseline before compiler and dependency detection. A
+# newer host SDK must not silently raise the minimum supported macOS version.
+if(CMAKE_HOST_APPLE AND (NOT CMAKE_SYSTEM_NAME OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        if(DEFINED ENV{MACOSX_DEPLOYMENT_TARGET} AND NOT "$ENV{MACOSX_DEPLOYMENT_TARGET}" STREQUAL "")
+            set(CMAKE_OSX_DEPLOYMENT_TARGET "$ENV{MACOSX_DEPLOYMENT_TARGET}" CACHE STRING "Minimum supported macOS version" FORCE)
+        else()
+            set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum supported macOS version" FORCE)
+        endif()
+    endif()
+    if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "26.0")
+        message(FATAL_ERROR "The native macOS viewer requires CMAKE_OSX_DEPLOYMENT_TARGET >= 26.0 (Metal 4 resident tensor access)")
+    endif()
+endif()
+
 # APPLE is only defined after project(); the host variable exists before it.
 # Default ON except on Apple, where the trainer and CUDA language stay off.
 option(LFS_ENABLE_CUDA "Build the CUDA language, toolkit, and CUDA trainer kernels" ON)
@@ -113,6 +128,8 @@ else()
 endif()
 
 if(WIN32)
+    # Public headers can include windows.h in consumers such as the test targets.
+    add_compile_definitions(NOMINMAX)
     enable_language(RC)
 endif()
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/WindowsVersionResource.cmake")
@@ -138,7 +155,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # (each comma becomes a separate ld argument). Use colons so the whole
     # list reaches ld as a single argument.
     set(_LFS_EXCLUDE_STATIC_ARCHIVES
-        "libpng16.a:libpng.a:libz.a:libjpeg.a:libturbojpeg.a:libtiff.a:libwebp.a:libwebpdecoder.a:libsharpyuv.a:liblzma.a:libdeflate.a:libzstd.a"
+        "libpng16.a:libpng.a:libz.a:libjpeg.a:libturbojpeg.a:libtiff.a:libwebp.a:libwebpdecoder.a:libsharpyuv.a:liblzma.a:libdeflate.a:libzstd.a:libOpenEXRCore-3_4.a:libOpenEXRCore.a:libImath-3_2.a:libImath-3_1.a:libopenjph.a"
     )
     string(APPEND CMAKE_EXE_LINKER_FLAGS    " -Wl,--exclude-libs,${_LFS_EXCLUDE_STATIC_ARCHIVES}")
     string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--exclude-libs,${_LFS_EXCLUDE_STATIC_ARCHIVES}")
@@ -198,6 +215,8 @@ option(BUILD_UNICODE_TEST_ONLY "Build only Unicode path tests (no CUDA runtime l
 option(BUILD_LOCALIZATION_TESTS "Register headless localization contract tests without LibTorch" OFF)
 option(BUILD_TEMPORAL_CPU_TESTS "Build standalone temporal reconstruction contract tests without GPU execution" OFF)
 option(LFS_FAST_COMPILE "Optimize measured slow C++ components for build speed instead of runtime speed (WIN32 only)" OFF)
+# Cannot catch MSVC-specific dllimport template issues in third-party DLLs (e.g. Rml::ObserverPtr).
+option(LFS_HIDDEN_SYMBOLS "Check Windows DLL export boundaries with hidden visibility on non-Windows" OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/DeveloperOptions.cmake")
@@ -520,6 +539,7 @@ find_package(Vulkan REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(volk CONFIG REQUIRED)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SetupNvidiaDlss.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SetupAmdFsr3.cmake")
 find_package(SDL3 REQUIRED)
 lfs_validate_linux_sdl_video_backends()
 find_package(glm REQUIRED)
@@ -533,7 +553,7 @@ find_package(TIFF REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(Freetype REQUIRED)
 find_package(WebP REQUIRED)
-find_package(tinyexr CONFIG REQUIRED)
+find_package(OpenEXR 3.4.15 CONFIG REQUIRED)
 find_package(LibArchive REQUIRED)
 find_package(zstd CONFIG REQUIRED)
 find_package(libdeflate CONFIG REQUIRED)
@@ -657,9 +677,31 @@ add_subdirectory(src/visualizer) # Visualizer module (lfs::vis namespace)
 if(LFS_NVIDIA_DLSS_AVAILABLE)
     add_subdirectory(src/scene_upscalers/nvidia_dlss)
 endif()
+if(LFS_AMD_FSR3_AVAILABLE)
+    add_subdirectory(src/scene_upscalers/amd_fsr3)
+endif()
 add_subdirectory(src/geometry)   # Geometry utilities
 add_subdirectory(src/mcp)        # MCP server (AI agent integration)
 add_subdirectory(src/python)
+
+if(LFS_HIDDEN_SYMBOLS AND NOT WIN32)
+    # Match the libraries using LFS_*_API DLL exports; leave static libraries alone.
+    set_target_properties(lfs_logger lfs_core lfs_visualizer lfs_mcp PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        CUDA_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+    )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # ELF shared links otherwise defer missing exports until Python imports the module.
+        foreach(_lfs_export_consumer IN ITEMS lfs_logger lfs_core lfs_visualizer lfs_mcp lfs_py)
+            target_link_options(${_lfs_export_consumer} PRIVATE "LINKER:--no-undefined")
+        endforeach()
+        # FFmpeg assembly uses direct references to archive-local data in the shared visualizer.
+        # SPZ globals must stay local too: the Python module links another copy of its archive.
+        target_link_options(lfs_visualizer PRIVATE
+            "LINKER:--exclude-libs,libavcodec.a:libavutil.a:libspz_lib.a")
+    endif()
+endif()
 
 # =============================================================================
 # MAIN EXECUTABLES
@@ -678,6 +720,10 @@ add_executable(${PROJECT_NAME}
     src/app/mcp_runtime_tools.cpp
     src/app/mcp_sequencer_tools.cpp
     src/app/mcp_screen_tools.cpp
+    src/app/mcp_node_tools.cpp
+    src/app/mcp_node_resources.cpp
+    src/app/mcp_node_editor_tools.cpp
+    src/app/mcp_pointer_tool.cpp
     src/app/mcp_ui_registry_tools.cpp
     src/app/converter.cpp
     src/app/converter_output_paths.cpp
@@ -687,6 +733,9 @@ add_executable(${PROJECT_NAME}
 )
 if(TARGET lfs_scene_upscaler_nvidia_dlss)
     add_dependencies(${PROJECT_NAME} lfs_scene_upscaler_nvidia_dlss)
+endif()
+if(TARGET lfs_scene_upscaler_amd_fsr3)
+    add_dependencies(${PROJECT_NAME} lfs_scene_upscaler_amd_fsr3)
 endif()
 
 add_dependencies(${PROJECT_NAME} lfs_core_abi_stamp)
@@ -895,6 +944,15 @@ if(WIN32 AND DEFINED VCPKG_TARGET_TRIPLET)
         set(_vcpkg_debug_dlls)
     endif()
 
+    # Core-only builds install none of these DLLs. Test-enabled builds also
+    # install the C++ oracle; keep its DLLs out of the application directory.
+    set(_lfs_exr_cpp_dll_pattern "^$")
+    if(TARGET OpenEXR::OpenEXR)
+        set(_lfs_exr_cpp_dll_pattern "/(OpenEXR|OpenEXRUtil|Iex|IlmThread|Imath)-3_[0-9]+(_d)?[.]dll$")
+    endif()
+    list(FILTER _vcpkg_release_dlls EXCLUDE REGEX "${_lfs_exr_cpp_dll_pattern}")
+    list(FILTER _vcpkg_debug_dlls EXCLUDE REGEX "${_lfs_exr_cpp_dll_pattern}")
+
     # Always copy release DLLs - needed for both Release and Debug builds
     if(_vcpkg_release_dlls)
         add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
@@ -1039,7 +1097,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMENT "Creating resource directory structure"
 )
 
-if(TARGET lfs_vulkan_rasterizer)
+if(TARGET lfs_vulkan_rasterizer AND NOT APPLE)
     get_target_property(_LFS_VULKAN_RASTERIZER_SPV_DIR
         lfs_vulkan_rasterizer
         LFS_VULKAN_RASTERIZER_SPV_DIR)
@@ -1441,6 +1499,8 @@ if(LFS_MACOS_PORTABLE_APP)
 else()
     install(FILES "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ".")
 endif()
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/resources/licenses/"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/LichtFeld-Studio/licenses")
 
 set(INSTALL_RESOURCE_DIR "${CMAKE_INSTALL_DATADIR}/LichtFeld-Studio")
 if(_LFS_VULKAN_RASTERIZER_SPV_DIR)
@@ -1463,6 +1523,12 @@ install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/core11-logo.png" DE
 install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/core11-logo-dark.png" DESTINATION "${INSTALL_RESOURCE_DIR}/assets")
 install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/volinga-logo.png" DESTINATION "${INSTALL_RESOURCE_DIR}/assets")
 install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/volinga-logo-dark.png" DESTINATION "${INSTALL_RESOURCE_DIR}/assets")
+if(LFS_MACOS_PORTABLE_APP)
+    # Include every runtime GUI asset; keep documentation out of the bundle.
+    install(DIRECTORY "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/"
+        DESTINATION "${INSTALL_RESOURCE_DIR}/assets"
+        PATTERN "*.md" EXCLUDE PATTERN "*.icns" EXCLUDE)
+endif()
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/src/visualizer/gui/rmlui/resources/" DESTINATION "${INSTALL_RESOURCE_DIR}/assets/rmlui")
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/src/visualizer/gui/resources/locales" DESTINATION "${INSTALL_RESOURCE_DIR}")
 install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/resources/locale_index.json"
@@ -1621,6 +1687,7 @@ if(BUILD_PORTABLE)
             # Copy vcpkg DLLs
             if(EXISTS \"${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin\")
                 file(GLOB _vcpkg \"${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin/*.dll\")
+                list(FILTER _vcpkg EXCLUDE REGEX \"${_lfs_exr_cpp_dll_pattern}\")
                 foreach(_v IN LISTS _vcpkg)
                     file(INSTALL \"\${_v}\" DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\")
                 endforeach()
@@ -1630,6 +1697,8 @@ if(BUILD_PORTABLE)
 endif()
 
 if(LFS_MACOS_PORTABLE_APP)
+    get_filename_component(_lfs_portable_python_tools "${Python_EXECUTABLE}" DIRECTORY)
+    get_filename_component(_lfs_portable_python_stdlib "${_lfs_portable_python_tools}/../../lib/python3.12" ABSOLUTE)
     configure_file("${CMAKE_SOURCE_DIR}/cmake/templates/VerifyMacPortableApp.cmake.in"
         "${CMAKE_BINARY_DIR}/VerifyMacPortableApp.cmake" @ONLY)
     install(SCRIPT "${CMAKE_BINARY_DIR}/VerifyMacPortableApp.cmake" COMPONENT runtime)

@@ -77,6 +77,7 @@ target_include_directories(lfs_video SYSTEM PRIVATE
 
 target_link_libraries(lfs_video
         PRIVATE
+        lfs_core
         PkgConfig::FFMPEG
         spdlog::spdlog
         nlohmann_json::nlohmann_json
@@ -252,6 +253,7 @@ add_library(lfs_io STATIC
         project/project_chapters.cpp
         project/session_chapters.cpp
         project/project_document.cpp
+        project/sfm_observation_chapter.cpp
         project/project_preview.cpp
         project/project_recovery.cpp
         project/project_inspector.cpp

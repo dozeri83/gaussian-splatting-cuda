@@ -53,7 +53,7 @@ namespace lfs::vis::gui {
         }
     };
 
-    class RmlViewportOverlay {
+    class LFS_VIS_API RmlViewportOverlay {
     public:
         struct GTMetricsOverlayState {
             bool visible = false;
@@ -100,14 +100,14 @@ namespace lfs::vis::gui {
 
         using VramHudOverlayState = VramHudOverlay::State;
 
-        LFS_VIS_API RmlViewportOverlay();
-        LFS_VIS_API ~RmlViewportOverlay();
+        RmlViewportOverlay();
+        ~RmlViewportOverlay();
         RmlViewportOverlay(const RmlViewportOverlay&) = delete;
         RmlViewportOverlay& operator=(const RmlViewportOverlay&) = delete;
 
         void init(RmlUIManager* mgr);
-        LFS_VIS_API void shutdown();
-        LFS_VIS_API void setViewportBounds(glm::vec2 pos, glm::vec2 size, glm::vec2 screen_origin);
+        void shutdown();
+        void setViewportBounds(glm::vec2 pos, glm::vec2 size, glm::vec2 screen_origin);
         void setToolbarBounds(float x, float width, float inset);
         void setSplitDividerOverlay(SplitDividerOverlayState state);
         void setGTMetricsOverlay(GTMetricsOverlayState state);
@@ -120,9 +120,9 @@ namespace lfs::vis::gui {
         void renderFrostedGlass();
         // Shared production routing boundary: input is the original frame,
         // never a masked copy with sentinel coordinates or removed events.
-        LFS_VIS_API void processInput(const PanelInputState& input,
-                                      const ViewportOverlayInputBlockers& blockers = {},
-                                      std::function<bool(float, float)> pointer_blocker = {});
+        void processInput(const PanelInputState& input,
+                          const ViewportOverlayInputBlockers& blockers = {},
+                          std::function<bool(float, float)> pointer_blocker = {});
         void processInput(const PanelInputState& input, std::function<bool(float, float)> pointer_blocker) {
             processInput(input, {}, std::move(pointer_blocker));
         }
@@ -260,8 +260,6 @@ namespace lfs::vis::gui {
         std::optional<lfs::vis::AppStore::CameraMetrics> camera_metrics_;
         lfs::core::reactive::SubscriptionToken gt_metrics_config_subscription_;
         lfs::core::reactive::SubscriptionToken camera_metrics_subscription_;
-        lfs::core::reactive::SubscriptionToken vram_hud_subscription_;
-        lfs::core::reactive::SubscriptionToken perf_hud_subscription_;
         std::vector<lfs::core::reactive::SubscriptionToken> document_sync_subscriptions_;
         std::unique_ptr<VramHudOverlay> vram_hud_;
         RmlTooltipController tooltip_;

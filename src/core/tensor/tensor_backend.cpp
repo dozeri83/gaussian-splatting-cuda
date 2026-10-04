@@ -182,6 +182,18 @@ namespace lfs::core {
         }
     }
 
+    SplatPublication splat_publication(const GpuBackend backend) {
+        switch (backend) {
+        case GpuBackend::Vulkan:
+            return SplatPublication::Shared;
+        case GpuBackend::CUDA:
+            return SplatPublication::RendererStorage;
+        default:
+            // Metal storage readiness includes its readers.
+            return SplatPublication::Copied;
+        }
+    }
+
     std::function<Tensor(TensorShape, size_t, DataType, std::string_view)>
     TensorVulkanInterop::splat_allocator(bool preserve_float_shN) {
         const auto backend = internal::resolve_new_gpu_storage_backend();
@@ -195,6 +207,10 @@ namespace lfs::core {
 
     void TensorVulkanInterop::drain(GpuBackend backend) {
         impl_->backend(backend).drain();
+    }
+
+    void TensorVulkanInterop::run_while_idle(GpuBackend backend, const std::function<void()>& release) {
+        impl_->backend(backend).run_while_idle(release);
     }
 
     std::shared_ptr<void> TensorVulkanInterop::execution_scope(GpuBackend backend) {
@@ -986,6 +1002,11 @@ namespace lfs::core {
             .cooperative_matrix = handles.cooperative_matrix,
             .external_memory = handles.external_memory,
             .external_semaphore = handles.external_semaphore,
+#ifdef __APPLE__
+            .metal_objects = handles.metal_objects,
+#endif
+            .consumer_queue = static_cast<VkQueue>(handles.consumer_queue),
+            .consumer_queue_mutex = handles.consumer_queue_mutex,
         });
 #else
         (void)handles;
@@ -995,6 +1016,24 @@ namespace lfs::core {
             .user_message = "this build has no Vulkan tensor backend",
             .detection = LFS_SOURCE_SITE_CURRENT(),
         }));
+#endif
+    }
+
+    bool tensor_supports_metal_access(const Tensor& tensor) {
+#ifdef __APPLE__
+        const auto backend = gpu_backend_of(tensor);
+        return backend == GpuBackend::Metal || backend == GpuBackend::Vulkan;
+#else
+        return false;
+#endif
+    }
+
+    bool tensor_backend_supports_metal_access() {
+#ifdef __APPLE__
+        const auto backend = default_gpu_backend();
+        return backend == GpuBackend::Metal || backend == GpuBackend::Vulkan;
+#else
+        return false;
 #endif
     }
 
@@ -1216,6 +1255,13 @@ namespace lfs::core {
             for (const GpuBackend backend : kGpuBackends) {
                 if (gpu_backend_live(backend))
                     backend_ops(backend).trim_if_reserved_unused_exceeds(threshold_bytes);
+            }
+        }
+
+        void hold_freed_gpu_memory(const bool hold) {
+            for (const GpuBackend backend : kGpuBackends) {
+                if (gpu_backend_live(backend))
+                    backend_ops(backend).hold_freed_memory(hold);
             }
         }
 

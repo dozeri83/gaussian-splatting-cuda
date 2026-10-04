@@ -29,6 +29,7 @@ tests/data/nn/*
 !tests/data/nn/moge2_ref_fixture.json
 !tests/data/nn/romav1_ref_fixture.json
 !tests/data/nn/lpips_ref_fixture.json
+!tests/data/clamped_colour_regression.ply.fixture
 *.pt
 *.py
 !scripts/lichtfeld_mcp_bridge.py
@@ -41,6 +42,7 @@ tests/data/nn/*
 !tests/real_bicycle_sh_degree_training.py
 !tests/python/**/*.py
 !docs/plugins/examples/**/*.py
+!docs/docs/development/node-graph/examples/*.py
 !tools/*.py
 !tools/nn_export/export_lpips_weights.py
 .venv/

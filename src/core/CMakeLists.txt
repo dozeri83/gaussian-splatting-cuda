@@ -90,6 +90,8 @@ set(TENSOR_SOURCES
         tensor/tensor_masking_ops.cpp
         tensor/tensor_advanced_ops.cpp
         tensor/tensor_spatial.cpp
+        tensor/tensor_proximity.cpp
+        tensor/tensor_procedural.cpp
         tensor/tensor_projection.cpp
         tensor/tensor_point_region.cpp
         tensor/tensor_histogram.cpp
@@ -198,6 +200,7 @@ if(APPLE)
         tensor/backend/metal/metal_ops.mm
         tensor/backend/metal/metal_shared_image.mm
         tensor/backend/metal/metal_module.mm
+        tensor/backend/metal/metal_tensor_reader.mm
         ${_lfs_metal_kernels_cpp}
     )
     if(LFS_TENSOR_VULKAN)
@@ -241,6 +244,7 @@ set(CORE_SOURCES
         cuda_version.cpp
         image_io.cpp
         image_codecs.cpp
+        image_exr.cpp
         mapped_file.cpp
         optimization_properties.cpp
         parameters.cpp
@@ -263,6 +267,24 @@ set(CORE_SOURCES
         tensor_debug.cpp
         training_snapshot.cpp
         mesh_data.cpp
+        nodes/types.cpp
+        nodes/registry.cpp
+        nodes/tree.cpp
+        nodes/evaluator.cpp
+        nodes/device.cpp
+        nodes/builtin.cpp
+        nodes/builtin_text.cpp
+        nodes/builtin_common.cpp
+        nodes/builtin_input.cpp
+        nodes/builtin_utilities.cpp
+        nodes/builtin_selection.cpp
+        nodes/builtin_geometry.cpp
+        nodes/builtin_splat.cpp
+        nodes/builtin_cleanup.cpp
+        nodes/builtin_conversion.cpp
+        nodes/builtin_colour.cpp
+        nodes/builtin_texture.cpp
+        nodes/builtin_instances.cpp
         system_info.cpp
         user_paths.cpp
         legacy_settings_migration.cpp
@@ -301,6 +323,19 @@ add_dependencies(lfs_core lfs_core_abi_stamp)
 target_include_directories(lfs_core BEFORE PRIVATE "${LFS_CORE_ABI_INCLUDE_DIR}")
 
 target_compile_definitions(lfs_core PRIVATE LFS_CORE_EXPORTS LFS_TENSOR_PRIVATE_ACCESS)
+
+# Keep headless descriptors and the English UI catalogue identical, including
+# before the localisation manager is initialised.
+set(_node_locale "${CMAKE_SOURCE_DIR}/src/visualizer/gui/resources/locales/en.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_node_locale}")
+file(READ "${_node_locale}" _node_locale_json)
+string(JSON _node_text GET "${_node_locale_json}" nodes)
+# MSVC caps a string literal at 64 KiB, in pieces of 16 KiB, so the text is embedded as bytes.
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/builtin_text.json" "${_node_text}")
+file(READ "${CMAKE_CURRENT_BINARY_DIR}/builtin_text.json" _node_text_hex HEX)
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," LFS_NODE_TEXT_BYTES "${_node_text_hex}")
+configure_file(nodes/builtin_text.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/builtin_text.hpp" @ONLY)
+target_include_directories(lfs_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_include_directories(lfs_core
     PUBLIC
@@ -381,7 +416,7 @@ target_link_libraries(lfs_core
         PNG::PNG
         TIFF::TIFF
         WebP::webp
-        unofficial::tinyexr::tinyexr
+        OpenEXR::OpenEXRCore
         OpenMeshCore
 )
 # OpenMP for tensor multi-threaded operations
@@ -420,9 +455,12 @@ if(MSVC)
     )
     target_link_options(lfs_core PRIVATE /ignore:4217)
 else()
+    # Release binaries and compiler-cache entries must not depend on the build
+    # host's CPU. Keep the explicit AVX2/FMA baseline below instead of enabling
+    # every instruction detected by -march=native on a hosted runner.
     target_compile_options(lfs_core PRIVATE
         $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0 -g -fno-omit-frame-pointer -DDEBUG>
-        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3 -DNDEBUG -march=native>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3 -DNDEBUG>
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-O0 -g --extended-lambda --expt-relaxed-constexpr>
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3 -use_fast_math --extended-lambda --expt-relaxed-constexpr>
     )

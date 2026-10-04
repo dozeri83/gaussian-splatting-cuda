@@ -30,6 +30,42 @@ namespace lfs::core {
 
     namespace {
 
+        // Bounds between the 1st and 99th percentile of every axis of [N, 3] positions. Host positions use selection
+        // instead of a full sort: the same order statistics without the seconds a sort of millions of points takes.
+        void percentile_bounds(const Tensor& means, glm::vec3& min_bounds, glm::vec3& max_bounds, const float padding) {
+            LFS_ASSERT(means.ndim() == 2 && means.size(1) == 3 && means.dtype() == DataType::Float32);
+            const int64_t n = means.size(0);
+            const int64_t lo = n / 100;
+            const int64_t hi = n - 1 - lo;
+            if (means.device() == Device::CUDA) {
+                for (int i = 0; i < 3; ++i) {
+                    const auto sorted = means.slice(1, i, i + 1).squeeze(1).sort(0, false).first;
+                    min_bounds[i] = sorted[lo].item() - padding;
+                    max_bounds[i] = sorted[hi].item() + padding;
+                }
+                return;
+            }
+            const auto host = means.contiguous();
+            const float* const data = host.ptr<float>();
+            // NaN orders last so the comparison stays a strict weak ordering.
+            const auto less = [](const float a, const float b) { return a < b || (!std::isnan(a) && std::isnan(b)); };
+            std::array<std::vector<float>, 3> columns;
+            for (auto& column : columns)
+                column.resize(static_cast<size_t>(n));
+#pragma omp parallel for num_threads(3) if (n > 100000)
+            for (int axis = 0; axis < 3; ++axis) {
+                auto& column = columns[static_cast<size_t>(axis)];
+                for (int64_t row = 0; row < n; ++row)
+                    column[static_cast<size_t>(row)] = data[row * 3 + axis];
+                const auto lower = column.begin() + lo;
+                const auto upper = column.begin() + hi;
+                std::nth_element(column.begin(), lower, column.end(), less);
+                std::nth_element(lower + 1, upper, column.end(), less);
+                min_bounds[axis] = *lower - padding;
+                max_bounds[axis] = *upper + padding;
+            }
+        }
+
         constexpr double SH_C1 = 0.48860251190291987;
         constexpr double SH_C2_0 = 1.0925484305920792;
         constexpr double SH_C2_2 = 0.31539156525251999;
@@ -214,25 +250,18 @@ namespace lfs::core {
             return coeff_matrix;
         }
 
-        [[nodiscard]] bool rotate_sh_coefficients(SplatData& splat_data, const glm::mat3& rotation_local_to_world) {
-            if (!splat_data.shN().is_valid() || splat_data.get_max_sh_degree() <= 0) {
+        // Rotates canonical SH coefficients (sh0 [N,1,3] or [N,3], shN [N,K,3]) without
+        // writing to the inputs, which may be shared.
+        [[nodiscard]] bool rotate_sh_canonical(Tensor& sh0, Tensor& shN, const int max_sh_degree,
+                                               const glm::mat3& rotation_local_to_world) {
+            const int available_coeffs = shN.is_valid() && shN.ndim() >= 2 ? static_cast<int>(shN.size(1)) : 0;
+            if (max_sh_degree <= 0 || available_coeffs <= 0)
                 return true;
-            }
-
-            // shN is stored swizzled. Materialise the canonical [N, K, 3] view, rotate band
-            // coefficients on it, then reswizzle.
-            Tensor shN_canon = splat_data.shN_canonical();
-            const int available_coeffs = shN_canon.ndim() >= 2 ? static_cast<int>(shN_canon.size(1)) : 0;
-            if (available_coeffs <= 0) {
-                return true;
-            }
-
-            if (splat_data.get_max_sh_degree() > 3) {
+            if (max_sh_degree > 3)
                 return false;
-            }
 
-            const int max_band = std::min(3, splat_data.get_max_sh_degree());
-            const auto device = shN_canon.device();
+            const int max_band = std::min(3, max_sh_degree);
+            const auto device = shN.device();
 
             const bool orthogonal = std::abs(glm::dot(rotation_local_to_world[0], rotation_local_to_world[1])) <= 1e-6f &&
                                     std::abs(glm::dot(rotation_local_to_world[0], rotation_local_to_world[2])) <= 1e-6f &&
@@ -245,118 +274,138 @@ namespace lfs::core {
                 if (!matrix)
                     return false;
                 const size_t count = (max_band + 1) * (max_band + 1);
-                const auto coefficients = Tensor::cat({splat_data.sh0_raw(), shN_canon}, 1);
+                const bool flat_sh0 = sh0.ndim() == 2;
+                const auto coefficients = Tensor::cat({flat_sh0 ? sh0.unsqueeze(1) : sh0, shN}, 1);
                 const auto operator_tensor = Tensor::from_vector(*matrix, {count, count}, device);
                 const auto transformed = coefficients.permute({2, 0, 1}).matmul(operator_tensor).permute({1, 2, 0});
-                splat_data.sh0_raw() = transformed.slice(1, 0, 1).contiguous();
-                splat_data.shN_set_from_canonical(transformed.slice(1, 1, count).contiguous(), splat_data.means().capacity());
+                sh0 = transformed.slice(1, 0, 1).contiguous();
+                if (flat_sh0)
+                    sh0 = sh0.squeeze(1);
+                shN = transformed.slice(1, 1, count).contiguous();
                 return true;
             }
 
+            std::vector<Tensor> bands;
+            int done = 0;
             for (int band = 1; band <= max_band; ++band) {
                 const int coeff_count = 2 * band + 1;
                 const int offset = sh_band_offset_in_rest(band);
-                if (offset + coeff_count > available_coeffs) {
+                if (offset + coeff_count > available_coeffs)
                     break;
-                }
 
                 const auto coeff_matrix = compute_sh_coeff_rotation_matrix(rotation_local_to_world, band);
-                if (!coeff_matrix.has_value()) {
+                if (!coeff_matrix.has_value())
                     return false;
-                }
 
                 const Tensor coeff_matrix_tensor = Tensor::from_vector(
                     coeff_matrix.value(),
                     TensorShape({static_cast<size_t>(coeff_count), static_cast<size_t>(coeff_count)}),
                     device);
 
-                const Tensor band_coeffs = shN_canon.slice(1, offset, offset + coeff_count).contiguous();
-                // band_coeffs: [N, coeff_count, 3] → permute to [3, N, coeff_count]
-                // matmul broadcasts coeff_matrix [cc, cc] across batch dim 3
-                const Tensor channels_first = band_coeffs.permute({2, 0, 1});
-                const Tensor rotated = channels_first.matmul(coeff_matrix_tensor);
-                const Tensor rotated_band = rotated.permute({1, 2, 0});
-                shN_canon.slice(1, offset, offset + coeff_count).copy_from(rotated_band);
+                // band coefficients [N, cc, 3] → [3, N, cc]; the matrix broadcasts across channels.
+                const Tensor band_coeffs = shN.slice(1, offset, offset + coeff_count).contiguous();
+                bands.push_back(band_coeffs.permute({2, 0, 1}).matmul(coeff_matrix_tensor).permute({1, 2, 0}));
+                done = offset + coeff_count;
             }
-
-            splat_data.shN_set_from_canonical(shN_canon, splat_data.means().capacity());
+            if (done < available_coeffs)
+                bands.push_back(shN.slice(1, done, available_coeffs));
+            shN = Tensor::cat(bands, 1).contiguous();
             return true;
         }
 
-    } // namespace
-
-    SplatData& transform(SplatData& splat_data, const glm::mat4& transform_matrix) {
-        LOG_TIMER("transform");
-
-        if (!splat_data._means.is_valid() || splat_data._means.size(0) == 0) {
-            LOG_WARN("Cannot transform invalid or empty SplatData");
-            return splat_data;
+        [[nodiscard]] bool rotate_sh_coefficients(SplatData& splat_data, const glm::mat3& rotation_local_to_world) {
+            if (!splat_data.shN().is_valid() || splat_data.get_max_sh_degree() <= 0)
+                return true;
+            // shN is stored swizzled: rotate its canonical [N, K, 3] form, then reswizzle.
+            Tensor shN = splat_data.shN_canonical();
+            Tensor sh0 = splat_data.sh0_raw();
+            if (!rotate_sh_canonical(sh0, shN, splat_data.get_max_sh_degree(), rotation_local_to_world))
+                return false;
+            splat_data.sh0_raw() = std::move(sh0);
+            splat_data.shN_set_from_canonical(shN, splat_data.means().capacity());
+            return true;
         }
 
-        const GpuBackendScope backend_scope(gpu_backend_of(splat_data._means).value_or(default_gpu_backend()));
-        const int num_points = splat_data._means.size(0);
-        auto device = splat_data._means.device();
+        struct LinearPart {
+            glm::mat3 rotation{1.0f};
+            glm::vec3 scale{1.0f};
+            bool similarity = false;
+            bool changes_sh = false;
+        };
 
-        // GLM uses column-major storage: mat[col][row], so mat[3] is the translation column.
-        // Our tensor MM expects row-major, so we transpose during construction.
-        // Final transform: M * p^T where p is [N,4] homogeneous points.
-        const std::vector<float> transform_data = {
-            transform_matrix[0][0], transform_matrix[1][0], transform_matrix[2][0], transform_matrix[3][0],
-            transform_matrix[0][1], transform_matrix[1][1], transform_matrix[2][1], transform_matrix[3][1],
-            transform_matrix[0][2], transform_matrix[1][2], transform_matrix[2][2], transform_matrix[3][2],
-            transform_matrix[0][3], transform_matrix[1][3], transform_matrix[2][3], transform_matrix[3][3]};
+        // Steps shared by transform() and transform_canonical(): positions, orientation and
+        // scale. Returns the decomposition the SH step needs.
+        LinearPart transform_geometry_tensors(Tensor& means, Tensor& rotation, Tensor& scaling,
+                                              const glm::mat4& transform_matrix) {
+            const int num_points = means.size(0);
+            const auto device = means.device();
 
-        const auto transform_tensor = Tensor::from_vector(transform_data, TensorShape({4, 4}), device);
-        const auto ones = Tensor::ones({static_cast<size_t>(num_points), 1}, device);
-        const auto means_homo = splat_data._means.cat(ones, 1);
-        const auto transformed_means = transform_tensor.mm(means_homo.t()).t();
+            // GLM uses column-major storage: mat[col][row], so mat[3] is the translation column.
+            // Our tensor MM expects row-major, so we transpose during construction.
+            // Final transform: M * p^T where p is [N,4] homogeneous points.
+            const std::vector<float> transform_data = {
+                transform_matrix[0][0], transform_matrix[1][0], transform_matrix[2][0], transform_matrix[3][0],
+                transform_matrix[0][1], transform_matrix[1][1], transform_matrix[2][1], transform_matrix[3][1],
+                transform_matrix[0][2], transform_matrix[1][2], transform_matrix[2][2], transform_matrix[3][2],
+                transform_matrix[0][3], transform_matrix[1][3], transform_matrix[2][3], transform_matrix[3][3]};
 
-        splat_data._means = transformed_means.slice(1, 0, 3).contiguous();
+            const auto transform_tensor = Tensor::from_vector(transform_data, TensorShape({4, 4}), device);
+            const auto ones = Tensor::ones({static_cast<size_t>(num_points), 1}, device);
+            const auto means_homo = means.cat(ones, 1);
+            const auto transformed_means = transform_tensor.mm(means_homo.t()).t();
 
-        // 2. Extract rotation from transform matrix
-        glm::mat3 rot_mat(transform_matrix);
-        glm::vec3 scale;
-        for (int i = 0; i < 3; ++i) {
-            scale[i] = glm::length(rot_mat[i]);
-            if (scale[i] > 0.0f) {
-                rot_mat[i] /= scale[i];
+            means = transformed_means.slice(1, 0, 3).contiguous();
+
+            // 2. Extract rotation from transform matrix
+            LinearPart part;
+            glm::mat3& rot_mat = part.rotation;
+            rot_mat = glm::mat3(transform_matrix);
+            glm::vec3& scale = part.scale;
+            for (int i = 0; i < 3; ++i) {
+                scale[i] = glm::length(rot_mat[i]);
+                if (scale[i] > 0.0f) {
+                    rot_mat[i] /= scale[i];
+                }
             }
-        }
 
-        glm::quat rotation_quat = glm::quat_cast(rot_mat);
+            // A uniform reflection A=-sR has the same covariance action as sR.
+            // Preserve the original splat axes instead of using an SVD whose basis
+            // is ambiguous at repeated scales. SH still uses the signed rot_mat below.
+            const auto covariance_rotation = glm::determinant(rot_mat) < 0.0f ? -rot_mat : rot_mat;
+            glm::quat rotation_quat = glm::quat_cast(covariance_rotation);
 
-        const bool has_rotation = has_significant_rotation(rotation_quat);
-        const float largest_scale = std::max({scale.x, scale.y, scale.z});
-        const bool similarity = largest_scale > 0.0f && glm::determinant(rot_mat) > 0.0f &&
-                                std::abs(scale.x - scale.y) <= 1e-6f * largest_scale &&
-                                std::abs(scale.x - scale.z) <= 1e-6f * largest_scale &&
-                                std::abs(glm::dot(rot_mat[0], rot_mat[1])) <= 1e-6f &&
-                                std::abs(glm::dot(rot_mat[0], rot_mat[2])) <= 1e-6f &&
-                                std::abs(glm::dot(rot_mat[1], rot_mat[2])) <= 1e-6f;
+            const bool has_rotation = has_significant_rotation(rotation_quat);
+            const float largest_scale = std::max({scale.x, scale.y, scale.z});
+            const bool similarity = largest_scale > 0.0f &&
+                                    std::abs(scale.x - scale.y) <= 1e-6f * largest_scale &&
+                                    std::abs(scale.x - scale.z) <= 1e-6f * largest_scale &&
+                                    std::abs(glm::dot(rot_mat[0], rot_mat[1])) <= 1e-6f &&
+                                    std::abs(glm::dot(rot_mat[0], rot_mat[2])) <= 1e-6f &&
+                                    std::abs(glm::dot(rot_mat[1], rot_mat[2])) <= 1e-6f;
+            part.similarity = similarity;
 
-        if (!similarity) {
-            // Preserve the full affine covariance instead of averaging node
-            // scale. Work from the original quaternion and log scales.
-            splat_transform::LinearTransform linear;
-            for (int i = 0; i < 3; ++i)
-                for (int j = 0; j < 3; ++j)
-                    linear.rows[3 * i + j] = transform_matrix[j][i];
-            auto scales = splat_data._scaling.contiguous();
-            auto rotations = splat_data._rotation.contiguous();
-            auto out_scales = Tensor::empty(scales.shape(), device, DataType::Float32);
-            auto out_rotations = Tensor::empty(rotations.shape(), device, DataType::Float32);
-            affine_splat_geometry(linear, scales, rotations, out_scales, out_rotations);
-            splat_data._scaling = std::move(out_scales);
-            splat_data._rotation = std::move(out_rotations);
-        }
+            if (!similarity) {
+                // Preserve the full affine covariance instead of averaging node
+                // scale. Work from the original quaternion and log scales.
+                splat_transform::LinearTransform linear;
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j)
+                        linear.rows[3 * i + j] = transform_matrix[j][i];
+                auto scales = scaling.contiguous();
+                auto rotations = rotation.contiguous();
+                auto out_scales = Tensor::empty(scales.shape(), device, DataType::Float32);
+                auto out_rotations = Tensor::empty(rotations.shape(), device, DataType::Float32);
+                affine_splat_geometry(linear, scales, rotations, out_scales, out_rotations);
+                scaling = std::move(out_scales);
+                rotation = std::move(out_rotations);
+            }
 
-        // 3. Transform rotations (quaternions) and SH orientation if there's rotation
-        if (has_rotation) {
-            if (similarity) {
+            // 3. Transform rotations (quaternions) if there's rotation
+            if (has_rotation && similarity) {
                 std::vector<float> rot_data = {rotation_quat.w, rotation_quat.x, rotation_quat.y, rotation_quat.z};
                 auto rot_tensor = Tensor::from_vector(rot_data, TensorShape({4}), device);
 
-                auto q = splat_data._rotation;
+                auto q = rotation;
                 std::vector<int> expand_shape = {num_points, 4};
                 auto q_rot = rot_tensor.unsqueeze(0).expand(std::span<const int>(expand_shape));
 
@@ -380,42 +429,141 @@ namespace lfs::core {
                     x_new.unsqueeze(1),
                     y_new.unsqueeze(1),
                     z_new.unsqueeze(1)};
-                splat_data._rotation = Tensor::cat(components, 1);
+                rotation = Tensor::cat(components, 1);
             }
+
+            // Match extract_rotation_rows: a degenerate node axis skips the SH
+            // direction pull. Compare the matrix itself, not quat_cast(shear).
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    part.changes_sh |= std::abs(rot_mat[i][j] - (i == j ? 1.0f : 0.0f)) > ROTATION_EPS;
+            part.changes_sh &= scale.x > 1e-8f && scale.y > 1e-8f && scale.z > 1e-8f;
+
+            // 4. Transform scaling
+            if (similarity && (std::abs(scale.x - 1.0f) > 1e-6f ||
+                               std::abs(scale.y - 1.0f) > 1e-6f ||
+                               std::abs(scale.z - 1.0f) > 1e-6f)) {
+
+                float avg_scale = (scale.x + scale.y + scale.z) / 3.0f;
+                scaling = scaling.add(std::log(avg_scale));
+            }
+            return part;
         }
 
-        // Match extract_rotation_rows: a degenerate node axis skips the SH
-        // direction pull. Compare the matrix itself, not quat_cast(shear).
-        bool changes_sh = false;
-        for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 3; ++j)
-                changes_sh |= std::abs(rot_mat[i][j] - (i == j ? 1.0f : 0.0f)) > ROTATION_EPS;
-        if (changes_sh && scale.x > 1e-8f && scale.y > 1e-8f && scale.z > 1e-8f &&
-            !rotate_sh_coefficients(splat_data, rot_mat)) {
+    } // namespace
+
+    SplatData& transform(SplatData& data, const Tensor& matrices) {
+        const size_t count = data.means().size(0);
+        LFS_ASSERT_MSG(matrices.ndim() == 3 && matrices.size(0) == count && matrices.size(1) == 4 && matrices.size(2) == 4 &&
+                           matrices.dtype() == DataType::Float32 && matrices.device() == data.means().device(),
+                       std::format("Per-splat transforms require Float32 [N,4,4] (shape={}, dtype={}, device={}, count={}, data_device={})",
+                                   matrices.shape().str(), int(matrices.dtype()), int(matrices.device()), count, int(data.means().device())));
+        if (!count)
+            return data;
+        const auto device = data.means().device();
+        auto means = Tensor::empty({count, 3}, device), scales = Tensor::empty({count, 3}, device), rotations = Tensor::empty({count, 4}, device);
+        auto sh = data.shN_canonical().to(device);
+        auto result_sh = Tensor::empty(sh.shape(), device);
+        const int degree = data.get_max_sh_degree();
+        LFS_ASSERT_MSG(degree <= 3, std::format("Per-splat SH transforms support degrees 0..3 (degree={})", degree));
+        const auto sample_dirs = fibonacci_sphere_dirs(SH_FIT_SAMPLE_COUNT);
+        std::vector<float> directions;
+        for (const auto& d : sample_dirs)
+            directions.insert(directions.end(), {float(d.x), float(d.y), float(d.z)});
+        const auto samples = Tensor::from_vector(directions, {size_t(SH_FIT_SAMPLE_COUNT), 3}, device);
+        std::vector<Tensor> projectors;
+        for (int band = 1; band <= degree; ++band) {
+            const int k = 2 * band + 1;
+            std::vector<double> gram(k * k, 0), rhs(k * SH_FIT_SAMPLE_COUNT, 0);
+            for (int s = 0; s < SH_FIT_SAMPLE_COUNT; ++s) {
+                const auto basis = eval_sh_band_basis(band, sample_dirs[s]);
+                for (int i = 0; i < k; ++i) {
+                    rhs[i * SH_FIT_SAMPLE_COUNT + s] = basis[i];
+                    for (int j = 0; j < k; ++j)
+                        gram[i * k + j] += basis[i] * basis[j];
+                }
+            }
+            LFS_ASSERT_MSG(solve_linear_system(gram, rhs, k, SH_FIT_SAMPLE_COUNT), std::format("SH projector solve failed (band={}, samples={})", band, SH_FIT_SAMPLE_COUNT));
+            projectors.push_back(Tensor::from_vector(std::vector<float>(rhs.begin(), rhs.end()), {size_t(k), size_t(SH_FIT_SAMPLE_COUNT)}, device));
+        }
+        // Chunk scratch is independent of the number of generated instances.
+        for (size_t begin = 0; begin < count; begin += 4096) {
+            const size_t end = std::min(count, begin + 4096), n = end - begin;
+            const auto matrix = matrices.slice(0, begin, end);
+            const auto linear = matrix.slice(1, 0, 3).slice(2, 0, 3).contiguous();
+            const auto translation = matrix.slice(1, 0, 3).slice(2, 3, 4).squeeze(2);
+            means.slice(0, begin, end).copy_from(linear.bmm(data.means().slice(0, begin, end).unsqueeze(2)).squeeze(2) + translation);
+            auto out_s = scales.slice(0, begin, end), out_q = rotations.slice(0, begin, end);
+            affine_splat_geometry(linear.reshape({int(n), 9}), data.scaling_raw().slice(0, begin, end), data.rotation_raw().slice(0, begin, end), out_s, out_q);
+            if (!degree)
+                continue;
+            const auto norm = (linear * linear).sum(1, true).sqrt();
+            const auto rotation = linear / norm.maximum(1e-8f);
+            const auto valid_rotation = norm.min(2).gt(1e-8f).unsqueeze(2);
+            const auto pulled = samples.matmul(rotation);
+            const auto x = pulled.slice(2, 0, 1).squeeze(2), y = pulled.slice(2, 1, 2).squeeze(2), z = pulled.slice(2, 2, 3).squeeze(2);
+            const auto xx = x * x, yy = y * y, zz = z * z;
+            for (int band = 1; band <= degree; ++band) {
+                std::vector<Tensor> basis;
+                if (band == 1)
+                    basis = {y * float(-SH_C1), z * float(SH_C1), x * float(-SH_C1)};
+                if (band == 2)
+                    basis = {x * y * float(SH_C2_0), y * z * float(-SH_C2_0), (zz * 2 - xx - yy) * float(SH_C2_2), x * z * float(-SH_C2_0), (xx - yy) * float(SH_C2_3)};
+                if (band == 3)
+                    basis = {y * (yy - xx * 3) * float(SH_C3_0), x * y * z * float(SH_C3_1), y * (xx + yy - zz * 4) * float(SH_C3_2), z * (zz * 2 - xx * 3 - yy * 3) * float(SH_C3_3), x * (xx + yy - zz * 4) * float(SH_C3_2), z * (xx - yy) * float(SH_C3_4), x * (yy * 3 - xx) * float(SH_C3_0)};
+                const int offset = sh_band_offset_in_rest(band), k = 2 * band + 1;
+                const auto coefficients = projectors[band - 1].matmul(Tensor::stack(basis, 2));
+                const auto original = sh.slice(0, begin, end).slice(1, offset, offset + k);
+                result_sh.slice(0, begin, end).slice(1, offset, offset + k).copy_from(Tensor::where(valid_rotation, coefficients.bmm(original), original));
+            }
+        }
+        data.means_raw() = std::move(means);
+        data.scaling_raw() = std::move(scales);
+        data.rotation_raw() = std::move(rotations);
+        data.shN_set_from_canonical(result_sh, count);
+        return data;
+    }
+
+    SplatData& transform(SplatData& splat_data, const glm::mat4& transform_matrix) {
+        LOG_TIMER("transform");
+
+        if (!splat_data._means.is_valid() || splat_data._means.size(0) == 0) {
+            LOG_WARN("Cannot transform invalid or empty SplatData");
+            return splat_data;
+        }
+
+        const GpuBackendScope backend_scope(gpu_backend_of(splat_data._means).value_or(default_gpu_backend()));
+        const int num_points = splat_data._means.size(0);
+        const auto part = transform_geometry_tensors(splat_data._means, splat_data._rotation, splat_data._scaling,
+                                                     transform_matrix);
+        if (part.changes_sh && !rotate_sh_coefficients(splat_data, part.rotation)) {
             throw std::runtime_error("SH transformation is only supported up to degree 3.");
         }
 
-        // 4. Transform scaling
-        if (similarity && (std::abs(scale.x - 1.0f) > 1e-6f ||
-                           std::abs(scale.y - 1.0f) > 1e-6f ||
-                           std::abs(scale.z - 1.0f) > 1e-6f)) {
-
-            float avg_scale = (scale.x + scale.y + scale.z) / 3.0f;
-            splat_data._scaling = splat_data._scaling.add(std::log(avg_scale));
-        }
-
-        // 5. Update scene scale
-        Tensor scene_center = splat_data._means.mean({0}, false);
-        Tensor dists = splat_data._means.sub(scene_center).norm(2.0f, {1}, false);
-        auto sorted_dists = dists.sort(0, false);
-        float new_scene_scale = sorted_dists.first[num_points / 2].item();
-
-        if (std::abs(new_scene_scale - splat_data._scene_scale) > splat_data._scene_scale * 0.1f) {
-            splat_data._scene_scale = new_scene_scale;
-        }
+        splat_data._scene_scale = transformed_scene_scale(splat_data._means, splat_data._scene_scale);
 
         LOG_DEBUG("Transformed {} gaussians", num_points);
         return splat_data;
+    }
+
+    float transformed_scene_scale(const Tensor& means, const float scene_scale) {
+        if (!means.is_valid() || means.size(0) == 0)
+            return scene_scale;
+        const Tensor centre = means.mean({0}, false);
+        const Tensor distances = means.sub(centre).norm(2.0f, {1}, false);
+        const float median = distances.sort(0, false).first[means.size(0) / 2].item();
+        return std::abs(median - scene_scale) > scene_scale * 0.1f ? median : scene_scale;
+    }
+
+    float transform_canonical(Tensor& means, Tensor& rotation, Tensor& scaling, Tensor& sh0, Tensor& shN,
+                              const int sh_degree, const glm::mat4& transform_matrix) {
+        if (!means.is_valid() || means.size(0) == 0)
+            return 1.0f;
+        const GpuBackendScope backend_scope(gpu_backend_of(means).value_or(default_gpu_backend()));
+        const auto part = transform_geometry_tensors(means, rotation, scaling, transform_matrix);
+        if (part.changes_sh && !rotate_sh_canonical(sh0, shN, sh_degree, part.rotation))
+            throw std::runtime_error("SH transformation is only supported up to degree 3.");
+        return part.similarity ? (part.scale.x + part.scale.y + part.scale.z) / 3.0f : 0.0f;
     }
 
     Tensor compute_cropbox_mask(const Tensor& means,
@@ -849,14 +997,7 @@ namespace lfs::core {
         const int64_t n = visible_means.size(0);
 
         if (use_percentile && n > 100) {
-            // Exclude 2% outliers (1% each end)
-            const int64_t lo = n / 100;
-            const int64_t hi = n - 1 - lo;
-            for (int i = 0; i < 3; ++i) {
-                const auto sorted = visible_means.slice(1, i, i + 1).squeeze(1).sort(0, false).first;
-                min_bounds[i] = sorted[lo].item() - padding;
-                max_bounds[i] = sorted[hi].item() + padding;
-            }
+            percentile_bounds(visible_means, min_bounds, max_bounds, padding);
         } else {
             for (int i = 0; i < 3; ++i) {
                 const auto col = visible_means.slice(1, i, i + 1).squeeze(1);
@@ -881,14 +1022,7 @@ namespace lfs::core {
         const int64_t n = means.size(0);
 
         if (use_percentile && n > 100) {
-            // Exclude 2% outliers (1% each end)
-            const int64_t lo = n / 100;
-            const int64_t hi = n - 1 - lo;
-            for (int i = 0; i < 3; ++i) {
-                const auto sorted = means.slice(1, i, i + 1).squeeze(1).sort(0, false).first;
-                min_bounds[i] = sorted[lo].item() - padding;
-                max_bounds[i] = sorted[hi].item() + padding;
-            }
+            percentile_bounds(means, min_bounds, max_bounds, padding);
         } else {
             for (int i = 0; i < 3; ++i) {
                 const auto col = means.slice(1, i, i + 1).squeeze(1);

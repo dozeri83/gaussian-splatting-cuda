@@ -1123,6 +1123,10 @@ void VulkanGSRenderer::initializeExternal(const std::map<std::string, std::strin
             create_optional(pipeline_macro_raster_fp32[i], lean ? "macro_raster_fp32_lean" : "macro_raster_fp32");
             create_optional(pipeline_macro_raster_overlays[i], lean ? "macro_raster_overlays_lean" : "macro_raster_overlays");
             create_optional(pipeline_macro_raster_overlays_fp32[i], lean ? "macro_raster_overlays_fp32_lean" : "macro_raster_overlays_fp32");
+#if defined(LFS_VULKAN_MACOS_REFERENCE)
+            create_optional(pipeline_macro_raster_fp32_precise_alpha[i], lean ? "macro_raster_fp32_lean_precise_alpha" : "macro_raster_fp32_precise_alpha");
+            create_optional(pipeline_macro_raster_overlays_fp32_precise_alpha[i], lean ? "macro_raster_overlays_fp32_lean_precise_alpha" : "macro_raster_overlays_fp32_precise_alpha");
+#endif
             create_optional(pipeline_macro_compose[i], "macro_compose");
             create_optional(pipeline_macro_compose_overlays[i], "macro_compose_overlays");
         }
@@ -1531,7 +1535,7 @@ void VulkanGSRenderer::executeLegacyDepthWaves(
     auto& n_contributors = resize_scratch(buffers.n_contributors, alloc_pixels);
 
     constexpr size_t kRadix = 256u;
-    constexpr size_t kPartitionSize = 512u * 8u;
+    constexpr size_t kPartitionSize = RADIX_PARTITION_SIZE;
     const size_t radix_passes = _CEIL_DIV(static_cast<size_t>(sort_bits), size_t{8});
     resizeDeviceBuffer(buffers._sorting_histogram, radix_passes * kRadix);
     resizeDeviceBuffer(buffers._sorting_histogram_cumsum,
@@ -2248,7 +2252,7 @@ void VulkanGSRenderer::executeSortIndirectCountImpl(
     };
 
     const int RADIX = 256;
-    const int WORKGROUP_SIZE = 512;
+    const int WORKGROUP_SIZE = RADIX_WORKGROUP_SIZE;
     const int PARTITION_DIVISION = 8;
     const int PARTITION_SIZE = PARTITION_DIVISION * WORKGROUP_SIZE;
 
@@ -2444,7 +2448,7 @@ void VulkanGSRenderer::executeSortPrimitivesByDepth(
         uint32_t num_splats;
         uint32_t sort_partition_size;
         uint32_t pad0, pad1;
-    } prepare_uniforms{static_cast<uint32_t>(num_splats), 512u * 8u, 0, 0};
+    } prepare_uniforms{static_cast<uint32_t>(num_splats), RADIX_PARTITION_SIZE, 0, 0};
 
     {
         PerfTimer::Timer<PerfTimer::PrepareVisibleSort> gpu_timer(this);
@@ -2810,7 +2814,7 @@ void VulkanGSRenderer::executeSortPrimitivesByDepthVisible(
         static_cast<uint32_t>(
             std::min<size_t>(visible_capacity,
                              static_cast<size_t>(std::numeric_limits<uint32_t>::max()))),
-        512u * 8u, 0, 0};
+        RADIX_PARTITION_SIZE, 0, 0};
 
     using lfs::rendering::vulkan::BufferUse;
     using lfs::rendering::vulkan::DeclaredAccess;
@@ -3095,7 +3099,7 @@ void VulkanGSRenderer::executeMacroDepthWaves(
     auto& n_contributors = resize_scratch(buffers.n_contributors, alloc_pixels);
 
     constexpr size_t kRadix = 256u;
-    constexpr size_t kPartitionSize = 512u * 8u;
+    constexpr size_t kPartitionSize = RADIX_PARTITION_SIZE;
     const size_t radix_passes = _CEIL_DIV(static_cast<size_t>(sort_bits), size_t{8});
     resizeDeviceBuffer(buffers._sorting_histogram, radix_passes * kRadix);
     resizeDeviceBuffer(buffers._sorting_histogram_cumsum,
@@ -3111,14 +3115,17 @@ void VulkanGSRenderer::executeMacroDepthWaves(
                          _CEIL_DIV(_CEIL_DIV(alloc_macro_tiles, kCumsumBlock),
                                    kCumsumBlock)));
 
-    // Spark-rad opacity (lod_enabled bit 2) still needs the fp32 blend math;
-    // overlays no longer force fp32 — pick the matching overlay/plain variant.
+    // Production Spark density uses the original FP32 footprint. The Mac test
+    // reference also offers accurate transparent geometry/partial coverage.
     const bool use_fp32 = (uniforms.lod_enabled & 4u) != 0u;
-    auto& raster_pipeline = overlays_active
-                                ? (use_fp32 ? pipeline_macro_raster_overlays_fp32
-                                            : pipeline_macro_raster_overlays)
-                                : (use_fp32 ? pipeline_macro_raster_fp32
-                                            : pipeline_macro_raster);
+    auto* raster_pipeline = overlays_active
+                                ? (use_fp32 ? &pipeline_macro_raster_overlays_fp32 : &pipeline_macro_raster_overlays)
+                                : (use_fp32 ? &pipeline_macro_raster_fp32 : &pipeline_macro_raster);
+#if defined(LFS_VULKAN_MACOS_REFERENCE)
+    if ((uniforms.mip_filter & 8u) != 0u)
+        raster_pipeline = overlays_active ? &pipeline_macro_raster_overlays_fp32_precise_alpha
+                                          : &pipeline_macro_raster_fp32_precise_alpha;
+#endif
     auto& compose_pipeline = overlays_active
                                  ? pipeline_macro_compose_overlays
                                  : pipeline_macro_compose;
@@ -3266,7 +3273,7 @@ void VulkanGSRenderer::executeMacroDepthWaves(
                 indirect::byteOffset(indirect::MacroWaveDispatch::rasterWordOffset(batch_wave)),
                 &wave_uniforms,
                 sizeof(wave_uniforms),
-                raster_pipeline[buffers.is_unsorted_1],
+                (*raster_pipeline)[buffers.is_unsorted_1],
                 raster_bindings);
             executeComputeIndirect(
                 macro_wave_args,

@@ -224,7 +224,7 @@ BG_COLOR_TEXT_KEYS = tuple(key for key, _index in BG_COLOR_CHANNELS) + (
 
 class TrainingPanel(Panel):
     id = "lfs.training"
-    label = "Training"
+    label = "window.training"
     space = lf.ui.PanelSpace.MAIN_PANEL_TAB
     order = 20
     template = "rmlui/training.rml"
@@ -276,7 +276,6 @@ class TrainingPanel(Panel):
         self._psnr_tick_max = ""
         self._psnr_tick_mid = ""
         self._psnr_tick_min = ""
-        self._last_panel_label = ""
         self._last_language_generation = -1
         self._last_toolbar_fit_key = None
         self._last_saving_model = False
@@ -361,18 +360,10 @@ class TrainingPanel(Panel):
         ])
         for binding in self._pv_bindings:
             binding.attach_handle(self._handle)
-        self._sync_panel_label()
 
         params = lf.optimization_params()
         if params and params.has_params() and params.enable_eval:
             self._sync_eval_steps_with_save_steps(params)
-
-    def _sync_panel_label(self):
-        label = tr("window.training")
-        if not label or label == self._last_panel_label:
-            return
-        if lf.ui.set_panel_label(self.id, label):
-            self._last_panel_label = label
 
     def _bind_labels(self, model):
         model.bind_func(
@@ -388,6 +379,7 @@ class TrainingPanel(Panel):
         model.bind_func("label_clear", lambda: tr("training_panel.clear"))
         model.bind_func("label_pause", lambda: tr("training_panel.pause"))
         model.bind_func("label_resume", lambda: tr("training_panel.resume"))
+        model.bind_func("label_toolbar_start", lambda: tr("training.action_start"))
         model.bind_func("label_toolbar_edit", lambda: tr("common.edit"))
         model.bind_func("label_toolbar_reset", lambda: tr("common.reset"))
         model.bind_func("label_toolbar_stop", lambda: tr("training.action_stop"))
@@ -400,7 +392,10 @@ class TrainingPanel(Panel):
         model.bind_func("label_status_stopped", lambda: tr("status.stopped"))
         model.bind_func("label_status_error", lambda: tr("status.error"))
         model.bind_func("label_status_stopping", lambda: tr("status.stopping"))
-        model.bind_func("label_status_starting", lambda: tr("runtime.task_starting"))
+        model.bind_func(
+            "label_status_starting", lambda: tr("training_panel.preparing_training")
+        )
+        model.bind_func("label_cancel_preparation", lambda: tr("common.cancel"))
         model.bind_func(
             "label_save_project", lambda: tr("training_panel.save_project")
         )
@@ -444,6 +439,7 @@ class TrainingPanel(Panel):
         model.bind_func("label_ppisp_sidecar_clear", lambda: tr("training_panel.clear"))
         model.bind_func("label_bg_color", lambda: tr("training_params.bg_color"))
         model.bind_func("label_bg_image", lambda: tr("training_params.bg_image"))
+        model.bind_func("label_eval_mask", lambda: tr("training_params.eval_mask"))
         model.bind_func(
             "label_bg_browse", lambda: tr("training_params.bg_image_browse")
         )
@@ -465,6 +461,7 @@ class TrainingPanel(Panel):
         model.bind_func(
             "label_dataset_output", lambda: tr("training.dataset.output")
         )
+        model.bind_func("label_browse", lambda: tr("common.browse"))
         model.bind_func("label_auto", lambda: tr("common.auto"))
         model.bind_func(
             "label_no_dataset", lambda: tr("training_panel.no_dataset_loaded")
@@ -672,6 +669,8 @@ class TrainingPanel(Panel):
             "dep_sparsity": params.enable_sparsity,
             "dep_random": params.random,
             "dep_eval": params.enable_eval,
+            "dep_undistort": params.undistort,
+            "dep_eval_mask": params.enable_eval and bool(params.eval_mask),
         }
         return bool(conditions.get(str(condition_id), True))
 
@@ -733,6 +732,7 @@ class TrainingPanel(Panel):
 
         for state_name in [
             "ready",
+            "preparing",
             "starting",
             "running",
             "paused",
@@ -866,6 +866,21 @@ class TrainingPanel(Panel):
         )
         model.bind_func(
             "dep_eval", lambda: p() is not None and p().has_params() and p().enable_eval
+        )
+        model.bind_func(
+            "dep_undistort",
+            lambda: p() is not None and p().has_params() and p().undistort,
+        )
+        model.bind_func(
+            "dep_eval_mask",
+            lambda: p() is not None
+            and p().has_params()
+            and p().enable_eval
+            and bool(p().eval_mask),
+        )
+        model.bind_func(
+            "has_eval_mask_clear",
+            lambda: p() is not None and p().has_params() and bool(p().eval_mask),
         )
         model.bind_func(
             "dep_eval_holdout",
@@ -1321,6 +1336,8 @@ class TrainingPanel(Panel):
             it = RuntimeState.iteration.value
             labels = {
                 "idle": tr("training_panel.idle"),
+                "preparing": tr("training_panel.preparing_training"),
+                "starting": tr("training_panel.preparing_training"),
                 "ready": tr("status.ready") if it == 0 else tr("training_panel.resume"),
                 "restoring": tr("training.status_restoring"),
                 "starting": tr("runtime.task_starting"),
@@ -1431,6 +1448,14 @@ class TrainingPanel(Panel):
                 else tr("training.value.none")
             ),
         )
+        model.bind_func(
+            "eval_mask_path_display",
+            lambda: (
+                os.path.basename(p().eval_mask)
+                if p() and p().has_params() and p().eval_mask
+                else tr("training.value.none")
+            ),
+        )
 
     def _bind_events(self, model):
         model.bind_event("toggle_section", self._on_toggle_section)
@@ -1468,7 +1493,6 @@ class TrainingPanel(Panel):
     def on_mount(self, doc):
         self._doc = doc
         doc.add_event_listener("resize", lambda _event: self._schedule_deferred_update(0.01))
-        self._sync_panel_label()
         self._popup_el = doc.get_element_by_id("color-picker-popup")
         if self._popup_el:
             self._popup_el.add_event_listener("click", self._on_popup_click)
@@ -1683,10 +1707,11 @@ class TrainingPanel(Panel):
             return False
         actions = {
             "ready": ("start", "reset", "clear") if RuntimeState.iteration.value > 0 else ("start", "clear"),
-            "starting": ("pause", "stop"),
+            "preparing": ("cancel_preparation",),
+            "starting": ("pause", "cancel_preparation"),
             "running": ("pause", "save_project"),
             "paused": ("resume", "save_project", "reset", "stop"),
-            "completed": ("switch_edit", "reset", "clear"),
+            "completed": ("start_new", "switch_edit", "reset", "clear"),
             "stopped": ("switch_edit", "reset", "clear"),
             "error": ("reset", "clear"),
         }.get(state, ())
@@ -1710,7 +1735,6 @@ class TrainingPanel(Panel):
     def on_update(self, doc):
         if not self._handle:
             return False
-        self._sync_panel_label()
         self._sync_auto_scale_markers()
 
         dirty = self._flush_pv_publish()
@@ -2713,6 +2737,27 @@ class TrainingPanel(Panel):
                 params.bg_image_path = ""
                 if self._handle:
                     self._sync_text_bufs()
+                    self._handle.dirty_all()
+        elif action == "browse_eval_mask":
+            params = lf.optimization_params()
+            start_dir = ""
+            if params and params.has_params() and params.eval_mask:
+                start_dir = os.path.dirname(params.eval_mask)
+            selected = lf.ui.open_mesh_file_dialog(start_dir)
+            if selected and params and params.has_params():
+                params.eval_mask = selected
+                if self._handle:
+                    self._handle.dirty_all()
+        elif action == "clear_eval_mask":
+            params = lf.optimization_params()
+            if params and params.has_params():
+                params.eval_mask = ""
+                invert_binding = self._pv_binding_by_prop.get("eval_mask_invert")
+                if invert_binding is not None:
+                    invert_binding.set_value("eval_mask_invert", False)
+                else:
+                    params.eval_mask_invert = False
+                if self._handle:
                     self._handle.dirty_all()
         elif action == "clear_ppisp_sidecar":
             params = lf.optimization_params()

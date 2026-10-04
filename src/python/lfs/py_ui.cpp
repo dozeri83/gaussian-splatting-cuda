@@ -4463,7 +4463,7 @@ namespace lfs::python {
                     lfs::vis::op::operators().dispatchModalEvent(event);
                 }
                 if (auto* const rm = lfs::vis::services().renderingOrNull()) {
-                    rm->markDirty(lfs::vis::DirtyFlag::OVERLAY);
+                    rm->markDirty(lfs::vis::DirtyFlag::OVERLAY, lfs::vis::FrameReason::Overlay);
                 }
             },
             nb::arg("enabled"),
@@ -4484,7 +4484,7 @@ namespace lfs::python {
                     lfs::vis::op::operators().dispatchModalEvent(event);
                 }
                 if (auto* const rm = lfs::vis::services().renderingOrNull()) {
-                    rm->markDirty(lfs::vis::DirtyFlag::OVERLAY);
+                    rm->markDirty(lfs::vis::DirtyFlag::OVERLAY, lfs::vis::FrameReason::Overlay);
                 }
             },
             nb::arg("enabled"),
@@ -5489,7 +5489,16 @@ namespace lfs::python {
                       .options = {.vulkan_device = device, .vulkan_validation = validation,
                                   .force_fp32_half = fp32_half, .force_no_atomic_float = no_atomic_float},
                   };
-                  vis::UserPreferences::instance().setTensorBackend(state); }, nb::arg("backend") = "auto", nb::arg("vulkan_device") = "", nb::arg("vulkan_validation") = 0, nb::arg("force_fp32_half") = false, nb::arg("force_no_atomic_float") = false, "Save tensor backend preferences for the next application start");
+                  const auto previous = vis::UserPreferences::instance().tensorBackend();
+                  vis::UserPreferences::instance().setTensorBackend(state);
+                  if (previous.backend != state.backend ||
+                      previous.options.vulkan_device != state.options.vulkan_device ||
+                      previous.options.vulkan_validation != state.options.vulkan_validation ||
+                      previous.options.force_fp32_half != state.options.force_fp32_half ||
+                      previous.options.force_no_atomic_float != state.options.force_no_atomic_float) {
+                      LOG_INFO("Tensor GPU backend preferences saved: requested={}; changes apply after restart; current={}",
+                               backend, core::gpu_backend_name(core::configured_gpu_backend()));
+                  } }, nb::arg("backend") = "auto", nb::arg("vulkan_device") = "", nb::arg("vulkan_validation") = 0, nb::arg("force_fp32_half") = false, nb::arg("force_no_atomic_float") = false, "Save tensor backend preferences for the next application start");
 
         m.def(
             "get_mcp_preferences",
@@ -6079,7 +6088,14 @@ namespace lfs::python {
                 }
                 return rm->getAverageFPS();
             },
-            "Get current FPS");
+            "Get viewport renders in the trailing second (cached and deferred results excluded)");
+
+        m.def(
+            "get_ui_fps", []() -> float {
+                auto* rm = get_rendering_manager();
+                return rm ? rm->getPresentedAverageFPS() : 0.0f;
+            },
+            "Get successful GUI presents in the trailing second (idle-clear frame excluded)");
 
         m.def(
             "get_content_type", []() -> const char* {

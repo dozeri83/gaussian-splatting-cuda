@@ -11,6 +11,8 @@
 #include <SDL3/SDL_video.h>
 #include <cassert>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -67,6 +69,7 @@ namespace lfs::vis {
         bool mouse_released[3] = {};
         float mouse_wheel = 0;
         float mouse_wheel_x = 0;
+        float pinch_scale = 1.0f;
         std::vector<FrameMouseButtonEvent> mouse_button_events;
         std::vector<FrameInputEvent> input_events;
         // Aggregate key state for shortcuts; text consumers replay input_events only.
@@ -81,6 +84,11 @@ namespace lfs::vis {
         int window_h = 0;
         std::chrono::steady_clock::time_point poll_time{};
 
+        [[nodiscard]] bool hasUserInput() const {
+            return mouse_moved || window_event || mouse_wheel != 0.0f || mouse_wheel_x != 0.0f ||
+                   !mouse_button_events.empty() || !input_events.empty() || !keys_pressed.empty();
+        }
+
         void beginFrame() {
             ++serial;
             mouse_clicked[0] = mouse_clicked[1] = mouse_clicked[2] = false;
@@ -94,6 +102,7 @@ namespace lfs::vis {
             }
             mouse_wheel = 0;
             mouse_wheel_x = 0;
+            pinch_scale = 1.0f;
             mouse_button_events.clear();
             input_events.clear();
             keys_pressed.clear();
@@ -115,6 +124,10 @@ namespace lfs::vis {
                 user_event = true;
 
             switch (event.type) {
+            case SDL_EVENT_PINCH_UPDATE:
+                if (std::isfinite(event.pinch.scale) && event.pinch.scale > 0.0f)
+                    pinch_scale *= event.pinch.scale;
+                break;
             case SDL_EVENT_MOUSE_MOTION:
                 mouse_moved = true;
                 break;

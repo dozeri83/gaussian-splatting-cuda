@@ -194,6 +194,7 @@ nanobind_add_module(
     lfs/py_keymap.cpp
     lfs/py_tensor.cpp
     lfs/py_nn.cpp
+    lfs/py_nodes.cpp
     lfs/py_splat_data.cpp
     lfs/py_scene.cpp
     lfs/py_scripts.cpp
@@ -599,9 +600,14 @@ else()
         DESTINATION "${PYTHON_INSTALL_DIR}"
         FILES_MATCHING PATTERN "*.py"
     )
+    if(LFS_MACOS_PORTABLE_APP)
+        file(GLOB _lfs_python_helpers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
+        install(FILES ${_lfs_python_helpers} DESTINATION "${PYTHON_INSTALL_DIR}")
+    else()
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/_lfs_panel_contract.py"
         DESTINATION "${PYTHON_INSTALL_DIR}"
     )
+    endif()
 endif()
 
 # Stubs: use generated when available, otherwise committed from source tree
@@ -613,6 +619,13 @@ endif()
 
 if(BUILD_PORTABLE AND NOT LFS_MACOS_PORTABLE_APP)
     install(DIRECTORY "${STUBS_DIR}/" DESTINATION "${CMAKE_INSTALL_BINDIR}" OPTIONAL)
+elseif(LFS_MACOS_PORTABLE_APP)
+    # The app target does not necessarily build generated typings. Always ship
+    # the committed complete set, then overlay generated files if available.
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/stubs/" DESTINATION "${PYTHON_INSTALL_DIR}")
+    if(BUILD_PYTHON_STUBS)
+        install(DIRECTORY "${STUBS_DIR}/" DESTINATION "${PYTHON_INSTALL_DIR}" OPTIONAL)
+    endif()
 else()
     install(DIRECTORY "${STUBS_DIR}/" DESTINATION "${PYTHON_INSTALL_DIR}" OPTIONAL)
 endif()

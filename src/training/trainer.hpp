@@ -34,6 +34,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <istream>
 #include <list>
 #include <memory>
@@ -64,6 +65,7 @@ namespace lfs::vis {
     class VisualizerImplResetTest_SaveWhileTrainerWriterInFlightQueuesUntilCompletion_Test;
     class VisualizerImplResetTest_TemporaryPauseRequestIsObservedAtNextSafePoint_Test;
     class VisualizerImplResetTest_SaveAsWhilePausedTrainingRoutesThroughLiveTrainer_Test;
+    class VisualizerImplResetTest_AsyncPausedExplicitPreparationAdoptsItsSnapshot_Test;
     class VisualizerImplResetTest_SaveAsRoutesThroughFailedTerminalSnapshotAftermath_Test;
     class VisualizerImplResetTest_InfoSurvivesFailedTerminalSnapshotAftermath_Test;
     class VisualizerImplResetTest_AdoptCompletedTrainingSnapshotSkipsOpenWhenCountersEqual_Test;
@@ -112,8 +114,9 @@ namespace lfs::training {
             bool invert_masks = false;
             float mask_threshold = 0.0f;
             bool undistort_prepared = false;
-            lfs::core::Tensor gt_image;
-            lfs::core::Tensor mask;
+            int eval_space = 0;
+            std::array<float, 3> bg_color{};
+            EvaluationViewInputs inputs;
             std::uint64_t last_used = 0;
         };
 
@@ -302,12 +305,15 @@ namespace lfs::training {
         [[nodiscard]] bool endExportableDensifyBarrier();
 
         void setOnIterationStart(std::function<void()> cb) { on_iteration_start_ = std::move(cb); }
+        void setOnPaused(std::function<void(int)> cb) { on_paused_ = std::move(cb); }
 
         lfs::core::Scene* getScene() const { return scene_; }
         std::shared_ptr<lfs::io::PipelinedImageLoader> getActiveImageLoader() const;
+        // Builds the GPU image decoders in the background so the first training batch skips their setup.
+        void prewarm_image_decoders();
         GTLoadConfigSnapshot getGTLoadConfigSnapshot() const;
         std::expected<CameraMetricsSnapshot, std::string> computeCameraMetrics(
-            const lfs::core::Camera& camera,
+            lfs::core::Camera& camera,
             bool include_ssim,
             CameraMetricsAppearanceConfig appearance);
 
@@ -408,6 +414,7 @@ namespace lfs::training {
         friend class lfs::vis::VisualizerImplResetTest_SaveWhileTrainerWriterInFlightQueuesUntilCompletion_Test;
         friend class lfs::vis::VisualizerImplResetTest_TemporaryPauseRequestIsObservedAtNextSafePoint_Test;
         friend class lfs::vis::VisualizerImplResetTest_SaveAsWhilePausedTrainingRoutesThroughLiveTrainer_Test;
+        friend class lfs::vis::VisualizerImplResetTest_AsyncPausedExplicitPreparationAdoptsItsSnapshot_Test;
         friend class lfs::vis::VisualizerImplResetTest_SaveAsRoutesThroughFailedTerminalSnapshotAftermath_Test;
         friend class lfs::vis::VisualizerImplResetTest_InfoSurvivesFailedTerminalSnapshotAftermath_Test;
         friend class lfs::vis::VisualizerImplResetTest_AdoptCompletedTrainingSnapshotSkipsOpenWhenCountersEqual_Test;
@@ -680,6 +687,8 @@ namespace lfs::training {
         std::shared_ptr<CameraDataset> train_dataset_;
         std::shared_ptr<CameraDataset> val_dataset_;
         std::shared_ptr<lfs::io::PipelinedImageLoader> active_image_loader_;
+        // Released once train() has built its loader, which then holds the decoders.
+        std::future<std::unique_ptr<lfs::io::ImageDecoderWarmup>> image_decoder_warmup_;
         std::unique_ptr<IStrategy> strategy_;
         // Hot-loop reads use params_ without locking. Active updates therefore
         // coalesce here and are installed only by the worker at safe boundaries.
@@ -880,6 +889,7 @@ namespace lfs::training {
         uint64_t edge_weight_cache_clock_ = 0;
         uint64_t edge_weight_preprocessing_generation_ = 0;
         bool edge_weight_scoring_active_ = false;
+        bool composite_target_alpha_ = false;
 
         // Metrics evaluator - handles all evaluation logic
         std::unique_ptr<lfs::training::MetricsEvaluator> evaluator_;
@@ -992,6 +1002,7 @@ namespace lfs::training {
         std::vector<std::filesystem::path> python_scripts_;
 
         std::function<void()> on_iteration_start_;
+        std::function<void(int)> on_paused_;
         std::function<bool()> exportable_densify_barrier_begin_;
         std::function<bool()> exportable_densify_barrier_end_;
         int exportable_densify_barrier_depth_ = 0;

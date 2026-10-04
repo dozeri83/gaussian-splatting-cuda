@@ -6,6 +6,7 @@
 
 #include "core/export.hpp"
 #include "render_pass.hpp"
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -23,6 +24,7 @@ namespace lfs::vis {
         ViewportArtifactService& operator=(const ViewportArtifactService&) = delete;
 
         [[nodiscard]] bool hasGpuFrame() const;
+        [[nodiscard]] std::optional<lfs::rendering::ViewerBackend> viewerBackend() const { return metadata_.viewer_backend; }
 
         [[nodiscard]] const std::optional<lfs::rendering::GpuFrame>& gpuFrame() const { return gpu_frame_; }
         [[nodiscard]] glm::ivec2 renderedSize() const { return rendered_size_; }
@@ -61,6 +63,7 @@ namespace lfs::vis {
 
     private:
         void invalidateCapture();
+        void setMetadata(const CachedRenderMetadata& metadata);
         CachedRenderMetadata metadata_;
         std::optional<lfs::rendering::GpuFrame> gpu_frame_;
         glm::ivec2 rendered_size_{0};

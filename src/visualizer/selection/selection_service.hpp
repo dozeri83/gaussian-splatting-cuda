@@ -58,6 +58,23 @@ namespace lfs::vis {
         std::string error;
     };
 
+    struct ViewportGaussianPick {
+        core::Uuid node;
+        std::size_t effective_index = 0;
+        std::optional<std::size_t> stored_index;
+        glm::vec3 world_position{0.0f};
+        glm::vec3 colour{0.0f};
+        bool colour_from_stored_payload = false;
+    };
+
+    // Painting only needs the position; skipping the colour saves a GPU readback per pick.
+    enum class PickReads : std::uint8_t { Position,
+                                          PositionAndColour };
+
+    struct ViewportPickError {
+        std::string message;
+    };
+
     struct SelectionFilterState {
         bool crop_filter = false;
         bool depth_filter = false;
@@ -148,6 +165,12 @@ namespace lfs::vis {
         [[nodiscard]] SelectionResult selectByColorAt(float x, float y, SelectionMode mode,
                                                       SelectionFilterState filters = {},
                                                       int camera_index = -1);
+        [[nodiscard]] std::expected<ViewportGaussianPick, ViewportPickError>
+        pickAtScreen(float x, float y, int camera_index = -1,
+                     PickReads reads = PickReads::PositionAndColour);
+        [[nodiscard]] std::expected<float, ViewportPickError>
+        worldRadiusAtScreen(float x, float y, const glm::vec3& world_position,
+                            float screen_radius) const;
         [[nodiscard]] SelectionResult selectBoxVolume(SelectionMode mode,
                                                       SelectionCommitOptions options = {});
         [[nodiscard]] SelectionResult selectSphereVolume(SelectionMode mode,
