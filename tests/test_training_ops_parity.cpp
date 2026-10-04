@@ -421,6 +421,10 @@ namespace {
             table->evaluate(saved, corrected, path.raw ? raw : absent, target, path.mask ? mask : absent,
                             {.path = path.path, .ssim_weight = path.weight, .valid_padding = true},
                             loss, grad_corrected, grad_raw);
+            if (path.raw && table->add_raw_gradient != nullptr) {
+                grad_raw = Tensor::zeros(corrected.shape(), Device::GPU);
+                table->add_raw_gradient(saved, grad_raw);
+            }
             if (path.path != ops::PhotoPath::L1) {
                 keep(out.snapshot, backend, std::string("photometric.evaluate.") + path.name + ".ssim_map", saved.ssim_map, kReduce);
                 keep(out.snapshot, backend, std::string("photometric.evaluate.") + path.name + ".cs_map", saved.cs_map, kReduce);

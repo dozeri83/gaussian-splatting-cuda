@@ -6424,6 +6424,10 @@ namespace lfs::training {
                             auto ctrl_grad = ppisp_->backward_with_controller_params(ppisp_input, tile_grad, pred, ppisp_cam_idx);
                             ppisp_controller_pool_->backward(ppisp_cam_idx, ctrl_grad);
                         }
+                        if (training_ops_->photometric->add_raw_gradient != nullptr) {
+                            lfs::core::Tensor no_raster_grad;
+                            training_ops_->photometric->add_raw_gradient(photo_saved_, no_raster_grad);
+                        }
 
                         lfs::core::pop_gpu_range(); // controller_phase
                     } else {
@@ -6441,23 +6445,25 @@ namespace lfs::training {
 
                         lfs::core::Tensor corrected_image = output.image;
                         lfs::core::Tensor ppisp_input;
-                        lfs::core::Tensor grid_input;
                         if (exposure_correction) {
                             if (ppisp_on) {
                                 lfs::core::push_gpu_range("ppisp_forward");
                                 LFS_VRAM_SCOPE("train.ppisp.forward");
                                 LOG_VRAM_DIFF("train.ppisp.forward");
-                                ppisp_input = output.image;
                                 corrected_image = ppisp_->apply(
-                                    ppisp_input, cam->camera_id(), cam->uid());
+                                    output.image, cam->camera_id(), cam->uid());
                                 lfs::core::pop_gpu_range();
                             }
-                            grid_input = corrected_image;
                             if (grid_active_this_iter) {
                                 lfs::core::push_gpu_range("bilateral_grid_forward");
                                 LFS_VRAM_SCOPE("train.bilateral_grid.forward");
                                 LOG_VRAM_DIFF("train.bilateral_grid.forward");
-                                corrected_image = bilateral_grid_->apply(grid_input, cam->uid());
+                                // The grid backward recomputes the PPISP output instead of keeping it through the loss.
+                                if (ppisp_on) {
+                                    bilateral_grid_->apply_in_place(corrected_image, cam->uid());
+                                } else {
+                                    corrected_image = bilateral_grid_->apply(output.image, cam->uid());
+                                }
                                 lfs::core::pop_gpu_range();
                             }
                             corrected_image.clamp_(0.0f, 1.0f);
@@ -7149,16 +7155,17 @@ namespace lfs::training {
                                 lfs::core::push_gpu_range("bilateral_grid_backward");
                                 LFS_VRAM_SCOPE("train.bilateral_grid.backward");
                                 LOG_VRAM_DIFF("train.bilateral_grid.backward");
-                                raster_grad = bilateral_grid_->backward(grid_input, raster_grad, cam->uid());
-                                grid_input = {};
+                                const lfs::core::Tensor grid_input =
+                                    ppisp_on ? ppisp_->apply(output.image, cam->camera_id(), cam->uid())
+                                             : output.image;
+                                bilateral_grid_->backward_in_place(grid_input, raster_grad, cam->uid());
                                 lfs::core::pop_gpu_range();
                             }
                             if (ppisp_on) {
                                 lfs::core::push_gpu_range("ppisp_backward");
                                 LFS_VRAM_SCOPE("train.ppisp.backward");
                                 LOG_VRAM_DIFF("train.ppisp.backward");
-                                raster_grad = ppisp_->backward(
-                                    ppisp_input, raster_grad, cam->camera_id(), cam->uid());
+                                ppisp_->backward_in_place(output.image, raster_grad, cam->camera_id(), cam->uid());
                                 if (ppisp_frozen) {
                                     ppisp_->zero_grad();
                                 }
@@ -7169,8 +7176,7 @@ namespace lfs::training {
                                 lfs::core::push_gpu_range("ppisp_backward");
                                 LFS_VRAM_SCOPE("train.ppisp.backward");
                                 LOG_VRAM_DIFF("train.ppisp.backward");
-                                raster_grad = ppisp_->backward(
-                                    ppisp_input, raster_grad, cam->camera_id(), cam->uid());
+                                ppisp_->backward_in_place(ppisp_input, raster_grad, cam->camera_id(), cam->uid());
                                 ppisp_input = {};
                                 if (ppisp_frozen) {
                                     ppisp_->zero_grad();
@@ -7182,7 +7188,7 @@ namespace lfs::training {
                                 lfs::core::push_gpu_range("bilateral_grid_backward");
                                 LFS_VRAM_SCOPE("train.bilateral_grid.backward");
                                 LOG_VRAM_DIFF("train.bilateral_grid.backward");
-                                raster_grad = bilateral_grid_->backward(output.image, raster_grad, cam->uid());
+                                bilateral_grid_->backward_in_place(output.image, raster_grad, cam->uid());
                                 lfs::core::pop_gpu_range();
                             }
                         }
@@ -7193,6 +7199,9 @@ namespace lfs::training {
                             if (raster_grad.data_ptr() == tile_grad.data_ptr())
                                 raster_grad = raster_grad.clone();
                             raster_grad.add_(tile_grad_raw);
+                        }
+                        if (training_ops_->photometric->add_raw_gradient != nullptr) {
+                            training_ops_->photometric->add_raw_gradient(photo_saved_, raster_grad);
                         }
 
                         current_phase = StepPhase::Backward;
