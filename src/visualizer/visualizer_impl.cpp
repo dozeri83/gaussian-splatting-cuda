@@ -4145,6 +4145,8 @@ namespace lfs::vis {
 
     std::expected<void, std::string> VisualizerImpl::startTraining() {
 #if LFS_BUILD_TRAINER
+        if (isTrainingStartPending())
+            return {};
         if (!trainer_manager_)
             return std::unexpected("Trainer manager not initialized");
         const auto reject = [this](std::string message) {
@@ -4184,10 +4186,16 @@ namespace lfs::vis {
                         !policy.at_step_boundaries) {
                         if (auto prepared =
                                 project_lifecycle_
-                                    ->prepareTrainingStartProject();
+                                    ->prepareTrainingStartProjectAsync([this]() -> lfs::Result<void> {
+                                        if (trainer_manager_->isPaused()) {
+                                            return trainer_manager_->resumeTraining();
+                                        }
+                                        return {};
+                                    });
                             !prepared) {
                             return reject(std::string(prepared.error().user_message()));
                         }
+                        return {};
                     }
                 }
             }
@@ -4225,10 +4233,19 @@ namespace lfs::vis {
         if (project_lifecycle_) {
             if (auto prepared =
                     project_lifecycle_
-                        ->prepareTrainingStartProject();
+                        ->prepareTrainingStartProjectAsync([this]() -> lfs::Result<void> {
+                            if (!trainer_manager_->startTraining()) {
+                                return visualizerFailure<void>(
+                                    lfs::ErrorCode::FailedPrecondition,
+                                    "The training manager rejected the start request.",
+                                    "Training start rejected after project preparation", "training.start");
+                            }
+                            return {};
+                        });
                 !prepared) {
                 return reject(std::string(prepared.error().user_message()));
             }
+            return {};
         }
         if (!trainer_manager_->startTraining()) {
             if (const auto typed = trainer_manager_->lastTrainingError()) {
