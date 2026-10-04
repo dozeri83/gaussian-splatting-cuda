@@ -118,6 +118,7 @@ namespace lfs::vis::gui {
             bool locked = false;
             bool draggable = false;
             bool has_mask = false;
+            bool streamed = false;
             bool can_delete = false;
             bool delete_enabled = false;
             bool can_rename = false;
@@ -145,6 +146,7 @@ namespace lfs::vis::gui {
             std::string encoded_label;
             std::string padding_left_dp;
             bool has_mask = false;
+            bool streamed = false;
             bool can_delete = false;
             bool delete_enabled = false;
             bool can_rename = false;
@@ -167,6 +169,7 @@ namespace lfs::vis::gui {
             Rml::Element* leaf_spacer = nullptr;
             Rml::Element* rename_input = nullptr;
             Rml::Element* node_name = nullptr;
+            Rml::Element* streamed_badge = nullptr;
             core::NodeId bound_id = core::NULL_NODE;
             bool visible = false;
         };

@@ -705,6 +705,8 @@
   },
   "rendering": "Rendu",
   "scene": {
+    "streamed_badge": "diffusé",
+    "streamed_badge_tooltip": "Modèle diffusé : le niveau de détail suit la vue. Lecture seule.",
     "add_ply": "Ajouter PLY...",
     "add_group": "Ajouter un Groupe",
     "add_group_ellipsis": "Ajouter un Groupe...",
@@ -1112,6 +1114,8 @@
     "align": "Aligner"
   },
   "toolbar": {
+    "streamed_select_blocked": "Le modèle diffusé est en lecture seule.",
+    "streamed_crop_apply_blocked": "Le modèle diffusé est en lecture seule.",
     "asset_manager": "Projets",
     "selection": "Sélection",
     "translate": "Translater",

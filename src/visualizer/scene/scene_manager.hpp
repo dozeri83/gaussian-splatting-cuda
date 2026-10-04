@@ -144,6 +144,9 @@ namespace lfs::vis {
         [[nodiscard]] std::optional<SplatTileStreamStats> tileStreamStats() const;
         // "stream" when a tileset streams, "flat" when one loaded fully, or nullopt.
         [[nodiscard]] std::optional<std::string> tileMode() const;
+        // Splat-level selection and edits work on scene-wide indices, which a visible
+        // streamed model shifts on every swap; returns why they are blocked.
+        [[nodiscard]] std::optional<std::string> streamedSplatEditBlock() const;
         // Records a node whose tileset was small enough to load flat (no streaming).
         void recordFlatTileNode(const core::Uuid& uuid) { flat_tile_nodes_.insert(uuid); }
         void setImportLicenseCallback(std::function<void(const std::optional<std::vector<uint8_t>>&)> callback) {

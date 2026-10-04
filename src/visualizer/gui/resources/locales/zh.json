@@ -705,6 +705,8 @@
   },
   "rendering": "渲染",
   "scene": {
+    "streamed_badge": "流式",
+    "streamed_badge_tooltip": "流式模型：细节随视图变化。只读。",
     "add_ply": "添加PLY...",
     "add_group": "添加组",
     "add_group_ellipsis": "添加组...",
@@ -1112,6 +1114,8 @@
     "align": "对齐"
   },
   "toolbar": {
+    "streamed_select_blocked": "流式模型为只读。",
+    "streamed_crop_apply_blocked": "流式模型为只读。",
     "asset_manager": "项目",
     "selection": "选择",
     "translate": "移动",

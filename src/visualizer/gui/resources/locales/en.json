@@ -701,6 +701,8 @@
   },
   "rendering": "Rendering",
   "scene": {
+    "streamed_badge": "streamed",
+    "streamed_badge_tooltip": "Streamed model: detail follows the view. Read-only.",
     "add_ply": "Add PLY...",
     "add_group": "Add Group",
     "add_group_ellipsis": "Add Group...",
@@ -1110,6 +1112,8 @@
     "align": "Align"
   },
   "toolbar": {
+    "streamed_select_blocked": "Streamed model is read-only.",
+    "streamed_crop_apply_blocked": "Streamed model is read-only.",
     "asset_manager": "Projects",
     "selection": "Selection",
     "translate": "Translate",

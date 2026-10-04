@@ -705,6 +705,8 @@
   },
   "rendering": "Renderen",
   "scene": {
+    "streamed_badge": "gestreamd",
+    "streamed_badge_tooltip": "Gestreamd model: het detailniveau volgt de weergave. Alleen-lezen.",
     "add_ply": "PLY Toevoegen...",
     "add_group": "Groep Toevoegen",
     "add_group_ellipsis": "Groep Toevoegen...",
@@ -1112,6 +1114,8 @@
     "align": "Uitlijnen"
   },
   "toolbar": {
+    "streamed_select_blocked": "Gestreamd model is alleen-lezen.",
+    "streamed_crop_apply_blocked": "Gestreamd model is alleen-lezen.",
     "asset_manager": "Projecten",
     "selection": "Selectie",
     "translate": "Verplaatsen",

@@ -705,6 +705,8 @@
   },
   "rendering": "レンダリング",
   "scene": {
+    "streamed_badge": "ストリーミング",
+    "streamed_badge_tooltip": "ストリーミング中のモデル：詳細度はビューに追従します。読み取り専用です。",
     "add_ply": "PLYを追加...",
     "add_group": "グループを追加",
     "add_group_ellipsis": "グループを追加...",
@@ -1112,6 +1114,8 @@
     "align": "整列"
   },
   "toolbar": {
+    "streamed_select_blocked": "ストリーミング中のモデルは読み取り専用です。",
+    "streamed_crop_apply_blocked": "ストリーミング中のモデルは読み取り専用です。",
     "asset_manager": "プロジェクト",
     "selection": "選択",
     "translate": "移動",

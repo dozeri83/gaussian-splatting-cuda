@@ -705,6 +705,8 @@
   },
   "rendering": "Renderowanie",
   "scene": {
+    "streamed_badge": "strumieniowany",
+    "streamed_badge_tooltip": "Model strumieniowany: szczegółowość zależy od widoku. Tylko do odczytu.",
     "add_ply": "Dodaj PLY...",
     "add_group": "Dodaj Grupę",
     "add_group_ellipsis": "Dodaj Grupę...",
@@ -1112,6 +1114,8 @@
     "align": "Wyrównaj"
   },
   "toolbar": {
+    "streamed_select_blocked": "Model strumieniowany jest tylko do odczytu.",
+    "streamed_crop_apply_blocked": "Model strumieniowany jest tylko do odczytu.",
     "asset_manager": "Projekty",
     "selection": "Zaznaczenie",
     "translate": "Przesunięcie",

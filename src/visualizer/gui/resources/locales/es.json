@@ -705,6 +705,8 @@
   },
   "rendering": "Renderizado",
   "scene": {
+    "streamed_badge": "transmitido",
+    "streamed_badge_tooltip": "Modelo transmitido: el detalle sigue a la vista. Solo lectura.",
     "add_ply": "Añadir PLY...",
     "add_group": "Añadir Grupo",
     "add_group_ellipsis": "Añadir Grupo...",
@@ -1112,6 +1114,8 @@
     "align": "Alinear"
   },
   "toolbar": {
+    "streamed_select_blocked": "El modelo transmitido es de solo lectura.",
+    "streamed_crop_apply_blocked": "El modelo transmitido es de solo lectura.",
     "asset_manager": "Proyectos",
     "selection": "Selección",
     "translate": "Trasladar",

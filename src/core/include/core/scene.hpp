@@ -173,6 +173,9 @@ namespace lfs::core {
         // In-memory payload no longer matches the source file (edited, generated,
         // pasted, ...); drives the embed-vs-reference decision on project save.
         bool payload_diverged = false;
+        // Model is a view-dependent proxy the app replaces at any time (streamed
+        // splats): it cannot be trained or edited in place. Runtime only.
+        bool model_streamed = false;
         PayloadHydrationState payload_hydration =
             PayloadHydrationState::NotApplicable;
         std::optional<GeoreferencePose> georef_pose;

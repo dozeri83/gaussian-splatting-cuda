@@ -705,6 +705,8 @@
   },
   "rendering": "Rendering",
   "scene": {
+    "streamed_badge": "in streaming",
+    "streamed_badge_tooltip": "Modello in streaming: il dettaglio segue la vista. Sola lettura.",
     "add_ply": "Aggiungi PLY...",
     "add_group": "Aggiungi Gruppo",
     "add_group_ellipsis": "Aggiungi Gruppo...",
@@ -1112,6 +1114,8 @@
     "align": "Allinea"
   },
   "toolbar": {
+    "streamed_select_blocked": "Il modello in streaming è di sola lettura.",
+    "streamed_crop_apply_blocked": "Il modello in streaming è di sola lettura.",
     "asset_manager": "Progetti",
     "selection": "Selezione",
     "translate": "Trasla",

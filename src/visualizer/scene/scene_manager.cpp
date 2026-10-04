@@ -501,9 +501,11 @@ namespace lfs::vis {
         }
         const auto& settings = tile_stream_settings_;
         for (auto it = tile_streamers_.begin(); it != tile_streamers_.end();) {
-            const auto* const node = scene_.getNodeByUuid(it->first);
+            auto* const node = scene_.getNodeByUuid(it->first);
             if (!node || !node->model || node->model.get() != tile_stream_models_[it->first]) {
                 // Removed, or its model was replaced (project reopen, undo): stop streaming into it.
+                if (node)
+                    node->model_streamed = false;
                 tile_stream_paths_.erase(it->first);
                 tile_stream_models_.erase(it->first);
                 it = tile_streamers_.erase(it);
@@ -528,6 +530,9 @@ namespace lfs::vis {
                 tile_stream_models_[it->first] = model.get();
                 auto previous = scene_.swapNodeModel(node->name, std::move(model));
                 previous.reset();
+                // Selection indices span every node's splats; the swap shifts them.
+                if (scene_.hasSelection())
+                    scene_.clearSelection();
             }
             ++it;
         }
@@ -537,8 +542,10 @@ namespace lfs::vis {
                                         std::filesystem::path path) {
         tile_streamers_[node] = std::make_unique<SplatTileStreamer>(std::move(source), makeViewerSplatTensorAllocator());
         tile_stream_paths_[node] = std::move(path);
-        const auto* const scene_node = scene_.getNodeByUuid(node);
+        auto* const scene_node = scene_.getNodeByUuid(node);
         tile_stream_models_[node] = scene_node ? scene_node->model.get() : nullptr;
+        if (scene_node)
+            scene_node->model_streamed = true;
         open_tile_stream_panel_ = true;
     }
 
@@ -3915,7 +3922,9 @@ namespace lfs::vis {
                     return;
             }
 
-            if (selected->type == core::NodeType::SPLAT) {
+            if (selected->type == core::NodeType::SPLAT && selected->model_streamed) {
+                LOG_WARN("'{}' is a streamed model and cannot be edited.", selected->name);
+            } else if (selected->type == core::NodeType::SPLAT) {
                 splat_node_names.push_back(selected->name);
             } else if (selected->type == core::NodeType::POINTCLOUD) {
                 pointcloud_node_names.push_back(selected->name);
@@ -3938,7 +3947,7 @@ namespace lfs::vis {
         // Fall back to visible nodes if no selection
         if (splat_node_names.empty() && pointcloud_node_names.empty() && !had_selection) {
             for (const auto* node : scene_.getVisibleNodes()) {
-                if (node->type == core::NodeType::SPLAT) {
+                if (node->type == core::NodeType::SPLAT && !node->model_streamed) {
                     splat_node_names.push_back(node->name);
                 } else if (node->type == core::NodeType::POINTCLOUD) {
                     pointcloud_node_names.push_back(node->name);
@@ -4106,7 +4115,9 @@ namespace lfs::vis {
                     return;
             }
 
-            if (selected->type == core::NodeType::SPLAT) {
+            if (selected->type == core::NodeType::SPLAT && selected->model_streamed) {
+                LOG_WARN("'{}' is a streamed model and cannot be edited.", selected->name);
+            } else if (selected->type == core::NodeType::SPLAT) {
                 splat_node_names.push_back(selected->name);
             } else if (selected->type == core::NodeType::POINTCLOUD) {
                 pointcloud_node_names.push_back(selected->name);
@@ -4128,7 +4139,7 @@ namespace lfs::vis {
         }
         if (splat_node_names.empty() && pointcloud_node_names.empty() && !had_selection) {
             for (const auto* node : scene_.getVisibleNodes()) {
-                if (node->type == core::NodeType::SPLAT) {
+                if (node->type == core::NodeType::SPLAT && !node->model_streamed) {
                     splat_node_names.push_back(node->name);
                 } else if (node->type == core::NodeType::POINTCLOUD) {
                     pointcloud_node_names.push_back(node->name);
@@ -5581,6 +5592,10 @@ namespace lfs::vis {
             LOG_WARN("{}", LOC("nodes.edit_stored_splats_blocked"));
             return false;
         }
+        if (const auto streamed = streamedSplatEditBlock()) {
+            LOG_WARN("{}", *streamed);
+            return false;
+        }
         std::vector<core::SceneNode*> nodes;
         {
             std::shared_lock slock(selection_.mutex());
@@ -5854,6 +5869,13 @@ namespace lfs::vis {
         });
     }
 
+    std::optional<std::string> SceneManager::streamedSplatEditBlock() const {
+        for (const auto* node : scene_.getNodes())
+            if (node && node->model_streamed && scene_.isNodeEffectivelyVisible(node->id))
+                return std::format("'{}' is a streamed model and cannot be edited.", node->name);
+        return std::nullopt;
+    }
+
     void SceneManager::initSelectionService() {
         if (selection_service_)
             return;
@@ -5867,6 +5889,8 @@ namespace lfs::vis {
     std::expected<SceneManager::GaussianDeletionPlan, std::string> SceneManager::buildSelectedGaussianDeletionPlan() {
         if (hasEvaluatedSplatEditConflict())
             return std::unexpected(LOC("nodes.edit_stored_splats_blocked"));
+        if (auto streamed = streamedSplatEditBlock())
+            return std::unexpected(std::move(*streamed));
         const bool crop_volume_node_selected = [&] {
             std::shared_lock slock(selection_.mutex());
             for (const auto node_id : selection_.selectedNodeIds()) {

@@ -705,6 +705,8 @@
   },
   "rendering": "Rendering",
   "scene": {
+    "streamed_badge": "gestreamt",
+    "streamed_badge_tooltip": "Gestreamtes Modell: Die Detailstufe folgt der Ansicht. Schreibgeschützt.",
     "add_ply": "PLY hinzufügen...",
     "add_group": "Gruppe hinzufügen",
     "add_group_ellipsis": "Gruppe hinzufügen...",
@@ -1112,6 +1114,8 @@
     "align": "Ausrichten"
   },
   "toolbar": {
+    "streamed_select_blocked": "Gestreamtes Modell ist schreibgeschützt.",
+    "streamed_crop_apply_blocked": "Gestreamtes Modell ist schreibgeschützt.",
     "asset_manager": "Projekte",
     "selection": "Auswahl",
     "translate": "Verschieben",

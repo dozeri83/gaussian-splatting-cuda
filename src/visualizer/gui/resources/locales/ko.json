@@ -705,6 +705,8 @@
   },
   "rendering": "렌더링",
   "scene": {
+    "streamed_badge": "스트리밍",
+    "streamed_badge_tooltip": "스트리밍 모델: 디테일이 뷰를 따라갑니다. 읽기 전용입니다.",
     "add_ply": "PLY 추가...",
     "add_group": "그룹 추가",
     "add_group_ellipsis": "그룹 추가...",
@@ -1112,6 +1114,8 @@
     "align": "정렬"
   },
   "toolbar": {
+    "streamed_select_blocked": "스트리밍 모델은 읽기 전용입니다.",
+    "streamed_crop_apply_blocked": "스트리밍 모델은 읽기 전용입니다.",
     "asset_manager": "프로젝트",
     "selection": "선택",
     "translate": "이동",

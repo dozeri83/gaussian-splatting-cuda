@@ -220,6 +220,8 @@ namespace lfs::vis {
                         *source_, set, [&](const std::uint32_t tile) { return pieces.at(tile).get(); }, allocator_);
                 } catch (const std::exception& e) {
                     LOG_ERROR("3D Tiles: cannot prepare streamed model: {}", e.what());
+                } catch (...) {
+                    LOG_ERROR("3D Tiles: cannot prepare streamed model: unknown error");
                 }
                 pieces.clear();
                 const auto build_ms =
@@ -283,7 +285,17 @@ namespace lfs::vis {
             in_flight_.insert(next);
             in_flight_bytes_ += next_bytes;
             lock.unlock();
-            auto loaded = io::load_splat_tile_gpu(*source_, next);
+            // GPU allocation, upload and the placement transform can throw; an exception
+            // leaving the worker would end the app, so it fails just this tile.
+            auto loaded = [&]() -> std::expected<core::SplatData, std::string> {
+                try {
+                    return io::load_splat_tile_gpu(*source_, next);
+                } catch (const std::exception& e) {
+                    return std::unexpected(std::string(e.what()));
+                } catch (...) {
+                    return std::unexpected(std::string("unknown error"));
+                }
+            }();
             lock.lock();
             in_flight_.erase(next);
             in_flight_bytes_ -= next_bytes;
