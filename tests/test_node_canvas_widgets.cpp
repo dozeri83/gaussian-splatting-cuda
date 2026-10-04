@@ -183,8 +183,9 @@ namespace {
         const auto selection = canvas->viewState()["selected_nodes"].get<std::unordered_set<std::string>>();
         ASSERT_EQ(selection.size(), 2u);
         EXPECT_EQ(std::ranges::count_if(tree->links, [&](const auto& link) {
-            return selection.contains(link.from_node) && selection.contains(link.to_node);
-        }), 1);
+                      return selection.contains(link.from_node) && selection.contains(link.to_node);
+                  }),
+                  1);
     }
 
     TEST_F(NodeCanvasWidgets, ControlJWrapsSelectionInOneUndoStep) {

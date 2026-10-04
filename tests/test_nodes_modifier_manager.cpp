@@ -8,8 +8,8 @@
 #include "visualizer/nodes/viewport_coordinates.hpp"
 #include "visualizer/operation/undo_history.hpp"
 
-#include <future>
 #include <cstring>
+#include <future>
 #include <glm/gtc/matrix_transform.hpp>
 #include <gtest/gtest.h>
 #include <thread>
@@ -707,11 +707,13 @@ TEST_F(NodesModifierManager, ClipboardPreservesInternalLinksDropsExternalAndRena
     EXPECT_NE(paste->nodes[1], "Correct");
     const std::unordered_set<std::string> pasted(paste->nodes.begin(), paste->nodes.end());
     EXPECT_EQ(std::ranges::count_if(tree.links, [&](const auto& link) {
-        return pasted.contains(link.from_node) && pasted.contains(link.to_node);
-    }), 1);
+                  return pasted.contains(link.from_node) && pasted.contains(link.to_node);
+              }),
+              1);
     EXPECT_EQ(std::ranges::count_if(tree.links, [&](const auto& link) {
-        return pasted.contains(link.from_node) != pasted.contains(link.to_node);
-    }), 0);
+                  return pasted.contains(link.from_node) != pasted.contains(link.to_node);
+              }),
+              0);
 }
 
 TEST_F(NodesModifierManager, ClipboardReusesIdenticalGroupTreeAndImportsConflictingUuid) {
@@ -775,8 +777,8 @@ TEST_F(NodesModifierManager, NonClipboardTextDoesNotMutateLibraryOrUndoHistory) 
 
 TEST_F(NodesModifierManager, MakeGroupAndUngroupPreservePositionDerivedFieldBitwise) {
     using namespace lfs::nodes;
-    using lfs::core::Tensor;
     using lfs::core::Device;
+    using lfs::core::Tensor;
     lfs::vis::SceneManager scene;
     auto& manager = scene.modifierManager();
     auto& tree = colour_tree(manager);
@@ -796,8 +798,7 @@ TEST_F(NodesModifierManager, MakeGroupAndUngroupPreservePositionDerivedFieldBitw
         ASSERT_TRUE(result.ok);
         const auto& a = *baseline.geometry.splats;
         const auto& b = *result.geometry.splats;
-        for (const auto pair : {std::pair{a.means, b.means}, {a.sh0, b.sh0}, {a.shN, b.shN},
-                                {a.scaling, b.scaling}, {a.rotation, b.rotation}, {a.opacity, b.opacity}}) {
+        for (const auto pair : {std::pair{a.means, b.means}, {a.sh0, b.sh0}, {a.shN, b.shN}, {a.scaling, b.scaling}, {a.rotation, b.rotation}, {a.opacity, b.opacity}}) {
             const auto expected = pair.first.to_vector();
             const auto actual = pair.second.to_vector();
             ASSERT_EQ(actual.size(), expected.size());

@@ -318,8 +318,8 @@ namespace lfs::vis::gui {
             const auto* input = dynamic_cast<Rml::ElementFormControlInput*>(target);
             const auto* select = dynamic_cast<Rml::ElementFormControlSelect*>(target);
             const auto* textarea = dynamic_cast<Rml::ElementFormControlTextArea*>(target);
-            const std::string text = input ? input->GetValue()
-                                     : select ? select->GetValue()
+            const std::string text = input      ? input->GetValue()
+                                     : select   ? select->GetValue()
                                      : textarea ? textarea->GetValue()
                                                 : "";
             char* parse_end = nullptr;

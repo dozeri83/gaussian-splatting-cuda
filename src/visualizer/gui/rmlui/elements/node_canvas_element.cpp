@@ -18,18 +18,18 @@
 #include "window/window_manager.hpp"
 
 #include <RmlUi/Core/Context.h>
+#include <RmlUi/Core/Core.h>
 #include <RmlUi/Core/ElementDocument.h>
 #include <RmlUi/Core/ElementInstancer.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
 #include <RmlUi/Core/Elements/ElementFormControlInput.h>
 #include <RmlUi/Core/Elements/ElementFormControlSelect.h>
 #include <RmlUi/Core/Elements/ElementFormControlTextArea.h>
-#include <RmlUi/Core/Input.h>
-#include <RmlUi/Core/Core.h>
 #include <RmlUi/Core/FontEngineInterface.h>
+#include <RmlUi/Core/Input.h>
 #include <RmlUi/Core/RenderManager.h>
-#include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_clipboard.h>
+#include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_stdinc.h>
 #include <algorithm>
 #include <cmath>
@@ -85,8 +85,8 @@ namespace lfs::vis::gui {
                          const bool bold = false) {
             auto* engine = Rml::GetFontEngineInterface();
             auto face = engine->GetFontFaceHandle("inter", Rml::Style::FontStyle::Normal,
-                                                       bold ? Rml::Style::FontWeight::Bold : Rml::Style::FontWeight::Normal,
-                                                       static_cast<int>(13.0f * dp_ratio));
+                                                  bold ? Rml::Style::FontWeight::Bold : Rml::Style::FontWeight::Normal,
+                                                  static_cast<int>(13.0f * dp_ratio));
             if (!face)
                 face = engine->GetFontFaceHandle("inter", Rml::Style::FontStyle::Normal,
                                                  Rml::Style::FontWeight::Normal, static_cast<int>(13.0f * dp_ratio));
@@ -992,57 +992,57 @@ namespace lfs::vis::gui {
                         title = "<div class=\"note-text\">" + escape(node->properties.value("text", std::string{})) + "</div>";
                     else {
                         title = "<div class=\"node-title\" title=\"" + escape(type ? type->description : "") + "\" style=\"background-color:" +
-                                        categoryColor(visual.category) + "\">" + node_widgets::categoryIcon(visual.category) +
-                                        "<span class=\"node-title-label\">" + escape(visual.title) +
-                                        "</span>";
-                    if (node->type_id == "lfs.paint_selection" &&
-                        selected_nodes_.contains(node->name))
-                        title += "<button class=\"node-title-tool" +
-                                 std::string(manager_->paintModeActive() ? " active" : "") +
-                                 "\" data-action=\"paint-toggle\" data-node=\"" + escape(node->name) +
-                                 "\" title=\"" + escape(LOC("node_editor.paint")) +
-                                 "\">" + node_widgets::icon("brush") + "</button>";
-                    if (node->type_id == "lfs.group")
-                        title += "<button class=\"node-title-tool\" data-action=\"group-enter\" data-node=\"" +
-                                 escape(node->name) + "\" title=\"Enter graph\">&#x2192;</button>";
-                    title += "</div><div class=\"socket-rows\">";
-                    for (const auto& output : outputs)
-                        title += "<div class=\"socket-row output\" title=\"" + escape(output.description) + "\"><span class=\"socket-label\">" +
-                                 escape(output.label) + "</span></div>";
-                    const auto settings = std::ranges::count_if(inputs, node_widgets::singleValue) +
-                                          (type ? std::ranges::count_if(type->properties, [&](const auto& property) {
-                                              return property.kind != lfs::nodes::PropertyKind::Data && node->type_id != "lfs.group";
-                                          })
-                                                : 0);
-                    if (settings > 0)
-                        title += "<button class=\"node-settings\" data-action=\"node-settings\" data-node=\"" +
-                                 escape(node->name) + "\"><span class=\"settings-arrow\" data-preserve-content></span> " +
-                                 escape(std::vformat(LOC(settings == 1 ? "node_editor.settings_count_one"
-                                                                       : "node_editor.settings_count_other"),
-                                                     std::make_format_args(settings))) +
-                                 "</button>";
-                    if (type && node->type_id != "lfs.group")
-                        for (const auto& property : type->properties)
-                            if (property.kind != lfs::nodes::PropertyKind::Data)
-                                title += "<div class=\"socket-row node-property\" title=\"" +
-                                         escape(property.description) + "\">" +
-                                         node_widgets::property(*node, property) + "</div>";
-                    for (const auto& input : inputs) {
-                        const bool has_widget = !input.hide_value &&
-                                                input.type != lfs::nodes::GEOMETRY_SOCKET;
-                        title += "<div class=\"socket-input\" title=\"" + escape(input.description) + "\"><span class=\"socket-label" +
-                                 std::string(has_widget ? " value-fallback" : "") + "\">" +
-                                 escape(input.label) +
-                                 (input.identifier == "Selection"
-                                      ? "<span class=\"socket-optional\" title=\"" + escape(LOC("node_editor.optional_selection")) + "\"> ?</span>"
-                                      : "") +
-                                 "</span>";
-                        if (has_widget)
-                            title += "<div class=\"inline-value\">" + node_widgets::input(*node, input, true) +
-                                     "</div>";
-                        title += "</div>";
-                    }
-                    title += "</div><div class=\"node-footer\" data-preserve-content>—</div><div class=\"node-progress\"></div>";
+                                categoryColor(visual.category) + "\">" + node_widgets::categoryIcon(visual.category) +
+                                "<span class=\"node-title-label\">" + escape(visual.title) +
+                                "</span>";
+                        if (node->type_id == "lfs.paint_selection" &&
+                            selected_nodes_.contains(node->name))
+                            title += "<button class=\"node-title-tool" +
+                                     std::string(manager_->paintModeActive() ? " active" : "") +
+                                     "\" data-action=\"paint-toggle\" data-node=\"" + escape(node->name) +
+                                     "\" title=\"" + escape(LOC("node_editor.paint")) +
+                                     "\">" + node_widgets::icon("brush") + "</button>";
+                        if (node->type_id == "lfs.group")
+                            title += "<button class=\"node-title-tool\" data-action=\"group-enter\" data-node=\"" +
+                                     escape(node->name) + "\" title=\"Enter graph\">&#x2192;</button>";
+                        title += "</div><div class=\"socket-rows\">";
+                        for (const auto& output : outputs)
+                            title += "<div class=\"socket-row output\" title=\"" + escape(output.description) + "\"><span class=\"socket-label\">" +
+                                     escape(output.label) + "</span></div>";
+                        const auto settings = std::ranges::count_if(inputs, node_widgets::singleValue) +
+                                              (type ? std::ranges::count_if(type->properties, [&](const auto& property) {
+                                                  return property.kind != lfs::nodes::PropertyKind::Data && node->type_id != "lfs.group";
+                                              })
+                                                    : 0);
+                        if (settings > 0)
+                            title += "<button class=\"node-settings\" data-action=\"node-settings\" data-node=\"" +
+                                     escape(node->name) + "\"><span class=\"settings-arrow\" data-preserve-content></span> " +
+                                     escape(std::vformat(LOC(settings == 1 ? "node_editor.settings_count_one"
+                                                                           : "node_editor.settings_count_other"),
+                                                         std::make_format_args(settings))) +
+                                     "</button>";
+                        if (type && node->type_id != "lfs.group")
+                            for (const auto& property : type->properties)
+                                if (property.kind != lfs::nodes::PropertyKind::Data)
+                                    title += "<div class=\"socket-row node-property\" title=\"" +
+                                             escape(property.description) + "\">" +
+                                             node_widgets::property(*node, property) + "</div>";
+                        for (const auto& input : inputs) {
+                            const bool has_widget = !input.hide_value &&
+                                                    input.type != lfs::nodes::GEOMETRY_SOCKET;
+                            title += "<div class=\"socket-input\" title=\"" + escape(input.description) + "\"><span class=\"socket-label" +
+                                     std::string(has_widget ? " value-fallback" : "") + "\">" +
+                                     escape(input.label) +
+                                     (input.identifier == "Selection"
+                                          ? "<span class=\"socket-optional\" title=\"" + escape(LOC("node_editor.optional_selection")) + "\"> ?</span>"
+                                          : "") +
+                                     "</span>";
+                            if (has_widget)
+                                title += "<div class=\"inline-value\">" + node_widgets::input(*node, input, true) +
+                                         "</div>";
+                            title += "</div>";
+                        }
+                        title += "</div><div class=\"node-footer\" data-preserve-content>—</div><div class=\"node-progress\"></div>";
                     }
                     if (node_markup_[visual.interaction.id] != title) {
                         node_widgets::patchMarkup(*element, title);
@@ -1399,7 +1399,8 @@ namespace lfs::vis::gui {
             const float bottom = origin.y + node.bounds.height * interaction_.zoom();
             const float radius = 8.0f * dp_ratio_ * interaction_.zoom();
             const auto preset = model->properties.value("colour", std::string{"neutral"});
-            const auto tint = preset == "green" ? palette.success : preset == "orange" ? palette.warning : palette.info;
+            const auto tint = preset == "green" ? palette.success : preset == "orange" ? palette.warning
+                                                                                       : palette.info;
             const auto fill = color(themeColor(tint), 0.10f);
             quad(frames, origin.x + radius, origin.y, right - radius, bottom, fill);
             quad(frames, origin.x, origin.y + radius, origin.x + radius, bottom - radius, fill);
@@ -1487,7 +1488,9 @@ namespace lfs::vis::gui {
                     const bool snapped = interaction_.snappedSocket() && *interaction_.snappedSocket() == socket;
                     const bool compatible = !interaction_.draggingWire() || interaction_.canSnapTo(socket);
                     const auto position = (socket.position - CanvasPoint{node.bounds.x, node.bounds.y}) * interaction_.zoom();
-                    const float radius = (snapped ? 6.0f : reroute ? 4.0f : 4.5f) * dp_ratio_ * interaction_.zoom();
+                    const float radius = (snapped ? 6.0f : reroute ? 4.0f
+                                                                   : 4.5f) *
+                                         dp_ratio_ * interaction_.zoom();
                     const auto shape = [&](const float r, const Rml::ColourbPremultiplied fill) {
                         const float span = socket.multi_input ? 3.0f * dp_ratio_ * interaction_.zoom() : 0.0f;
                         circle(sockets, {position.x, position.y - span}, r, fill);
@@ -1901,11 +1904,11 @@ namespace lfs::vis::gui {
             for (const auto& node : tree->nodes)
                 if (node.type_id != "lfs.note" && node.type_id != "lfs.frame")
                     subset.insert(node.name);
-        else
-            std::erase_if(subset, [&](const std::string& name) {
-                const auto* node = tree->find_node(name);
-                return node && (node->type_id == "lfs.note" || node->type_id == "lfs.frame");
-            });
+                else
+                    std::erase_if(subset, [&](const std::string& name) {
+                        const auto* node = tree->find_node(name);
+                        return node && (node->type_id == "lfs.note" || node->type_id == "lfs.frame");
+                    });
         if (subset.empty())
             return true;
         const auto before = tree->to_json();
@@ -2152,7 +2155,7 @@ namespace lfs::vis::gui {
                     const auto& sockets = output ? interface_tree->interface.outputs
                                                  : interface_tree->interface.inputs;
                     const auto socket = std::ranges::find(sockets, identifier,
-                                                           &lfs::nodes::InterfaceSocket::identifier);
+                                                          &lfs::nodes::InterfaceSocket::identifier);
                     if (socket != sockets.end()) {
                         nlohmann::json changes = nlohmann::json::object();
                         const auto text = input->GetValue();
@@ -2198,7 +2201,7 @@ namespace lfs::vis::gui {
                         }
                         if (valid) {
                             const auto result = manager_->interfaceUpdate(interface_tree->uuid, output,
-                                                                           identifier, changes);
+                                                                          identifier, changes);
                             if (!result)
                                 file_error_ = result.error().message;
                         } else {
@@ -2408,7 +2411,7 @@ namespace lfs::vis::gui {
                             if (found != sockets.end()) {
                                 const auto current = static_cast<std::size_t>(std::distance(sockets.begin(), found));
                                 const auto next = action == "interface-up" ? current - std::min<std::size_t>(1, current)
-                                                                             : std::min(current + 1, sockets.size() - 1);
+                                                                           : std::min(current + 1, sockets.size() - 1);
                                 const auto result = manager_->interfaceMove(interface_tree->uuid, output, identifier, next);
                                 if (!result)
                                     file_error_ = result.error().message;

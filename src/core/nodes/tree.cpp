@@ -330,12 +330,12 @@ namespace lfs::nodes {
             return false;
         }
         if (!input->multi_input) {
-                links.erase(std::remove_if(links.begin(), links.end(),
-                                           [&](const Link& old) {
-                                               return old.to_node == link.to_node &&
-                                                      old.to_socket == link.to_socket;
-                                           }),
-                            links.end());
+            links.erase(std::remove_if(links.begin(), links.end(),
+                                       [&](const Link& old) {
+                                           return old.to_node == link.to_node &&
+                                                  old.to_socket == link.to_socket;
+                                       }),
+                        links.end());
         }
         links.push_back(std::move(link));
         const auto issues = validate(resolver);

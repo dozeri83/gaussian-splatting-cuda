@@ -405,8 +405,7 @@ namespace lfs::python {
                                      {"tree_type", destination.tree_type},
                                      {"nodes", clipboard["nodes"]},
                                      {"links", nlohmann::json::array()},
-                                     {"interface", {{"inputs", nlohmann::json::array()},
-                                                    {"outputs", nlohmann::json::array()}}}};
+                                     {"interface", {{"inputs", nlohmann::json::array()}, {"outputs", nlohmann::json::array()}}}};
             rewrite_group_references(temporary, graph_remap);
             auto decoded = NodeTree::from_json(temporary, standalone().registry);
             float centre_x = 0.0f;
@@ -648,11 +647,13 @@ namespace lfs::python {
                         if (incoming.contains(inner.from_socket)) {
                             const auto& source = incoming.at(inner.from_socket);
                             outer.add_link({source.from_node, source.from_socket, link.to_node,
-                                            link.to_socket}, nullptr, active_tree_resolver());
+                                            link.to_socket},
+                                           nullptr, active_tree_resolver());
                         }
                     } else {
                         outer.add_link({remap[inner.from_node], inner.from_socket, link.to_node,
-                                        link.to_socket}, nullptr, active_tree_resolver());
+                                        link.to_socket},
+                                       nullptr, active_tree_resolver());
                     }
                 }
             }
@@ -1054,38 +1055,35 @@ namespace lfs::python {
                 const auto found = node.properties.find("tree");
                 return found != node.properties.end() && found->is_string()
                            ? std::optional{PyTree{found->get<std::string>()}}
-                           : std::nullopt;
-            }, [](const PyNode& value, const PyTree& graph) {
-                invoke_on_viewer([value, graph] {
-                    if (auto* manager = live_manager()) {
-                        const auto result = manager->setGroupGraph(value.tree_uuid, value.name, graph.uuid);
-                        if (!result)
-                            throw std::invalid_argument(result.error().message);
-                        return;
-                    }
-                    auto& owner = *active_tree(value.tree_uuid);
-                    auto* referenced = active_tree(graph.uuid);
-                    std::string cycle;
-                    if (!referenced || group_reference_would_cycle(owner, graph.uuid,
-                                                                  active_tree_resolver(), &cycle))
-                        throw std::invalid_argument(referenced ? "Group cycle: " + cycle
-                                                               : "Missing graph");
-                    auto& node = require_node(value);
-                    node.properties["tree"] = graph.uuid;
-                    node.input_values.clear();
-                    for (const auto& socket : referenced->interface.inputs)
-                        node.input_values[socket.identifier] = socket.default_value;
-                    const auto inputs = effective_inputs(owner, node, active_tree_resolver());
-                    const auto outputs = effective_outputs(owner, node, active_tree_resolver());
-                    std::erase_if(owner.links, [&](const auto& link) {
-                        if (link.from_node == node.name)
-                            return std::ranges::find(outputs, link.from_socket, &SocketDecl::identifier) == outputs.end();
-                        if (link.to_node == node.name)
-                            return std::ranges::find(inputs, link.to_socket, &SocketDecl::identifier) == inputs.end();
-                        return false;
-                    });
-                });
-            })
+                           : std::nullopt; }, [](const PyNode& value, const PyTree& graph) { invoke_on_viewer([value, graph] {
+                                                                                                                                           if (auto* manager = live_manager()) {
+                                                                                                                                               const auto result = manager->setGroupGraph(value.tree_uuid, value.name, graph.uuid);
+                                                                                                                                               if (!result)
+                                                                                                                                                   throw std::invalid_argument(result.error().message);
+                                                                                                                                               return;
+                                                                                                                                           }
+                                                                                                                                           auto& owner = *active_tree(value.tree_uuid);
+                                                                                                                                           auto* referenced = active_tree(graph.uuid);
+                                                                                                                                           std::string cycle;
+                                                                                                                                           if (!referenced || group_reference_would_cycle(owner, graph.uuid,
+                                                                                                                                                                                          active_tree_resolver(), &cycle))
+                                                                                                                                               throw std::invalid_argument(referenced ? "Group cycle: " + cycle
+                                                                                                                                                                                      : "Missing graph");
+                                                                                                                                           auto& node = require_node(value);
+                                                                                                                                           node.properties["tree"] = graph.uuid;
+                                                                                                                                           node.input_values.clear();
+                                                                                                                                           for (const auto& socket : referenced->interface.inputs)
+                                                                                                                                               node.input_values[socket.identifier] = socket.default_value;
+                                                                                                                                           const auto inputs = effective_inputs(owner, node, active_tree_resolver());
+                                                                                                                                           const auto outputs = effective_outputs(owner, node, active_tree_resolver());
+                                                                                                                                           std::erase_if(owner.links, [&](const auto& link) {
+                                                                                                                                               if (link.from_node == node.name)
+                                                                                                                                                   return std::ranges::find(outputs, link.from_socket, &SocketDecl::identifier) == outputs.end();
+                                                                                                                                               if (link.to_node == node.name)
+                                                                                                                                                   return std::ranges::find(inputs, link.to_socket, &SocketDecl::identifier) == inputs.end();
+                                                                                                                                               return false;
+                                                                                                                                           });
+                                                                                                                                       }); })
             .def("set_input", [](const PyNode& node, const std::string& name, nb::object value) {
                 auto converted = python_to_value(value);
                 invoke_on_viewer([node, name, converted = std::move(converted)]() mutable {
@@ -1132,9 +1130,7 @@ namespace lfs::python {
                 return time == found->second.time_ms.end() ? 0.0 : time->second; });
 
         nb::class_<PyInterface>(module, "TreeInterface")
-            .def("add_input", [](const PyInterface& value, std::string type, std::string label,
-                                 nb::object initial, std::optional<double> min,
-                                 std::optional<double> max, std::optional<double> step) {
+            .def("add_input", [](const PyInterface& value, std::string type, std::string label, nb::object initial, std::optional<double> min, std::optional<double> max, std::optional<double> step) {
                 auto converted = python_to_value(initial);
                 return invoke_on_viewer([value, type = socket_type(std::move(type)), label = std::move(label), converted = std::move(converted), min, max, step]() mutable {
                     if (auto* manager = live_manager()) {
@@ -1151,11 +1147,8 @@ namespace lfs::python {
                             if (node.type_id == "lfs.group" && node.properties.value("tree", "") == tree.uuid)
                                 node.input_values[identifier] = tree.interface.inputs.back().default_value;
                     return identifier;
-                }, std::string{});
-            }, nb::arg("type"), nb::arg("label"), nb::arg("default") = nb::none(), nb::arg("min") = nb::none(), nb::arg("max") = nb::none(), nb::arg("step") = nb::none())
-            .def("add_output", [](const PyInterface& value, std::string type, std::string label,
-                                  nb::object initial, std::optional<double> min,
-                                  std::optional<double> max, std::optional<double> step) {
+                }, std::string{}); }, nb::arg("type"), nb::arg("label"), nb::arg("default") = nb::none(), nb::arg("min") = nb::none(), nb::arg("max") = nb::none(), nb::arg("step") = nb::none())
+            .def("add_output", [](const PyInterface& value, std::string type, std::string label, nb::object initial, std::optional<double> min, std::optional<double> max, std::optional<double> step) {
                 auto converted = python_to_value(initial);
                 return invoke_on_viewer([value, type = socket_type(std::move(type)), label = std::move(label), converted = std::move(converted), min, max, step]() mutable {
                     if (auto* manager = live_manager()) {
@@ -1168,58 +1161,52 @@ namespace lfs::python {
                     const auto identifier = interface_name(tree.interface, label);
                     tree.interface.outputs.push_back({identifier, label, std::move(type), std::move(converted), min, max, step});
                     return identifier;
-                }, std::string{});
-            }, nb::arg("type"), nb::arg("label"), nb::arg("default") = nb::none(), nb::arg("min") = nb::none(), nb::arg("max") = nb::none(), nb::arg("step") = nb::none())
-            .def("remove", [](const PyInterface& value, const std::string& side, const std::string& identifier) {
-                invoke_on_viewer([value, side, identifier] {
-                    if (auto* manager = live_manager()) {
-                        const auto result = manager->interfaceRemove(value.tree_uuid, side == "output", identifier);
-                        if (!result)
-                            throw std::invalid_argument(result.error().message);
-                        return;
-                    }
-                    auto& tree = *active_tree(value.tree_uuid);
-                    const bool output = side == "output";
-                    auto& sockets = output ? tree.interface.outputs : tree.interface.inputs;
-                    if (std::erase_if(sockets, [&](const auto& socket) { return socket.identifier == identifier; }) == 0)
-                        throw std::invalid_argument("Interface socket does not exist");
-                    const auto endpoint = output ? tree.output_node().name : tree.input_node().name;
-                    std::erase_if(tree.links, [&](const auto& link) {
-                        return output ? link.to_node == endpoint && link.to_socket == identifier
-                                      : link.from_node == endpoint && link.from_socket == identifier;
-                    });
-                    for (auto& [_, other] : standalone().trees) {
-                        for (auto& node : other->nodes)
-                            if (!output && node.type_id == "lfs.group" && node.properties.value("tree", "") == tree.uuid)
-                                node.input_values.erase(identifier);
-                        std::erase_if(other->links, [&](const auto& link) {
-                            const auto* from = other->find_node(link.from_node);
-                            const auto* to = other->find_node(link.to_node);
-                            return output ? from && from->type_id == "lfs.group" && from->properties.value("tree", "") == tree.uuid && link.from_socket == identifier
-                                          : to && to->type_id == "lfs.group" && to->properties.value("tree", "") == tree.uuid && link.to_socket == identifier;
-                        });
-                    }
-                });
-            })
-            .def("move", [](const PyInterface& value, const std::string& side,
-                            const std::string& identifier, std::size_t index) {
-                invoke_on_viewer([value, side, identifier, index] {
-                    if (auto* manager = live_manager()) {
-                        const auto result = manager->interfaceMove(value.tree_uuid, side == "output", identifier, index);
-                        if (!result)
-                            throw std::invalid_argument(result.error().message);
-                        return;
-                    }
-                    auto& tree = *active_tree(value.tree_uuid);
-                    auto& sockets = side == "output" ? tree.interface.outputs : tree.interface.inputs;
-                    const auto found = std::ranges::find(sockets, identifier, &InterfaceSocket::identifier);
-                    if (found == sockets.end())
-                        throw std::invalid_argument("Interface socket does not exist");
-                    auto socket = std::move(*found);
-                    sockets.erase(found);
-                    sockets.insert(sockets.begin() + std::min(index, sockets.size()), std::move(socket));
-                });
-            });
+                }, std::string{}); }, nb::arg("type"), nb::arg("label"), nb::arg("default") = nb::none(), nb::arg("min") = nb::none(), nb::arg("max") = nb::none(), nb::arg("step") = nb::none())
+            .def("remove", [](const PyInterface& value, const std::string& side, const std::string& identifier) { invoke_on_viewer([value, side, identifier] {
+                                                                                                                      if (auto* manager = live_manager()) {
+                                                                                                                          const auto result = manager->interfaceRemove(value.tree_uuid, side == "output", identifier);
+                                                                                                                          if (!result)
+                                                                                                                              throw std::invalid_argument(result.error().message);
+                                                                                                                          return;
+                                                                                                                      }
+                                                                                                                      auto& tree = *active_tree(value.tree_uuid);
+                                                                                                                      const bool output = side == "output";
+                                                                                                                      auto& sockets = output ? tree.interface.outputs : tree.interface.inputs;
+                                                                                                                      if (std::erase_if(sockets, [&](const auto& socket) { return socket.identifier == identifier; }) == 0)
+                                                                                                                          throw std::invalid_argument("Interface socket does not exist");
+                                                                                                                      const auto endpoint = output ? tree.output_node().name : tree.input_node().name;
+                                                                                                                      std::erase_if(tree.links, [&](const auto& link) {
+                                                                                                                          return output ? link.to_node == endpoint && link.to_socket == identifier
+                                                                                                                                        : link.from_node == endpoint && link.from_socket == identifier;
+                                                                                                                      });
+                                                                                                                      for (auto& [_, other] : standalone().trees) {
+                                                                                                                          for (auto& node : other->nodes)
+                                                                                                                              if (!output && node.type_id == "lfs.group" && node.properties.value("tree", "") == tree.uuid)
+                                                                                                                                  node.input_values.erase(identifier);
+                                                                                                                          std::erase_if(other->links, [&](const auto& link) {
+                                                                                                                              const auto* from = other->find_node(link.from_node);
+                                                                                                                              const auto* to = other->find_node(link.to_node);
+                                                                                                                              return output ? from && from->type_id == "lfs.group" && from->properties.value("tree", "") == tree.uuid && link.from_socket == identifier
+                                                                                                                                            : to && to->type_id == "lfs.group" && to->properties.value("tree", "") == tree.uuid && link.to_socket == identifier;
+                                                                                                                          });
+                                                                                                                      }
+                                                                                                                  }); })
+            .def("move", [](const PyInterface& value, const std::string& side, const std::string& identifier, std::size_t index) { invoke_on_viewer([value, side, identifier, index] {
+                                                                                                                                       if (auto* manager = live_manager()) {
+                                                                                                                                           const auto result = manager->interfaceMove(value.tree_uuid, side == "output", identifier, index);
+                                                                                                                                           if (!result)
+                                                                                                                                               throw std::invalid_argument(result.error().message);
+                                                                                                                                           return;
+                                                                                                                                       }
+                                                                                                                                       auto& tree = *active_tree(value.tree_uuid);
+                                                                                                                                       auto& sockets = side == "output" ? tree.interface.outputs : tree.interface.inputs;
+                                                                                                                                       const auto found = std::ranges::find(sockets, identifier, &InterfaceSocket::identifier);
+                                                                                                                                       if (found == sockets.end())
+                                                                                                                                           throw std::invalid_argument("Interface socket does not exist");
+                                                                                                                                       auto socket = std::move(*found);
+                                                                                                                                       sockets.erase(found);
+                                                                                                                                       sockets.insert(sockets.begin() + std::min(index, sockets.size()), std::move(socket));
+                                                                                                                                   }); });
 
         nb::class_<PyTree>(module, "NodeTree")
             .def_prop_ro("uuid", [](const PyTree& value) { return value.uuid; })
@@ -1289,10 +1276,8 @@ namespace lfs::python {
                         throw nb::value_error(result.error().message.c_str());
                     return *result;
                 }
-                return standalone_copy(value, names);
-            })
-            .def("paste", [](const PyTree& value, const std::string& text,
-                             std::optional<std::array<float, 2>> location) {
+                return standalone_copy(value, names); })
+            .def("paste", [](const PyTree& value, const std::string& text, std::optional<std::array<float, 2>> location) {
                 if (auto* manager = live_manager()) {
                     const auto result = manager->pasteNodes(value.uuid, text, location);
                     if (!result)
@@ -1302,10 +1287,8 @@ namespace lfs::python {
                         nodes.push_back({value.uuid, name});
                     return nodes;
                 }
-                return standalone_paste(value, text, location);
-            }, nb::arg("text"), nb::arg("location") = nb::none())
-            .def("make_group", [](const PyTree& value, const std::vector<PyNode>& nodes,
-                                  std::optional<std::string> name) {
+                return standalone_paste(value, text, location); }, nb::arg("text"), nb::arg("location") = nb::none())
+            .def("make_group", [](const PyTree& value, const std::vector<PyNode>& nodes, std::optional<std::string> name) {
                 auto* manager = live_manager();
                 if (!manager)
                     return standalone_make_group(value, nodes, name.value_or("Group"));
@@ -1315,8 +1298,7 @@ namespace lfs::python {
                 const auto result = manager->makeGroup(value.uuid, names, name.value_or("Group"));
                 if (!result)
                     throw nb::value_error(result.error().message.c_str());
-                return PyNode{value.uuid, result->group_node};
-            }, nb::arg("nodes"), nb::arg("name") = nb::none())
+                return PyNode{value.uuid, result->group_node}; }, nb::arg("nodes"), nb::arg("name") = nb::none())
             .def("ungroup", [](const PyTree& value, const PyNode& node) {
                 auto* manager = live_manager();
                 if (!manager) {
@@ -1325,8 +1307,7 @@ namespace lfs::python {
                 }
                 const auto result = manager->ungroup(value.uuid, node.name);
                 if (!result)
-                    throw nb::value_error(result.error().message.c_str());
-            })
+                    throw nb::value_error(result.error().message.c_str()); })
             .def("add_input", [](const PyTree& value, std::string identifier, std::string type, nb::object default_value, std::optional<double> min, std::optional<double> max) {
                 auto converted = python_to_value(default_value);
                 invoke_on_viewer([value, identifier = std::move(identifier),

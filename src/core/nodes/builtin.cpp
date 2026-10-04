@@ -18,8 +18,7 @@ namespace lfs::nodes {
         group.category = "Group";
         group.description = "Evaluates a reusable node graph.";
         group.help = "Choose a graph in the sidebar. Inputs and outputs follow that graph's interface.";
-        group.properties.push_back({"tree", "Graph", PropertyKind::String, "", {}, {}, {},
-                                    "Referenced graph UUID."});
+        group.properties.push_back({"tree", "Graph", PropertyKind::String, "", {}, {}, {}, "Referenced graph UUID."});
         builtin::register_type(registry, std::move(group));
 
         NodeTypeInfo frame;
@@ -41,10 +40,8 @@ namespace lfs::nodes {
         reroute.category = "Layout";
         reroute.description = "Redirects a link without changing its value.";
         reroute.help = "Connect any socket type; the reroute adopts its upstream type.";
-        reroute.inputs.push_back({.identifier = "Input", .label = "", .type = std::string(ANY_SOCKET),
-                                  .default_value = {}, .description = "Value to pass through."});
-        reroute.outputs.push_back({.identifier = "Output", .label = "", .type = std::string(ANY_SOCKET),
-                                   .default_value = {}, .description = "Unchanged input value."});
+        reroute.inputs.push_back({.identifier = "Input", .label = "", .type = std::string(ANY_SOCKET), .default_value = {}, .description = "Value to pass through."});
+        reroute.outputs.push_back({.identifier = "Output", .label = "", .type = std::string(ANY_SOCKET), .default_value = {}, .description = "Unchanged input value."});
         builtin::register_type(registry, std::move(reroute));
 
         NodeTypeInfo note;
@@ -53,10 +50,8 @@ namespace lfs::nodes {
         note.category = "Layout";
         note.description = "Adds an editable text card to the graph.";
         note.help = "Double-click the card or edit its text in the sidebar.";
-        note.properties.push_back({"text", "Text", PropertyKind::String, "Note", {}, {}, {},
-                                   "Text displayed on the card."});
-        note.properties.push_back({"width", "Width", PropertyKind::Float, 220.0f, {}, 100.0, 1200.0,
-                                   "Card width in canvas units; the height fits the text."});
+        note.properties.push_back({"text", "Text", PropertyKind::String, "Note", {}, {}, {}, "Text displayed on the card."});
+        note.properties.push_back({"width", "Width", PropertyKind::Float, 220.0f, {}, 100.0, 1200.0, "Card width in canvas units; the height fits the text."});
         builtin::register_type(registry, std::move(note));
     }
 } // namespace lfs::nodes

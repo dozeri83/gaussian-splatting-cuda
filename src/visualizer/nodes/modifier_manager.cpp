@@ -502,8 +502,7 @@ namespace lfs::vis {
                                  {"tree_type", destination->tree_type},
                                  {"nodes", nodes_json},
                                  {"links", nlohmann::json::array()},
-                                 {"interface", {{"inputs", nlohmann::json::array()},
-                                                {"outputs", nlohmann::json::array()}}}};
+                                 {"interface", {{"inputs", nlohmann::json::array()}, {"outputs", nlohmann::json::array()}}}};
         rewrite_group_references(temporary, graph_remap);
         auto decoded = lfs::nodes::NodeTree::from_json(temporary, registry_);
         float centre_x = 0.0f;
@@ -640,7 +639,8 @@ namespace lfs::vis {
             const bool to_inside = selected.contains(link.to_node);
             if (from_inside && to_inside) {
                 nested->add_link({node_remap[link.from_node], link.from_socket,
-                                  node_remap[link.to_node], link.to_socket}, nullptr, resolver);
+                                  node_remap[link.to_node], link.to_socket},
+                                 nullptr, resolver);
                 continue;
             }
             if (!from_inside && to_inside) {
@@ -690,7 +690,8 @@ namespace lfs::vis {
                          declaration->max, declaration->step});
                     socket = outgoing_sockets.emplace(key, identifier).first;
                     nested->add_link({node_remap[link.from_node], link.from_socket, output_name,
-                                      identifier}, nullptr, resolver);
+                                      identifier},
+                                     nullptr, resolver);
                 }
             }
         }
@@ -720,11 +721,13 @@ namespace lfs::vis {
                 const auto key = link.from_node + "\n" + link.from_socket;
                 if (linked_inputs.insert(key).second)
                     outer->add_link({link.from_node, link.from_socket, group.name,
-                                     incoming_sockets.at(key)}, nullptr, outer_resolver);
+                                     incoming_sockets.at(key)},
+                                    nullptr, outer_resolver);
             } else if (from_inside && !to_inside) {
                 const auto key = link.from_node + "\n" + link.from_socket;
                 outer->add_link({group.name, outgoing_sockets.at(key), link.to_node,
-                                 link.to_socket}, nullptr, outer_resolver);
+                                 link.to_socket},
+                                nullptr, outer_resolver);
             }
         }
         const auto result = MakeGroupResult{group.name, nested_uuid};
@@ -805,10 +808,12 @@ namespace lfs::vis {
                 if (inner.from_node == input_node) {
                     if (const auto source = incoming.find(inner.from_socket); source != incoming.end())
                         outer->add_link({source->second.from_node, source->second.from_socket,
-                                         link.to_node, link.to_socket}, nullptr, resolver);
+                                         link.to_node, link.to_socket},
+                                        nullptr, resolver);
                 } else {
                     outer->add_link({remap[inner.from_node], inner.from_socket,
-                                     link.to_node, link.to_socket}, nullptr, resolver);
+                                     link.to_node, link.to_socket},
+                                    nullptr, resolver);
                 }
             }
         }
@@ -821,11 +826,13 @@ namespace lfs::vis {
                 continue;
             if (!from_input) {
                 outer->add_link({remap[link.from_node], link.from_socket, remap[link.to_node],
-                                 link.to_socket}, nullptr, resolver);
+                                 link.to_socket},
+                                nullptr, resolver);
             } else {
                 if (const auto source = incoming.find(link.from_socket); source != incoming.end())
                     outer->add_link({source->second.from_node, source->second.from_socket,
-                                     remap[link.to_node], link.to_socket}, nullptr, resolver);
+                                     remap[link.to_node], link.to_socket},
+                                    nullptr, resolver);
                 else if (auto* target = outer->find_node(remap[link.to_node]))
                     if (const auto value = group_values.find(link.from_socket);
                         value != group_values.end())

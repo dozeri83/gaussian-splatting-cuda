@@ -2121,11 +2121,11 @@ namespace {
         b.add_node("lfs.group", "Into A").properties["tree"] = a.uuid;
         // JSON can come from outside the validated assignment path.
         auto json = a.to_json();
-        json["links"] = nlohmann::json::array({{{"from_node", "Into B"}, {"from_socket", "Geometry"},
-                                               {"to_node", a.output_node().name}, {"to_socket", "Geometry"}}});
+        json["links"] = nlohmann::json::array({{{"from_node", "Into B"}, {"from_socket", "Geometry"}, {"to_node", a.output_node().name}, {"to_socket", "Geometry"}}});
         a = NodeTree::from_json(json, registry);
         const TreeResolver resolver = [&](std::string_view uuid) -> const NodeTree* {
-            return uuid == a.uuid ? &a : uuid == b.uuid ? &b : nullptr;
+            return uuid == a.uuid ? &a : uuid == b.uuid ? &b
+                                                        : nullptr;
         };
         const auto result = evaluate(a, {.tree_resolver = resolver});
         ASSERT_FALSE(result.ok);

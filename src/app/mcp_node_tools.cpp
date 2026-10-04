@@ -317,16 +317,13 @@ namespace lfs::app {
         for (const bool remove : {false, true})
             add(registry, impl, remove ? "nodes.unlink" : "nodes.link", remove ? "Remove an exact graph link" : "Connect compatible sockets; supports multi-input sockets", {{"tree", stringSchema()}, {"from_node", stringSchema()}, {"from_socket", stringSchema()}, {"to_node", stringSchema()}, {"to_socket", stringSchema()}}, {"tree", "from_node", "from_socket", "to_node", "to_socket"}, [remove](auto& viewer, const json& args) { return editLink(viewer, args, remove); }, false, remove);
 
-        add(registry, impl, "nodes.copy", "Serialize nodes and their internal links to the portable LichtFeld node clipboard format",
-            {{"tree", stringSchema()}, {"nodes", {{"type", "array"}, {"items", stringSchema()}}}},
-            {"tree", "nodes"}, [](auto& viewer, const json& args) {
+        add(registry, impl, "nodes.copy", "Serialize nodes and their internal links to the portable LichtFeld node clipboard format", {{"tree", stringSchema()}, {"nodes", {{"type", "array"}, {"items", stringSchema()}}}}, {"tree", "nodes"}, [](auto& viewer, const json& args) {
                 auto& manager = viewer.getSceneManager()->modifierManager();
                 const auto result = manager.copyNodes(args.at("tree").get<std::string>(), args.at("nodes").get<std::vector<std::string>>());
                 if (!result)
                     return failure(result.error().message, "nodes");
                 SDL_SetClipboardText(result->c_str());
-                return json{{"success", true}, {"clipboard", *result}};
-            }, true);
+                return json{{"success", true}, {"clipboard", *result}}; }, true);
         add(registry, impl, "nodes.paste", "Paste a portable LichtFeld node clipboard into a graph as one undo step",
             {{"tree", stringSchema()}, {"clipboard", stringSchema()}, {"location", pointSchema()}},
             {"tree", "clipboard"}, [](auto& viewer, const json& args) {
@@ -381,8 +378,10 @@ namespace lfs::app {
 
         const auto interface_properties = json{{"tree", stringSchema()},
                                                {"side", {{"type", "string"}, {"enum", {"input", "output"}}}},
-                                               {"identifier", stringSchema()}, {"type", stringSchema()},
-                                               {"label", stringSchema()}, {"default", json::object()},
+                                               {"identifier", stringSchema()},
+                                               {"type", stringSchema()},
+                                               {"label", stringSchema()},
+                                               {"default", json::object()},
                                                {"min", {{"type", {"number", "null"}}}},
                                                {"max", {{"type", {"number", "null"}}}},
                                                {"step", {{"type", {"number", "null"}}}},
@@ -414,11 +413,7 @@ namespace lfs::app {
                 return json{{"success", true}, {"identifier", *result}};
             });
         for (const std::string operation : {"remove", "update", "move"})
-            add(registry, impl, "nodes.interface_" + operation, operation + " one graph interface socket",
-                interface_properties,
-                operation == "move" ? std::vector<std::string>{"tree", "side", "identifier", "index"}
-                                    : std::vector<std::string>{"tree", "side", "identifier"},
-                [operation](auto& viewer, const json& args) {
+            add(registry, impl, "nodes.interface_" + operation, operation + " one graph interface socket", interface_properties, operation == "move" ? std::vector<std::string>{"tree", "side", "identifier", "index"} : std::vector<std::string>{"tree", "side", "identifier"}, [operation](auto& viewer, const json& args) {
                     auto& manager = viewer.getSceneManager()->modifierManager();
                     const bool output = args.at("side") == "output";
                     vis::ModifierResult result;
@@ -448,8 +443,7 @@ namespace lfs::app {
                     }
                     if (!result)
                         return failure(result.error().message, "identifier");
-                    return treeState(*manager.tree(args.at("tree").get<std::string>()));
-                }, false, operation == "remove");
+                    return treeState(*manager.tree(args.at("tree").get<std::string>())); }, false, operation == "remove");
 
         add(registry, impl, "nodes.frame_wrap", "Wrap nodes in a new explicit-membership Frame",
             {{"tree", stringSchema()}, {"nodes", {{"type", "array"}, {"items", stringSchema()}}}, {"label", stringSchema()}},

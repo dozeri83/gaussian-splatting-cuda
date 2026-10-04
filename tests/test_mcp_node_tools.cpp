@@ -230,12 +230,9 @@ namespace lfs::vis {
     TEST_F(McpNodeToolsTest, GraphEditingToolsArePortableAndUndoable) {
         const auto id = graph();
         call("node_add", {{"tree", id}, {"type_id", "lfs.colour_correct"}, {"name", "Correct"}});
-        call("unlink", {{"tree", id}, {"from_node", "Group Input"}, {"from_socket", "Geometry"},
-                        {"to_node", "Group Output"}, {"to_socket", "Geometry"}});
-        call("link", {{"tree", id}, {"from_node", "Group Input"}, {"from_socket", "Geometry"},
-                      {"to_node", "Correct"}, {"to_socket", "Geometry"}});
-        call("link", {{"tree", id}, {"from_node", "Correct"}, {"from_socket", "Geometry"},
-                      {"to_node", "Group Output"}, {"to_socket", "Geometry"}});
+        call("unlink", {{"tree", id}, {"from_node", "Group Input"}, {"from_socket", "Geometry"}, {"to_node", "Group Output"}, {"to_socket", "Geometry"}});
+        call("link", {{"tree", id}, {"from_node", "Group Input"}, {"from_socket", "Geometry"}, {"to_node", "Correct"}, {"to_socket", "Geometry"}});
+        call("link", {{"tree", id}, {"from_node", "Correct"}, {"from_socket", "Geometry"}, {"to_node", "Group Output"}, {"to_socket", "Geometry"}});
 
         const auto copied = call("copy", {{"tree", id}, {"nodes", {"Correct"}}})["clipboard"];
         op::undoHistory().clear();
