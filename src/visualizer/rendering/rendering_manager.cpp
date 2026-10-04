@@ -684,9 +684,7 @@ namespace lfs::vis {
             // During training the shared arena is owned by FastGS. Only release
             // private viewer allocations here; the terminal callback below is
             // the point at which the shared import may be relinquished.
-            rendererTrainingInterop(*scene_renderer_).releaseScratchOnIdle(
-                false,
-                release_private_scratch);
+            rendererTrainingInterop(*scene_renderer_).releaseScratchOnIdle(false, release_private_scratch);
             vksplat_idle_since_ = now;
         }
     }

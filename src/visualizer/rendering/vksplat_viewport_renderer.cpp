@@ -8560,8 +8560,8 @@ namespace lfs::vis {
                                        !deterministic_export;
         const bool higs_active = higs_candidate && !higs_warmup_frame;
         const bool gut_aligned_band = request.gut &&
-            uniforms.render_origin_x % TILE_WIDTH == 0u &&
-            uniforms.render_origin_y % TILE_HEIGHT == 0u;
+                                      uniforms.render_origin_x % TILE_WIDTH == 0u &&
+                                      uniforms.render_origin_y % TILE_HEIGHT == 0u;
         if ((higs_active || gut_aligned_band) && deterministic_export &&
             request.frame_view.subregion_full_size.y > 0) {
             // GUT remaps full-image tiles into its local grid, which requires

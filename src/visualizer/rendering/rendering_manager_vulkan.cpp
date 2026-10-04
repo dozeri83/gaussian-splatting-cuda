@@ -2746,7 +2746,7 @@ namespace lfs::vis {
             const auto semaphore = vulkanSceneTimeline(rendered->completion_semaphore);
             if (semaphore != VK_NULL_HANDLE && rendered->completion_value != 0) {
                 const auto existing = std::find_if(point_completions.begin(), point_completions.end(),
-                    [&](const auto& completion) { return completion.semaphore == semaphore; });
+                                                   [&](const auto& completion) { return completion.semaphore == semaphore; });
                 if (existing == point_completions.end())
                     point_completions.push_back({semaphore, rendered->completion_value});
                 else

@@ -820,9 +820,10 @@ namespace {
             for (std::size_t i = 0; i < retained.size(); ++i) {
                 ASSERT_EQ(retained[i].checkpoint_bytes->size(), references[i].size());
                 EXPECT_EQ(std::memcmp(retained[i].checkpoint_bytes->data(),
-                                      references[i].data(), references[i].size()), 0);
+                                      references[i].data(), references[i].size()),
+                          0);
                 if (i)
-                    EXPECT_NE(retained[i].snapshot_uuid, retained[i-1].snapshot_uuid);
+                    EXPECT_NE(retained[i].snapshot_uuid, retained[i - 1].snapshot_uuid);
             }
         }
     }
