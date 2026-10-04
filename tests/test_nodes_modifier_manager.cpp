@@ -1013,7 +1013,7 @@ TEST_F(NodesModifierManager, TrainingApplyResetsAllAdamMomentsAndRejectsStructur
     auto& structural = manager.newTree("Structural");
     auto& remove = structural.add_node("lfs.delete_geometry", "Delete");
     ASSERT_TRUE(structural.remove_link({structural.input_node().name, "Geometry",
-                                       structural.output_node().name, "Geometry"}));
+                                        structural.output_node().name, "Geometry"}));
     ASSERT_TRUE(structural.add_link({structural.input_node().name, "Geometry",
                                      remove.name, "Geometry"}));
     ASSERT_TRUE(structural.add_link({remove.name, "Geometry",

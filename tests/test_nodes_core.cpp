@@ -1386,7 +1386,7 @@ namespace {
         const auto actual = host<float>(result.geometry.splats->opacity);
         for (size_t row = 0; row < logits.size(); ++row) {
             const double alpha = std::clamp((1.0 / (1.0 + std::exp(-double(logits[row])))) / double(1.0f - amount),
-                                           double(1e-6f), double(1.0f - 1e-6f));
+                                            double(1e-6f), double(1.0f - 1e-6f));
             EXPECT_NEAR(actual[row], std::log(alpha / (1.0 - alpha)), 1e-5) << "row=" << row;
         }
     }

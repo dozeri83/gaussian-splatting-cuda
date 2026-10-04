@@ -1788,7 +1788,7 @@ namespace lfs::app {
                 if (node && node->type == core::NodeType::SPLAT && node->model) {
                     const auto evaluated = apply_modifiers ? node->evaluated_model : nullptr;
                     splats.emplace_back(evaluated ? evaluated.get() : node->model.get(),
-                                         vis::scene_coords::nodeDataWorldTransform(scene, node->id));
+                                        vis::scene_coords::nodeDataWorldTransform(scene, node->id));
                     if (evaluated)
                         evaluated_owners.push_back(evaluated);
                 }
