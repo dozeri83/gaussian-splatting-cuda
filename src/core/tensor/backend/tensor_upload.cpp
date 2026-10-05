@@ -920,7 +920,7 @@ namespace lfs::core {
             s.metal = internal::make_metal_work_queue(consumer);
             return;
 #else
-            throw std::runtime_error("Metal/Vulkan interoperable work queues are unavailable in this build");
+        throw std::runtime_error("Metal/Vulkan interoperable work queues are unavailable in this build");
 #endif
         }
 #if LFS_HAS_CUDA
