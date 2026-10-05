@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "window_manager.hpp"
+#include "graphics_context.hpp"
 #include "core/environment.hpp"
 #include "core/events.hpp"
 #include "core/logger.hpp"
@@ -15,8 +16,9 @@
 #ifdef __APPLE__
 #include "preferences.hpp"
 #endif
-#include "vulkan_graphics_context.hpp"
+#ifndef LFS_GRAPHICS_METAL
 #include "vulkan_loader_probe.hpp"
+#endif
 #include "window_state_utils.hpp"
 #include <SDL3/SDL.h>
 #if defined(__linux__)
@@ -31,6 +33,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace lfs::vis {
@@ -693,7 +696,9 @@ namespace lfs::vis {
     }
 
     bool WindowManager::init() {
+#ifndef LFS_GRAPHICS_METAL
         configureValidationLayerSearchPath();
+#endif
 
         if (shouldPreferX11OnGnome()) {
             SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland");
@@ -716,8 +721,13 @@ namespace lfs::vis {
         LOG_INFO("Scene renderer={} tensor={}",
                  lfs::rendering::viewerBackendName(lfs::rendering::desktopViewerBackend()),
                  lfs::core::gpu_backend_name(lfs::core::configured_gpu_backend()));
+#ifdef LFS_GRAPHICS_METAL
+        LOG_INFO("Desktop compositor uses tensor programs with native Metal presentation");
+#else
         LOG_INFO("Desktop compositor uses Vulkan for presentation, UI and editor overlays, including with the Metal viewer");
 #endif
+#endif
+#ifndef LFS_GRAPHICS_METAL
         const auto vulkan_info = probeVulkanLoader();
         if (vulkan_info.enabled) {
             if (vulkan_info.loader_available) {
@@ -726,12 +736,20 @@ namespace lfs::vis {
                 LOG_WARN("Vulkan viewer dependency is enabled, but the loader probe failed: {}", vulkan_info.error);
             }
         }
+#endif
 
         window_ = SDL_CreateWindow(
             title_.c_str(),
             window_size_.x,
             window_size_.y,
-            SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN |
+            (
+#ifdef LFS_GRAPHICS_METAL
+                SDL_WINDOW_METAL
+#else
+                SDL_WINDOW_VULKAN
+#endif
+                ) |
+                SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN |
                 SDL_WINDOW_BORDERLESS);
 
         if (!window_) {
@@ -794,7 +812,7 @@ namespace lfs::vis {
         SDL_GetWindowSizeInPixels(window_, &fb_w, &fb_h);
         framebuffer_size_ = glm::ivec2(fb_w, fb_h);
 
-        graphics_context_ = std::make_unique<VulkanGraphicsContext>();
+        graphics_context_ = createGraphicsContext();
         if (!graphics_context_->initialize(window_, framebuffer_size_.x, framebuffer_size_.y)) {
             std::cerr << "Failed to initialize graphics context: " << graphics_context_->lastError() << std::endl;
             graphics_context_.reset();
@@ -814,10 +832,13 @@ namespace lfs::vis {
             return false;
         }
         SDL_AddEventWatch(watchEvent, this);
-        LOG_INFO("Vulkan window context initialized");
-#ifdef __APPLE__
-        LOG_INFO("Desktop compositor backend active: vulkan");
+        // Directives inside macro arguments are undefined behaviour (MSVC C2059).
+#ifdef LFS_GRAPHICS_METAL
+        constexpr std::string_view graphics_backend = "Metal";
+#else
+        constexpr std::string_view graphics_backend = "Vulkan";
 #endif
+        LOG_INFO("{} window context initialized", graphics_backend);
         return true;
     }
 
