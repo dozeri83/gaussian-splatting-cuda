@@ -13,8 +13,10 @@
 #include "visualizer/nodes/node_animation.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
 #include <ranges>
+#include <thread>
 
 namespace lfs::vis {
 
@@ -163,8 +165,10 @@ namespace lfs::vis {
             return;
         }
         const auto* trainer_manager = scene_manager_->getTrainerManager();
+        // A requested pause reaches the training loop only at its next iteration boundary; until then the
+        // model may still change, so evaluation stays suspended.
         const bool training_running = content == SceneManager::ContentType::Dataset &&
-                                      trainer_manager && trainer_manager->isRunning();
+                                      trainer_manager && trainer_manager->isModelChanging();
         if (training_running) {
             if (!training_suspended_) {
                 training_suspended_ = true;
@@ -208,10 +212,22 @@ namespace lfs::vis {
         lfs::nodes::EvaluationEvent{.phase = "started", .generation = requested_generation_}.emit();
     }
 
+    void ModifierManager::waitForTrainingBoundary() const {
+        const auto* trainer_manager = scene_manager_->getTrainerManager();
+        if (!trainer_manager || trainer_manager->isRunning())
+            return;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (trainer_manager->isModelChanging() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
     ModifierEvaluation ModifierManager::evaluate(const core::Uuid& node_uuid) {
+        waitForTrainingBoundary();
         tick();
-        if (requested_generation_ == output_generation_ && worker_->progress().busy) {
-            // Explicit synchronous Python/API request only; canvas code never calls this.
+        // Explicit synchronous Python/API request only; canvas code never calls this. Wait even when the worker
+        // looks idle: a small graph can finish between tick() and a busy check, and its result still needs
+        // installing.
+        if (requested_generation_ == output_generation_) {
             worker_->wait(requested_generation_);
             installReady();
         }
@@ -273,6 +289,8 @@ namespace lfs::vis {
         if (measure_canvas_)
             canvas_work_ms_ = canvas_work_ms_.value_or(0.0) + milliseconds;
     }
+
+    void ModifierManager::setProfiling(const bool enabled) { worker_->set_profiling(enabled); }
 
     nlohmann::json ModifierManager::performance(const bool reset) {
         auto result = worker_->performance(reset);

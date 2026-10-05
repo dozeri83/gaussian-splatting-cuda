@@ -248,6 +248,7 @@ namespace lfs::vis {
         void recordCanvasFrame(double milliseconds);
         void recordViewerFrame(double milliseconds, bool rendered_viewport);
         [[nodiscard]] nlohmann::json performance(bool reset = false);
+        void setProfiling(bool enabled);
         [[nodiscard]] const ModifierEvaluation* lastResult(const core::Uuid& node_uuid) const;
         [[nodiscard]] std::uint64_t resultGeneration() const { return result_generation_; }
         [[nodiscard]] ModifierWorkerProgress progress() const;
@@ -302,6 +303,9 @@ namespace lfs::vis {
         [[nodiscard]] ModifierResult applyPickedColour(glm::vec3 colour, bool widen_hue = false);
 
     private:
+        // A requested pause reaches the training loop at its next iteration boundary; synchronous callers wait
+        // briefly for it so they see the model the pause leaves.
+        void waitForTrainingBoundary() const;
         struct RuntimeState {
             ModifierEvaluation evaluation;
             bool shown = false; // visible modifiers produced evaluation.geometry

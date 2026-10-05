@@ -4,6 +4,7 @@
 #include "core/nodes/evaluator.hpp"
 #include "core/memory_pressure.hpp"
 #include "core/tensor_backend.hpp"
+#include "core/tensor_completion.hpp"
 #include "core/tensor_execution.hpp"
 
 #include <algorithm>
@@ -50,7 +51,7 @@ namespace lfs::nodes {
                         std::format("Input '{}' requires a single value, not a context-dependent field",
                                     declaration.identifier));
                 PointsComponent point{core::Tensor::zeros({1, 3}, core::Device::CPU), {}, {}};
-                FieldContext context{Domain::Point, nullptr, &point, nullptr, point.positions.debug_id()};
+                const auto context = field_context(point);
                 FieldMemo memo;
                 const auto evaluated =
                     field->evaluate(context, memo).to(core::DataType::Float32).reshape({-1});
@@ -186,8 +187,12 @@ namespace lfs::nodes {
         };
     } // namespace
 
+    bool evaluation_cancelled() {
+        return active_control && active_control->cancelled && active_control->cancelled();
+    }
+
     void throw_if_evaluation_cancelled() {
-        if (active_control && active_control->cancelled && active_control->cancelled())
+        if (evaluation_cancelled())
             throw EvaluationCancelled();
     }
 
@@ -230,10 +235,83 @@ namespace lfs::nodes {
         outputs_[std::move(identifier)] = std::move(value);
     }
 
+    namespace {
+        // Both tensors are alive, so equal addresses with equal layouts are the same elements.
+        bool same_view(const core::Tensor& left, const core::Tensor& right) {
+            if (left.is_valid() != right.is_valid())
+                return false;
+            return !left.is_valid() ||
+                   (left.device() == right.device() && left.dtype() == right.dtype() &&
+                    left.shape() == right.shape() && left.strides() == right.strides() &&
+                    left.data_ptr() == right.data_ptr());
+        }
+
+        bool same_attributes(const AttributeMap& left, const AttributeMap& right) {
+            return left.size() == right.size() && std::ranges::all_of(left, [&](const auto& entry) {
+                       const auto other = right.find(entry.first);
+                       return other != right.end() && same_view(entry.second, other->second);
+                   });
+        }
+
+        // Whether a field evaluated in context reads exactly what the first component of geometry holds.
+        // Handle ids differ between copies, so this compares storage; both sides are alive, so equal
+        // storage means equal contents.
+        bool reads_first_component(const FieldContext& context, const Geometry& geometry) {
+            if (geometry.splats) {
+                const auto* a = context.splats;
+                const auto& b = *geometry.splats;
+                return context.domain == Domain::Splat && a && same_view(a->means, b.means) &&
+                       same_view(a->sh0, b.sh0) && same_view(a->shN, b.shN) && same_view(a->scaling, b.scaling) &&
+                       same_view(a->rotation, b.rotation) && same_view(a->opacity, b.opacity) &&
+                       a->sh_degree == b.sh_degree && a->scene_scale == b.scene_scale &&
+                       same_attributes(a->attributes, b.attributes);
+            }
+            if (geometry.points) {
+                const auto* a = context.points;
+                const auto& b = *geometry.points;
+                return context.domain == Domain::Point && a && same_view(a->positions, b.positions) &&
+                       same_view(a->colors, b.colors) && same_attributes(a->attributes, b.attributes);
+            }
+            if (geometry.mesh) {
+                const auto* a = context.mesh;
+                const auto& b = *geometry.mesh;
+                return context.domain == Domain::Vertex && a && a->mesh == b.mesh &&
+                       a->textures.size() == b.textures.size() &&
+                       std::ranges::equal(a->textures, b.textures, same_view) &&
+                       same_attributes(a->attributes, b.attributes);
+            }
+            return false;
+        }
+    } // namespace
+
     void NodeContext::record_selection(const FieldContext& context, const core::Tensor& mask) const {
-        if (!selection_)
-            selection_ = ConsumedSelection{context.identity, mask};
+        if (!selection_ && geometry_input_ && reads_first_component(context, *geometry_input_))
+            selection_ = ConsumedSelection{mask};
     }
+
+    namespace {
+        // A graph and every graph its groups reference, so an edit anywhere below a group changes its key.
+        std::size_t group_graph_revision(const std::string& uuid, const TreeResolver& resolver) {
+            std::size_t revision = 0;
+            std::unordered_set<std::string> visited;
+            std::vector<std::string> pending{uuid};
+            while (!pending.empty()) {
+                auto current = std::move(pending.back());
+                pending.pop_back();
+                if (!visited.insert(current).second)
+                    continue;
+                const NodeTree* graph = resolver(current);
+                hash_combine(revision, std::hash<std::string>{}(graph ? graph->to_json().dump() : current));
+                if (!graph)
+                    continue;
+                for (const auto& node : graph->nodes)
+                    if (node.type_id == "lfs.group")
+                        if (const auto found = node.properties.find("tree"); found != node.properties.end() && found->is_string())
+                            pending.push_back(found->get<std::string>());
+            }
+            return revision;
+        }
+    } // namespace
 
     EvalResult evaluate(const NodeTree& tree, EvalInputs inputs, EvalHost* host, EvalCache* cache,
                         const EvalControl& control) {
@@ -346,8 +424,7 @@ namespace lfs::nodes {
             if (node.type_id == "lfs.group" && inputs.tree_resolver) {
                 const auto graph = node.properties.find("tree");
                 if (graph != node.properties.end() && graph->is_string())
-                    if (const auto* nested = inputs.tree_resolver(graph->get_ref<const std::string&>()))
-                        hash_combine(key, std::hash<std::string>{}(nested->to_json().dump()));
+                    hash_combine(key, group_graph_revision(graph->get_ref<const std::string&>(), inputs.tree_resolver));
             }
             hash_combine(key, std::hash<std::uint64_t>{}(inputs.geometry_generation));
             hash_combine(key, static_cast<size_t>(device));
@@ -471,6 +548,8 @@ namespace lfs::nodes {
                                 geometry_input = *geometry;
                         }
                     }
+                if (geometry_input)
+                    context.geometry_input_ = &*geometry_input;
                 if (node.type_id == "lfs.group_input") {
                     for (const auto& declaration : tree.group_interface.inputs) {
                         const auto override_value = inputs.interface_overrides.find(declaration.identifier);
@@ -486,7 +565,7 @@ namespace lfs::nodes {
                         context.outputs_[output.identifier] = context.input(output.identifier);
                 } else if (node.type_id == "lfs.reroute") {
                     context.outputs_["Output"] = context.input("Input");
-                } else if (node.type_id == "lfs.group") {
+                } else if (node.type_id == "lfs.group" && !node.muted) {
                     const auto graph = node.properties.find("tree");
                     const NodeTree* nested = graph != node.properties.end() && graph->is_string() &&
                                                      inputs.tree_resolver
@@ -504,7 +583,9 @@ namespace lfs::nodes {
                     nested_inputs.geometry = inputs.geometry;
                     nested_inputs.seconds = inputs.seconds;
                     nested_inputs.frames_per_second = inputs.frames_per_second;
-                    nested_inputs.geometry_generation = inputs.geometry_generation;
+                    // Interface geometry hashes only by type; the group's own key carries its upstream
+                    // revisions, so nested caches follow upstream edits.
+                    nested_inputs.geometry_generation = evaluation.key;
                     nested_inputs.device = inputs.device;
                     nested_inputs.tree_resolver = inputs.tree_resolver;
                     nested_inputs.group_stack = inputs.group_stack;
@@ -519,7 +600,13 @@ namespace lfs::nodes {
                         geometry != input_declarations.end())
                         if (const auto* value = context.input(geometry->identifier).get_if<Geometry>())
                             nested_inputs.geometry = *value;
-                    auto nested_result = evaluate(*nested, std::move(nested_inputs), host, cache);
+                    // Progress callbacks stay with the top-level nodes the host counts.
+                    const EvalControl nested_control{.cancelled = control.cancelled,
+                                                     .propagate_out_of_memory = control.propagate_out_of_memory,
+                                                     .synchronize_nodes = control.synchronize_nodes};
+                    auto nested_result = evaluate(*nested, std::move(nested_inputs), host, cache, nested_control);
+                    if (nested_result.cancelled)
+                        throw EvaluationCancelled{};
                     for (const auto& [inner, status] : nested_result.nodes)
                         result.nodes[node.name + "/" + inner] = status;
                     for (const auto& [inner, time] : nested_result.time_ms)
@@ -579,6 +666,11 @@ namespace lfs::nodes {
                 result.errors[node.name] = exception.what();
                 result.ok = false;
                 evaluation.ok = false;
+            }
+            if (control.synchronize_nodes) {
+                core::TensorCompletion completion;
+                completion.include_current_gpu();
+                completion.wait();
             }
             const auto stop = std::chrono::steady_clock::now();
             const double elapsed = std::chrono::duration<double, std::milli>(stop - start).count();

@@ -59,8 +59,10 @@ namespace {
                 {"CUDA", GpuBackend::CUDA}};
     }
 
+    // Runs on every available GPU backend; a test that ran on none reports a skip rather than a pass.
     template <typename Run>
     void for_each_worker_target(Run run) {
+        int ran = 0;
         for (const auto& [name, backend] : worker_targets()) {
             SCOPED_TRACE(name);
             if (backend && !lfs::core::gpu_backend_available(*backend))
@@ -69,7 +71,10 @@ namespace {
             if (backend)
                 scope.emplace(*backend);
             run(lfs::core::Device::GPU);
+            ++ran;
         }
+        if (ran == 0)
+            GTEST_SKIP() << "No GPU backend is available";
     }
 
     lfs::core::Tensor selection(std::initializer_list<bool> values) {
@@ -2329,4 +2334,35 @@ TEST_F(NodesModifierManager, WorkerDiscardsSupersededResultsAndInstallsOnViewer)
     EXPECT_EQ(mesh_node->evaluated_mesh->vertex_count(), 3);
     EXPECT_EQ(manager.performance()["discarded"], 1);
     EXPECT_EQ(manager.performance()["installed"], 1);
+}
+
+TEST_F(NodesModifierManager, EditingADownstreamNodeKeepsUpstreamResults) {
+    for_each_worker_target([](const auto device) {
+        lfs::vis::SceneManager scene;
+        scene.changeContentType(lfs::vis::SceneManager::ContentType::SplatFiles);
+        const auto id = scene.getScene().addSplat("Host", model(4, device));
+        const auto host = scene.getScene().getNodeUuid(id);
+        auto& manager = scene.modifierManager();
+        auto& tree = manager.newTree("Chain");
+        const auto input = tree.input_node().name, output = tree.output_node().name;
+        tree.add_node("lfs.transform_geometry", "First").input_values["Translation"] = glm::vec3(1, 0, 0);
+        tree.add_node("lfs.transform_geometry", "Second").input_values["Translation"] = glm::vec3(0, 1, 0);
+        ASSERT_TRUE(tree.remove_link({input, "Geometry", output, "Geometry"}));
+        ASSERT_TRUE(tree.add_link({input, "Geometry", "First", "Geometry"}));
+        ASSERT_TRUE(tree.add_link({"First", "Geometry", "Second", "Geometry"}));
+        ASSERT_TRUE(tree.add_link({"Second", "Geometry", output, "Geometry"}));
+        manager.addModifier(host, tree.uuid);
+        ASSERT_TRUE(manager.evaluate(host).ok);
+        for (const float y : {2.0f, 3.0f}) {
+            (void)manager.performance(true);
+            const auto before = tree.to_json();
+            tree.find_node("Second")->input_values["Translation"] = glm::vec3(0, y, 0);
+            manager.recordTreeEdit(tree.uuid, before);
+            ASSERT_TRUE(manager.evaluate(host).ok);
+            const auto runs = manager.performance()["node_runs"];
+            EXPECT_EQ(runs.value("Second", 0), 1) << runs.dump();
+            EXPECT_EQ(runs.value("First", 0), 0) << runs.dump();
+            EXPECT_NEAR(manager.evaluated(host)->splats->means.cpu().to_vector()[1], y, 1e-6f);
+        }
+    });
 }

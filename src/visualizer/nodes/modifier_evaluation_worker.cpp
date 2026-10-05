@@ -72,21 +72,8 @@ namespace lfs::vis {
             };
             if (geometry.points)
                 geometry.points->positions = transform_positions(geometry.points->positions);
-            if (geometry.mesh && geometry.mesh->mesh) {
-                const auto& source = *geometry.mesh->mesh;
-                auto result = std::make_shared<core::MeshData>();
-                result->vertices = transform_positions(source.vertices);
-                result->indices = source.indices;
-                result->normals = source.normals;
-                result->tangents = source.tangents;
-                result->texcoords = source.texcoords;
-                result->colors = source.colors;
-                result->materials = source.materials;
-                result->submeshes = source.submeshes;
-                result->texture_images = source.texture_images;
-                geometry.mesh = lfs::nodes::MeshComponent{std::move(result), geometry.mesh->textures,
-                                                          geometry.mesh->attributes};
-            }
+            if (geometry.mesh && geometry.mesh->mesh)
+                geometry.mesh->mesh = lfs::nodes::transform_mesh(*geometry.mesh->mesh, matrix);
             return geometry;
         }
 
@@ -331,32 +318,6 @@ namespace lfs::vis {
             return core::gpu_backend_available(backend) ? std::optional{backend} : std::nullopt;
         }
 
-        std::optional<FieldContext> fieldContext(const Geometry& geometry) {
-            FieldContext context;
-            if (geometry.splats) {
-                context.domain = Domain::Splat;
-                context.splats = &*geometry.splats;
-                const auto& splats = *geometry.splats;
-                context.identity = static_cast<std::uint64_t>(splats.means.debug_id()) ^
-                                   (static_cast<std::uint64_t>(splats.sh0.debug_id()) << 8U) ^
-                                   (static_cast<std::uint64_t>(splats.scaling.debug_id()) << 16U) ^
-                                   (static_cast<std::uint64_t>(splats.opacity.debug_id()) << 24U) ^
-                                   (static_cast<std::uint64_t>(splats.shN.debug_id()) << 32U);
-            } else if (geometry.points) {
-                context.domain = Domain::Point;
-                context.points = &*geometry.points;
-                context.identity = static_cast<std::uint64_t>(geometry.points->positions.debug_id()) ^
-                                   (static_cast<std::uint64_t>(geometry.points->colors.debug_id()) << 32U);
-            } else if (geometry.mesh) {
-                context.domain = Domain::Vertex;
-                context.mesh = &*geometry.mesh;
-                context.identity = geometry.mesh->mesh ? geometry.mesh->mesh->id() : 0;
-            } else {
-                return std::nullopt;
-            }
-            return context;
-        }
-
         // Attribute nodes replace tensors but keep element order, so tensor identity would hide every
         // preview behind them. Equal counts alone prove nothing: a reordering join keeps the count.
         bool sameElements(const ModifierHostResult& result, const FieldContext& left, const FieldContext& right) {
@@ -492,7 +453,7 @@ namespace lfs::vis {
                 return geometry ? std::optional{PreviewProduct{.geometry = *geometry}} : std::nullopt;
             }
             Geometry context_geometry = evaluated.geometry;
-            const auto context = fieldContext(context_geometry);
+            const auto context = field_context(context_geometry);
             if (!context)
                 return std::nullopt;
             FieldMemo memo;
@@ -506,16 +467,55 @@ namespace lfs::vis {
             return result;
         }
 
+        // Selected counts stay on the device until every preview is known, then come back in one read.
+        struct PendingShares {
+            std::vector<std::string> nodes;
+            std::vector<core::Tensor> counts;
+            std::vector<size_t> totals;
+
+            void add(std::string node, const core::Tensor& count, const size_t total) {
+                nodes.push_back(std::move(node));
+                counts.push_back(count);
+                totals.push_back(total);
+            }
+
+            void read(ModifierHostResult& result) {
+                if (nodes.empty())
+                    return;
+                std::vector<int> values;
+                const bool one_device = std::ranges::all_of(counts, [&](const core::Tensor& count) {
+                    return count.device() == counts.front().device();
+                });
+                if (one_device) {
+                    values = core::Tensor::cat(counts, 0).cpu().to_vector_int();
+                } else {
+                    for (const auto& count : counts)
+                        values.push_back(count.cpu().to_vector_int().front());
+                }
+                for (size_t i = 0; i < nodes.size(); ++i)
+                    if (auto status = result.evaluation.nodes.find(nodes[i]); status != result.evaluation.nodes.end())
+                        status->second.selected_share = totals[i] ? static_cast<double>(values[i]) / static_cast<double>(totals[i]) : 0.0;
+            }
+        };
+
+        // Int32 [1] number of selected elements.
+        core::Tensor selectedCount(const core::Tensor& mask) {
+            if (!mask.numel())
+                return core::Tensor::zeros({1}, mask.device(), core::DataType::Int32);
+            return mask.to(core::DataType::Int32).sum().to(core::DataType::Int32).reshape({1});
+        }
+
         void selectionPreviews(const NodeTree& tree, const EvalCache& cache,
                                const std::string& modifier, ModifierHostResult& result,
+                               PendingShares& shares,
                                const std::function<bool()>& cancelled,
                                const TreeResolver& resolver,
                                const std::string& name_space = {}) {
-            const auto displayed = fieldContext(result.evaluation.geometry);
+            const auto displayed = field_context(result.evaluation.geometry);
             if (!displayed)
                 return;
             FieldMemo memo;
-            std::unordered_map<std::string, std::pair<core::Tensor, double>> masks;
+            std::unordered_map<std::string, std::pair<core::Tensor, core::Tensor>> masks;
             for (const auto& node : tree.nodes) {
                 if (cancelled())
                     return;
@@ -556,7 +556,7 @@ namespace lfs::vis {
                 }
                 if (!consumer || !consumer->geometry_input)
                     continue;
-                const auto context = fieldContext(*consumer->geometry_input);
+                const auto context = field_context(*consumer->geometry_input);
                 if (!context)
                     continue;
                 const auto cached = cache.nodes.find(source);
@@ -570,12 +570,10 @@ namespace lfs::vis {
                                         std::to_string(context->identity) + "/" +
                                         std::to_string(context->size());
                 auto found = masks.find(key);
-                if (found == masks.end() && consumed_as_selection && consumer->selection &&
-                    consumer->selection->context == context->identity) {
+                // The consumer recorded its mask only when it evaluated it on this geometry input.
+                if (found == masks.end() && consumed_as_selection && consumer->selection) {
                     const auto& mask = consumer->selection->mask;
-                    const auto count = mask.numel();
-                    const double share = count ? static_cast<double>(mask.count_nonzero()) / count : 0.0;
-                    found = masks.emplace(key, std::pair{mask, share}).first;
+                    found = masks.emplace(key, std::pair{mask, selectedCount(mask)}).first;
                 }
                 if (found == masks.end()) {
                     try {
@@ -584,9 +582,8 @@ namespace lfs::vis {
                                            : constant_field(value->second, FLOAT_SOCKET))
                                         .evaluate(*context, memo)
                                         .ge(0.5f);
-                        const auto count = mask.numel();
-                        const double share = count ? static_cast<double>(mask.count_nonzero()) / count : 0.0;
-                        found = masks.emplace(key, std::pair{std::move(mask), share}).first;
+                        auto count = selectedCount(mask);
+                        found = masks.emplace(key, std::pair{std::move(mask), std::move(count)}).first;
                     } catch (const std::exception&) {
                         // LFS-CENSUS-OK(empty-catch): optional selection diagnostics cannot fail evaluation.
                         // Selection statistics and viewport previews are ancillary. A field that
@@ -594,15 +591,13 @@ namespace lfs::vis {
                         continue;
                     }
                 }
-                if (auto status = result.evaluation.nodes.find(modifier + "/" + name_space + node.name);
-                    status != result.evaluation.nodes.end())
-                    status->second.selected_share = found->second.second;
+                shares.add(modifier + "/" + name_space + node.name, found->second.second, found->second.first.numel());
                 if (sameElements(result, *context, *displayed))
                     result.previews[modifier + "/" + name_space + node.name] = found->second.first;
             }
             for (const auto& node : tree.nodes) {
                 if (const auto* nested = node.type_id == "lfs.group" ? groupTree(node, resolver) : nullptr)
-                    selectionPreviews(*nested, cache, modifier, result, cancelled, resolver,
+                    selectionPreviews(*nested, cache, modifier, result, shares, cancelled, resolver,
                                       name_space + node.name + "/");
             }
         }
@@ -769,6 +764,7 @@ namespace lfs::vis {
                             if (const auto old = previous->second.evaluation.nodes.find(name); old != previous->second.evaluation.nodes.end())
                                 status.selected_share = old->second.selected_share;
                     } else {
+                        PendingShares shares;
                         for (const auto& modifier : object.stack.modifiers) {
                             if (!result.preview_key.empty())
                                 break;
@@ -777,9 +773,11 @@ namespace lfs::vis {
                             const auto source = request_.trees.find(modifier.tree_uuid);
                             if (source != request_.trees.end())
                                 selectionPreviews(NodeTree::from_json(source->second, registry_), caches_[modifier.uuid],
-                                                  modifier.uuid, result, control_.cancelled,
+                                                  modifier.uuid, result, shares, control_.cancelled,
                                                   [this](const std::string_view uuid) { return resolveTree(uuid); });
                         }
+                        if (!control_.cancelled())
+                            shares.read(result);
                         if ((result.enabled || request_.bake) && !control_.cancelled()) {
                             // A bake hands its payload to the scene, so it shares nothing with the viewport's.
                             const lfs::nodes::SplatsComponent* source = nullptr;
@@ -909,6 +907,10 @@ namespace lfs::vis {
                     lock.unlock();
                     core::Tensor::release_freed_memory();
                     holding_freed_memory_ = false;
+                    // Once no graph is left to evaluate or publish, return the storage the graphs
+                    // pooled, including payload buffers the renderer imported.
+                    if (caches_.empty() && sources_.empty() && published_.empty())
+                        core::Tensor::trim_memory_pool();
                     continue;
                 }
                 retired.swap(retired_);
@@ -1020,7 +1022,8 @@ namespace lfs::vis {
                     progress_.pending_nodes.erase(name);
                     progress_.completed = progress_.finished_nodes.size();
                     progress_.node.clear(); },
-                .propagate_out_of_memory = true};
+                .propagate_out_of_memory = true,
+                .synchronize_nodes = profiling_.load(std::memory_order_relaxed)};
             SnapshotHost host(request, registry_, caches_, source, previous_hosts_, published_, control,
                               [&](const core::Uuid& uuid, const std::string& modifier, const lfs::nodes::NodeTree& tree) {
                                   std::unordered_map<std::string, std::vector<std::string>> parents;
