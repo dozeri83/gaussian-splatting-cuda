@@ -4,6 +4,10 @@
 
 #include "splat_tile_streamer.hpp"
 #include "core/logger.hpp"
+#include "core/memory_pressure.hpp"
+#include "core/sh_layout.hpp"
+#include "core/sh_value_quant.hpp"
+#include "core/splat_exportable_storage.hpp"
 #include "core/tensor_backend.hpp"
 #include <algorithm>
 #include <chrono>
@@ -13,7 +17,9 @@
 namespace lfs::vis {
 
     namespace {
-        constexpr float kSseFactorStep = 1.02f;
+        constexpr float kSseFactorStep = 1.02f; // coarsen per update under memory pressure
+        constexpr float kSseRelaxStep = 1.01f;  // relax per update, slower than coarsening
+        constexpr double kRelaxHeadroom = 0.9;  // the finer cut must fit in this share of the limit
         constexpr float kMaxSseFactor = 64.0f;
         // A failed merge (almost always out of GPU memory) retries a coarser cut a few
         // times, then waits for the view or the cache size to change.
@@ -23,6 +29,45 @@ namespace lfs::vis {
         std::uint64_t tile_bytes(const io::SplatTile& tile) {
             const int rest = (tile.sh_degree + 1) * (tile.sh_degree + 1) - 1;
             return tile.splat_count * (14 + 3 * rest) * sizeof(float);
+        }
+
+        // Memory the cut at `sse_factor` needs once settled: every tile its traversal wants
+        // (cached and not evictable while wanted) plus the merged model drawn from its render
+        // tiles. The same terms the workers weigh when they report the view over budget.
+        std::uint64_t cut_bytes(const io::SplatTileSource& source, io::SplatTileView view, const float sse_factor) {
+            view.max_sse *= sse_factor;
+            const auto selection = io::select_splat_tiles(source, view, [](std::uint32_t) { return true; });
+            const auto tiles = source.tiles();
+            std::uint64_t bytes = 0;
+            for (const auto tile : selection.wanted)
+                bytes += tile_bytes(tiles[tile]);
+            for (const auto tile : selection.render)
+                bytes += tile_bytes(tiles[tile]);
+            return bytes;
+        }
+
+        // Whether the GPU can hold the merged model of `set` right now. The drawn model and
+        // the cache are already allocated, so only the new model and the float SH workspace
+        // a quantized merge encodes from are planned; the coordinator adds reclaimable
+        // memory and the application-wide safety reserve.
+        bool merge_fits(const std::span<const io::SplatTile> tiles, const std::vector<std::uint32_t>& set) {
+            std::size_t splats = 0;
+            int sh_degree = 0;
+            for (const auto tile : set) {
+                splats += tiles[tile].splat_count;
+                sh_degree = std::max(sh_degree, tiles[tile].sh_degree);
+            }
+            std::size_t workspace = 0;
+            if (sh_degree > 0 && core::sh_value_quant::enabled())
+                workspace = core::sh_swizzled_float_count(splats, core::sh_rest_coefficients_for_degree(sh_degree)) *
+                            sizeof(float);
+            const core::OperationMemoryPlan plan{
+                .operation = "3D Tiles merge",
+                .persistent_device_bytes = core::SplatExportableStorage::layoutBytes(splats, sh_degree),
+                .temporary_device_bytes = workspace};
+            return core::MemoryPressureCoordinator::instance()
+                .preflight(plan, core::device_memory_domain(core::default_gpu_backend()))
+                .ok;
         }
 
         bool same_view(const io::SplatTileView& a, const io::SplatTileView& b) {
@@ -103,14 +148,22 @@ namespace lfs::vis {
         if (!same_view(view, last_view_))
             merge_failures_ = 0;
         // Memory-adjusted error: when the view's tiles do not fit the cache, accept a
-        // slightly larger error each frame; relax it again once memory frees up.
+        // slightly larger error each frame. Relax it, more slowly, only when the finer cut
+        // is estimated to fit with headroom: coarsening at the limit and relaxing below it
+        // keeps the cut from flipping between a level that fits and one that does not.
+        bool factor_changed = false;
         if (over_budget_ && sse_factor_ < kMaxSseFactor) {
             sse_factor_ = std::min(sse_factor_ * kSseFactorStep, kMaxSseFactor);
-            cache_changed_ = true;
-        } else if (!over_budget_ && sse_factor_ > 1.0f && usedBytesLocked() < cache_limit_bytes_ * 4 / 5) {
-            sse_factor_ = std::max(sse_factor_ / kSseFactorStep, 1.0f);
-            cache_changed_ = true;
+            factor_changed = true;
+        } else if (!over_budget_ && sse_factor_ > 1.0f) {
+            const float finer = std::max(sse_factor_ / kSseRelaxStep, 1.0f);
+            if (static_cast<double>(cut_bytes(*source_, view, finer)) <=
+                kRelaxHeadroom * static_cast<double>(cache_limit_bytes_)) {
+                sse_factor_ = finer;
+                factor_changed = true;
+            }
         }
+        cache_changed_ = cache_changed_ || factor_changed;
         if (!settings.freeze && (cache_changed_ || !same_view(view, last_view_))) {
             cache_changed_ = false;
             last_view_ = view;
@@ -120,8 +173,8 @@ namespace lfs::vis {
             auto selection = io::select_splat_tiles(*source_, adjusted, [this](const std::uint32_t tile) {
                 return cache_.contains(tile);
             });
-            if (sse_factor_ > 1.0f && wake_)
-                wake_(); // keep adjusting while the cache is over or under budget
+            if (factor_changed && wake_)
+                wake_(); // keep adjusting until the factor settles
             wanted_ = std::move(selection.wanted);
             for (const auto tile : wanted_)
                 if (const auto it = cache_.find(tile); it != cache_.end())
@@ -197,6 +250,18 @@ namespace lfs::vis {
     void SplatTileStreamer::work(const std::stop_token& stop) {
         const auto tiles = source_->tiles();
         std::unique_lock lock(mutex_);
+        // A merge that cannot run (no GPU room) or failed (almost always out of memory):
+        // forget the cut so the next update asks again, a little coarser.
+        const auto back_off_merge = [&] {
+            if (++merge_failures_ >= kMaxMergeAttempts)
+                LOG_WARN("3D Tiles: {} merges failed in a row; waiting for the view or cache size to change",
+                         merge_failures_);
+            requested_set_.clear();
+            sse_factor_ = std::min(sse_factor_ * kMergeFailureSseStep, kMaxSseFactor);
+            cache_changed_ = true;
+            if (wake_)
+                wake_();
+        };
         while (!stop.stop_requested()) {
             // A completed render set is merged by one worker at a time (building_), so the
             // others keep loading tiles. The merge installs only when its generation is
@@ -224,6 +289,14 @@ namespace lfs::vis {
                     merge_bytes += tile_bytes(tiles[tile]);
                 building_bytes_ = merge_bytes;
                 evictLocked();
+                // The budget may be briefly exceeded while the old model is still drawn,
+                // but never beyond what the GPU can actually hold.
+                if (!merge_fits(tiles, set)) {
+                    LOG_DEBUG("3D Tiles: not enough free GPU memory to merge {} tiles", set.size());
+                    building_bytes_ = 0;
+                    back_off_merge();
+                    continue;
+                }
                 building_ = true;
                 lock.unlock();
                 const auto build_start = std::chrono::steady_clock::now();
@@ -247,15 +320,7 @@ namespace lfs::vis {
                 cv_.notify_all();
                 build_ms_ = build_ms;
                 if (!merged) {
-                    // Forget the failed cut so the next update asks again, a little coarser.
-                    if (++merge_failures_ >= kMaxMergeAttempts)
-                        LOG_WARN("3D Tiles: {} merges failed in a row; waiting for the view or cache size to change",
-                                 merge_failures_);
-                    requested_set_.clear();
-                    sse_factor_ = std::min(sse_factor_ * kMergeFailureSseStep, kMaxSseFactor);
-                    cache_changed_ = true;
-                    if (wake_)
-                        wake_();
+                    back_off_merge();
                 } else if (gen > installed_gen_) {
                     merge_failures_ = 0;
                     built_bytes_ = merge_bytes;

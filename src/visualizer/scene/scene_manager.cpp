@@ -521,7 +521,6 @@ namespace lfs::vis {
         for (auto& [uuid, source] : reattach)
             attachTileStream(uuid, std::move(source), tile_stream_paths_.at(uuid));
 
-        const auto& settings = tile_stream_settings_;
         for (auto it = tile_streamers_.begin(); it != tile_streamers_.end();) {
             auto* const node = scene_.getNodeByUuid(it->first);
             if (!node || !node->model || node->model.get() != tile_stream_models_[it->first]) {
@@ -533,6 +532,15 @@ namespace lfs::vis {
                 it = tile_streamers_.erase(it);
                 continue;
             }
+            ++it;
+        }
+
+        // The cache size is one budget for all streamed nodes, not one per node.
+        auto settings = tile_stream_settings_;
+        if (tile_streamers_.size() > 1)
+            settings.cache_fraction /= static_cast<float>(tile_streamers_.size());
+        for (auto it = tile_streamers_.begin(); it != tile_streamers_.end(); ++it) {
+            auto* const node = scene_.getNodeByUuid(it->first);
             // The viewport camera lives in visualizer world axes; model data in dataset axes.
             const glm::mat4 model_to_world =
                 lfs::rendering::dataWorldTransformToVisualizerWorld(scene_.getWorldTransform(node->id));
@@ -556,7 +564,6 @@ namespace lfs::vis {
                 if (scene_.hasSelection())
                     scene_.clearSelection();
             }
-            ++it;
         }
     }
 
