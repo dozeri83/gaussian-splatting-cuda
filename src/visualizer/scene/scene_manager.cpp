@@ -499,14 +499,36 @@ namespace lfs::vis {
             gui::PanelRegistry::instance().set_panel_enabled(kTileStreamPanel, true);
             open_tile_stream_panel_ = false;
         }
+        // A detached tileset keeps its path; when undo brings its node back (same uuid),
+        // streaming restarts from the tileset instead of leaving the restored cut editable.
+        std::vector<std::pair<core::Uuid, std::shared_ptr<const io::SplatTileSource>>> reattach;
+        std::vector<core::Uuid> unreadable;
+        for (const auto& [uuid, path] : tile_stream_paths_) {
+            if (tile_streamers_.contains(uuid))
+                continue;
+            const auto* const node = scene_.getNodeByUuid(uuid);
+            if (!node || node->type != core::NodeType::SPLAT || !node->model)
+                continue;
+            if (auto source = io::open_tiles3d(path)) {
+                reattach.emplace_back(uuid, std::move(*source));
+            } else {
+                LOG_WARN("3D Tiles: cannot resume streaming '{}': {}", node->name, source.error());
+                unreadable.push_back(uuid);
+            }
+        }
+        for (const auto& uuid : unreadable)
+            tile_stream_paths_.erase(uuid);
+        for (auto& [uuid, source] : reattach)
+            attachTileStream(uuid, std::move(source), tile_stream_paths_.at(uuid));
+
         const auto& settings = tile_stream_settings_;
         for (auto it = tile_streamers_.begin(); it != tile_streamers_.end();) {
             auto* const node = scene_.getNodeByUuid(it->first);
             if (!node || !node->model || node->model.get() != tile_stream_models_[it->first]) {
-                // Removed, or its model was replaced (project reopen, undo): stop streaming into it.
+                // Removed, or its model was replaced (undo, project reopen): stop streaming into it
+                // and free its tiles. The path stays so a restored node resumes streaming.
                 if (node)
                     node->model_streamed = false;
-                tile_stream_paths_.erase(it->first);
                 tile_stream_models_.erase(it->first);
                 it = tile_streamers_.erase(it);
                 continue;
@@ -3466,6 +3488,12 @@ namespace lfs::vis {
             }
         }
         op::undoHistory().clear();
+        // Without history no streamed node can be restored; deleting the last node
+        // resets through resetToEmptyState() directly and keeps them for undo.
+        tile_streamers_.clear();
+        tile_stream_models_.clear();
+        tile_stream_paths_.clear();
+        flat_tile_nodes_.clear();
         return resetToEmptyState(false, internal_import);
     }
 

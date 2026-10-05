@@ -114,6 +114,7 @@ namespace lfs::vis {
         std::uint64_t build_request_gen_ = 0; // generation of build_request_
         std::uint64_t installed_gen_ = 0;     // generation of the drawn model
         bool building_ = false;               // a worker is merging a render set
+        int merge_failures_ = 0;              // consecutive failed merges; new cuts pause at the limit
         std::unique_ptr<core::SplatData> built_;
         std::vector<std::uint32_t> built_set_;
         std::uint64_t frame_ = 0;
@@ -122,7 +123,7 @@ namespace lfs::vis {
         float sse_factor_ = 1.0f;  // memory-adjusted multiplier of the max SSE
         std::function<void()> wake_;
 
-        // Main thread only.
+        // Written by update() on the main thread; workers read them under mutex_.
         std::vector<std::uint32_t> shown_set_;
         std::vector<std::uint32_t> requested_set_;
         io::SplatTileView last_view_{};

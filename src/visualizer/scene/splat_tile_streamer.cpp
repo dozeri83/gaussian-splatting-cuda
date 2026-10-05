@@ -15,6 +15,10 @@ namespace lfs::vis {
     namespace {
         constexpr float kSseFactorStep = 1.02f;
         constexpr float kMaxSseFactor = 64.0f;
+        // A failed merge (almost always out of GPU memory) retries a coarser cut a few
+        // times, then waits for the view or the cache size to change.
+        constexpr int kMaxMergeAttempts = 3;
+        constexpr float kMergeFailureSseStep = 1.5f;
 
         std::uint64_t tile_bytes(const io::SplatTile& tile) {
             const int rest = (tile.sh_degree + 1) * (tile.sh_degree + 1) - 1;
@@ -92,9 +96,12 @@ namespace lfs::vis {
             sse_factor_ = 1.0f;
             requested_set_.clear();
             build_request_.clear();
+            merge_failures_ = 0;
             cache_changed_ = true;
             cv_.notify_all();
         }
+        if (!same_view(view, last_view_))
+            merge_failures_ = 0;
         // Memory-adjusted error: when the view's tiles do not fit the cache, accept a
         // slightly larger error each frame; relax it again once memory frees up.
         if (over_budget_ && sse_factor_ < kMaxSseFactor) {
@@ -121,7 +128,8 @@ namespace lfs::vis {
                     it->second.last_wanted = frame_;
             std::ranges::sort(selection.render);
             // An incomplete cut would open holes; keep showing the current one until it fills in.
-            if (selection.complete && !selection.render.empty() && selection.render != requested_set_) {
+            if (selection.complete && !selection.render.empty() && selection.render != requested_set_ &&
+                merge_failures_ < kMaxMergeAttempts) {
                 requested_set_ = selection.render;
                 build_request_ = std::move(selection.render);
                 build_request_gen_ = ++build_gen_;
@@ -165,10 +173,16 @@ namespace lfs::vis {
     }
 
     void SplatTileStreamer::evictLocked(const std::uint64_t incoming) {
+        // The requested cut pins its tiles only until it is merged; once drawn (or built and
+        // awaiting the swap) the model is its own copy and the tiles are ordinary cache.
+        // Pinning a drawn cut would block the next cut's tiles from ever loading.
+        const bool request_pending =
+            requested_set_ != shown_set_ && !(built_ && requested_set_ == built_set_);
         while (usedBytesLocked() + incoming > cache_limit_bytes_) {
             auto victim = cache_.end();
             for (auto it = cache_.begin(); it != cache_.end(); ++it) {
-                if (it->second.last_wanted == frame_ || std::ranges::binary_search(requested_set_, it->first))
+                if (it->second.last_wanted == frame_ ||
+                    (request_pending && std::ranges::binary_search(requested_set_, it->first)))
                     continue;
                 if (victim == cache_.end() || it->second.last_wanted < victim->second.last_wanted)
                     victim = it;
@@ -232,7 +246,18 @@ namespace lfs::vis {
                 ++release_gen_;
                 cv_.notify_all();
                 build_ms_ = build_ms;
-                if (merged && gen > installed_gen_) {
+                if (!merged) {
+                    // Forget the failed cut so the next update asks again, a little coarser.
+                    if (++merge_failures_ >= kMaxMergeAttempts)
+                        LOG_WARN("3D Tiles: {} merges failed in a row; waiting for the view or cache size to change",
+                                 merge_failures_);
+                    requested_set_.clear();
+                    sse_factor_ = std::min(sse_factor_ * kMergeFailureSseStep, kMaxSseFactor);
+                    cache_changed_ = true;
+                    if (wake_)
+                        wake_();
+                } else if (gen > installed_gen_) {
+                    merge_failures_ = 0;
                     built_bytes_ = merge_bytes;
                     built_ = std::move(merged);
                     built_set_ = std::move(set);
