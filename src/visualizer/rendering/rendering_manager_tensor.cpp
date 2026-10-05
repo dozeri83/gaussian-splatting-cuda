@@ -15,6 +15,75 @@
 #include <limits>
 
 namespace lfs::vis {
+    namespace {
+        // Same parameters as the Vulkan manager's mesh frame.
+        ViewportEnvironment environmentFor(const FrameContext& frame_ctx, const RenderSettings& settings) {
+            ViewportEnvironment environment;
+            environment.enabled = environmentBackgroundUsesTransparentViewerCompositing(settings);
+            if (!environment.enabled)
+                return environment;
+            const auto vp_data = frame_ctx.makeViewportData();
+            const auto frame_view = frame_ctx.makeFrameView();
+            environment.map_path = settings.environment_map_path;
+            environment.camera_to_world = vp_data.rotation;
+            environment.viewport_size = glm::vec2(static_cast<float>(frame_view.size.x),
+                                                  static_cast<float>(frame_view.size.y));
+            if (frame_view.intrinsics_override.has_value() && !frame_view.orthographic) {
+                const auto& intr = *frame_view.intrinsics_override;
+                environment.intrinsics = glm::vec4(intr.focal_x, intr.focal_y, intr.center_x, intr.center_y);
+            } else {
+                const auto [fx, fy] =
+                    lfs::rendering::computePixelFocalLengths(frame_view.size, frame_view.focal_length_mm);
+                environment.intrinsics = glm::vec4(fx, fy, frame_view.size.x * 0.5f, frame_view.size.y * 0.5f);
+            }
+            environment.exposure = settings.environment_exposure;
+            environment.rotation_radians = glm::radians(settings.environment_rotation_degrees);
+            environment.equirectangular_view = settings.equirectangular;
+            return environment;
+        }
+        // Same payload as the Vulkan manager's populateMeshFrame.
+        ViewportMeshPassDesc meshesFor(const FrameContext& frame_ctx, const RenderSettings& settings) {
+            ViewportMeshPassDesc frame;
+            const auto& meshes = frame_ctx.scene_state.meshes;
+            if (meshes.empty())
+                return frame;
+            const auto vp_data = frame_ctx.makeViewportData();
+            frame.view_projection = vp_data.getProjectionMatrix() * vp_data.getViewMatrix();
+            frame.camera_position = vp_data.translation;
+            const bool any_selected_mesh = std::any_of(meshes.begin(), meshes.end(),
+                                                       [](const auto& mesh) { return mesh.is_selected; });
+            const auto& selected_nodes = frame_ctx.scene_state.selected_node_mask;
+            const bool any_selected_node = std::any_of(selected_nodes.begin(), selected_nodes.end(),
+                                                       [](const bool selected) { return selected; });
+            const bool dim_non_emphasized = settings.desaturate_unselected && (any_selected_mesh || any_selected_node);
+            const glm::vec3 headlight_dir = glm::length(vp_data.translation) > 1e-6f
+                                                ? glm::normalize(vp_data.translation)
+                                                : settings.mesh_light_dir;
+            frame.items.reserve(meshes.size());
+            for (const auto& mesh : meshes) {
+                if (!mesh.mesh)
+                    continue;
+                frame.items.push_back({
+                    .mesh = mesh.mesh,
+                    .model = mesh.transform,
+                    .light_dir = headlight_dir,
+                    .light_intensity = settings.mesh_light_intensity,
+                    .ambient = settings.mesh_ambient,
+                    .backface_culling = settings.mesh_backface_culling,
+                    .is_emphasized = mesh.is_selected,
+                    .dim_non_emphasized = dim_non_emphasized,
+                    .flash_intensity = frame_ctx.selection_flash_intensity,
+                    .wireframe_overlay = settings.mesh_wireframe,
+                    .wireframe_color = settings.mesh_wireframe_color,
+                    .wireframe_width = settings.mesh_wireframe_width,
+                    .shadow_enabled = settings.mesh_shadow_enabled,
+                    .shadow_map_resolution = settings.mesh_shadow_resolution,
+                });
+            }
+            return frame;
+        }
+    } // namespace
+
     std::shared_ptr<lfs::core::Tensor> RenderingManager::composeSplitViewCpu(
         const SplitViewCpuDesc&, const glm::ivec2&) {
         // Split view is an explicit Phase 3 capability on Metal. Keeping this
@@ -210,7 +279,7 @@ namespace lfs::vis {
         const auto* model = scene_state.combined_model;
         const bool has_model = hasRenderableGaussians(model);
         const bool has_points = scene_state.point_cloud && scene_state.point_cloud->size() > 0;
-        if (!has_model && !has_points) {
+        if (!has_model && !has_points && scene_state.meshes.empty()) {
             // An empty scene is still a completed render. Leaving its invalidation
             // pending makes the frame-demand ledger repaint forever at display rate.
             view.dirty_mask_.exchange(0, std::memory_order_acq_rel);
@@ -239,6 +308,16 @@ namespace lfs::vis {
             .hovered_gaussian_id = view.viewport_overlay_service_.hoveredGaussianId(),
             .selection_flash_intensity = view.animation_state_.selectionFlashIntensity(),
         };
+
+        if (!has_model && !has_points) {
+            // Meshes only: the compositor draws them over the background.
+            view.dirty_mask_.exchange(0, std::memory_order_acq_rel);
+            clearViewportImageState(view, size);
+            view.viewport_artifact_service_.clearViewportOutput();
+            view.viewport_environment_ = environmentFor(frame_context, frame_settings);
+            view.viewport_meshes_ = meshesFor(frame_context, frame_settings);
+            return {.size = size, .matches_viewport_extent = true, .rendered = true};
+        }
 
         std::shared_ptr<lfs::core::Tensor> image;
         std::shared_ptr<lfs::core::Tensor> depth;
@@ -377,6 +456,8 @@ namespace lfs::vis {
         ++view.vulkan_viewport_image_generation_;
         view.vulkan_viewport_image_ = image;
         view.viewport_depth_image_ = depth;
+        view.viewport_environment_ = environmentFor(frame_context, frame_settings);
+        view.viewport_meshes_ = meshesFor(frame_context, frame_settings);
         view.vulkan_viewport_image_size_ = size;
         view.vulkan_viewport_image_alloc_size_ = size;
         view.vulkan_viewport_coordinate_size_ = size;

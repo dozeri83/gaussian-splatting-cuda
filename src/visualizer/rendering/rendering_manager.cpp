@@ -621,6 +621,8 @@ namespace lfs::vis {
                                                    const glm::ivec2 alloc_size) {
         view.vulkan_viewport_image_.reset();
         view.viewport_depth_image_.reset();
+        view.viewport_environment_ = {};
+        view.viewport_meshes_ = {};
         clearViewportReferenceOutput(view);
         view.vulkan_viewport_image_size_ = size;
         view.vulkan_viewport_image_alloc_size_ = alloc_size.x > 0 && alloc_size.y > 0 ? alloc_size : size;
