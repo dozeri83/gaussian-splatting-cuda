@@ -64,6 +64,8 @@ namespace lfs::io {
         [[nodiscard]] virtual std::expected<core::SplatData, std::string> load_tile(std::uint32_t tile) const = 0;
         // Source-local frame -> georeferenced frame (ECEF for 3D Tiles).
         glm::dmat4 local_to_world{1.0};
+        // Tile contents left out because they hold no supported splat data.
+        std::size_t skipped_contents = 0;
     };
 
     struct SplatTileView {

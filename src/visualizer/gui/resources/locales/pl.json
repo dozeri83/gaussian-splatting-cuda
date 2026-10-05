@@ -2722,6 +2722,7 @@
     "freeze_help": "Keep the current tiles while the camera moves, to inspect what is loaded.",
     "statistics": "Statistics",
     "stats_tiles": "Tiles: {drawn} drawn, {cached} cached, {loading} loading, {failed} failed of {total}",
+    "stats_skipped": "Pominięto {count} zawartości: brak splatów gaussowskich SPZ",
     "stats_splats": "Splats: {drawn} drawn of {full} at full detail",
     "stats_memory": "Cache: {cache} of {limit} GiB (GPU {total} GiB)",
     "stats_sse": "Max SSE in use: {sse} (raised while the view exceeds the cache)",

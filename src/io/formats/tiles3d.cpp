@@ -11,12 +11,16 @@
 #include "formats/spz.hpp"
 #include "io/splat_tile_source.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <deque>
 #include <format>
 #include <fstream>
 #include <glm/gtc/type_ptr.hpp>
+#include <map>
 #include <nlohmann/json.hpp>
+#include <numeric>
+#include <optional>
 #include <tbb/parallel_for.h>
 
 namespace lfs::io {
@@ -27,6 +31,10 @@ namespace lfs::io {
 
         constexpr std::size_t kMaxTiles = 1'000'000;
         constexpr int kMaxExternalDepth = 8;
+        // Parsing recurses per tile level; real tilesets stay far below this.
+        constexpr int kMaxTreeDepth = 128;
+        constexpr const char* kSpzPointer =
+            "/extensions/KHR_gaussian_splatting/extensions/KHR_gaussian_splatting_compression_spz_2";
         constexpr std::uint32_t kGlbMagic = 0x46546C67;     // "glTF"
         constexpr std::uint32_t kGlbChunkJson = 0x4E4F534A; // "JSON"
         constexpr std::uint32_t kMaxGlbJsonBytes = 64u << 20;
@@ -34,7 +42,7 @@ namespace lfs::io {
 
         struct ParsedTile {
             SplatTile tile;
-            fs::path content;
+            std::vector<fs::path> contents;
             std::vector<ParsedTile> children;
         };
 
@@ -108,15 +116,48 @@ namespace lfs::io {
             }
         }
 
-        std::string content_uri(const json& tile) {
+        // A tile has one `content` or (3D Tiles 1.1) several `contents`, all shown together.
+        std::vector<std::string> content_uris(const json& tile) {
+            std::vector<std::string> uris;
             if (tile.contains("content"))
-                return tile.at("content").at("uri").get<std::string>();
-            if (tile.contains("contents") && !tile.at("contents").empty()) {
-                if (tile.at("contents").size() > 1)
-                    LOG_WARN("3D Tiles: only the first of {} tile contents is used", tile.at("contents").size());
-                return tile.at("contents").at(0).at("uri").get<std::string>();
+                uris.push_back(tile.at("content").at("uri").get<std::string>());
+            if (tile.contains("contents"))
+                for (const auto& content : tile.at("contents"))
+                    uris.push_back(content.at("uri").get<std::string>());
+            return uris;
+        }
+
+        // Content URIs are relative URI references (RFC 3986): percent-encoded, possibly
+        // with a query or fragment. Only local files are supported.
+        fs::path resolve_uri(const fs::path& base, const std::string& uri) {
+            if (const auto colon = uri.find(':'); colon != std::string::npos) {
+                const auto scheme = uri.substr(0, colon);
+                if (!scheme.empty() && std::isalpha(static_cast<unsigned char>(scheme[0])) &&
+                    std::ranges::all_of(scheme, [](const char c) {
+                        return std::isalnum(static_cast<unsigned char>(c)) || c == '+' || c == '-' || c == '.';
+                    }))
+                    throw std::runtime_error(std::format(
+                        "content URI '{}' uses the '{}' scheme; only relative file URIs are supported", uri, scheme));
             }
-            return {};
+            const auto hex = [](const char c) -> int {
+                if (c >= '0' && c <= '9')
+                    return c - '0';
+                if (c >= 'a' && c <= 'f')
+                    return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F')
+                    return c - 'A' + 10;
+                return -1;
+            };
+            std::string decoded;
+            for (std::size_t i = 0; i < uri.size() && uri[i] != '?' && uri[i] != '#'; ++i) {
+                if (uri[i] == '%' && i + 2 < uri.size() && hex(uri[i + 1]) >= 0 && hex(uri[i + 2]) >= 0) {
+                    decoded.push_back(static_cast<char>(hex(uri[i + 1]) * 16 + hex(uri[i + 2])));
+                    i += 2;
+                } else {
+                    decoded.push_back(uri[i]);
+                }
+            }
+            return (base / core::utf8_to_path(decoded)).lexically_normal();
         }
 
         struct ParseContext {
@@ -125,9 +166,12 @@ namespace lfs::io {
         };
 
         ParsedTile parse_tile(const json& node, const fs::path& base, const glm::dmat4& parent_world,
-                              const bool parent_additive, ParseContext& context, const int depth) {
+                              const bool parent_additive, ParseContext& context, const int depth,
+                              const int tree_depth) {
             if (++context.tiles > kMaxTiles)
                 throw std::runtime_error(std::format("tileset exceeds {} tiles", kMaxTiles));
+            if (tree_depth > kMaxTreeDepth)
+                throw std::runtime_error(std::format("tile tree nests deeper than {} levels", kMaxTreeDepth));
             ParsedTile parsed;
             const glm::dmat4 world = parent_world * read_matrix(node);
             const glm::dmat4 to_local = context.ecef_to_local * world;
@@ -138,64 +182,113 @@ namespace lfs::io {
             tile.additive = node.contains("refine") ? node.at("refine").get<std::string>() == "ADD" : parent_additive;
             read_bounds(node.at("boundingVolume"), to_local, context.ecef_to_local, tile);
 
-            if (const auto uri = content_uri(node); !uri.empty()) {
-                const auto path = (base / core::utf8_to_path(uri)).lexically_normal();
+            for (const auto& uri : content_uris(node)) {
+                const auto path = resolve_uri(base, uri);
                 if (path.extension() == ".json") {
-                    // External tileset: its root becomes this tile's only child.
+                    // External tileset: its root becomes a child of this tile.
                     if (depth >= kMaxExternalDepth)
                         throw std::runtime_error("external tilesets nest too deeply");
                     const auto external = read_json(path);
                     parsed.children.push_back(parse_tile(external.at("root"), path.parent_path(), world,
-                                                         tile.additive, context, depth + 1));
+                                                         tile.additive, context, depth + 1, tree_depth + 1));
                 } else {
-                    parsed.content = path;
+                    parsed.contents.push_back(path);
                 }
             }
             if (node.contains("children"))
                 for (const auto& child : node.at("children"))
-                    parsed.children.push_back(parse_tile(child, base, world, tile.additive, context, depth));
+                    parsed.children.push_back(
+                        parse_tile(child, base, world, tile.additive, context, depth, tree_depth + 1));
             return parsed;
         }
 
-        // POSITION count and SH degree from the GLB JSON chunk, without reading the payload.
-        void probe_glb(const fs::path& path, SplatTile& tile) {
+        struct ContentProbe {
+            std::uint64_t splats = 0;
+            int sh_degree = 0;
+        };
+
+        // Splat count and SH degree from the GLB JSON chunk, without reading the payload.
+        // Uses the primitive the decoder reads (the first carrying SPZ-compressed Gaussian
+        // splats); empty when the content is not such a GLB (another glTF, b3dm, pnts...).
+        std::optional<ContentProbe> probe_content(const fs::path& path) {
             std::ifstream in;
+            if (!core::open_file_for_read(path, std::ios::binary, in))
+                throw std::runtime_error(std::format("Cannot open '{}'", core::path_to_utf8(path)));
             std::uint32_t header[5] = {};
-            if (!core::open_file_for_read(path, std::ios::binary, in) ||
-                !in.read(reinterpret_cast<char*>(header), sizeof(header)) ||
-                header[0] != kGlbMagic || header[4] != kGlbChunkJson || header[3] > kMaxGlbJsonBytes)
-                throw std::runtime_error(std::format("'{}' is not a glTF binary", core::path_to_utf8(path)));
+            if (!in.read(reinterpret_cast<char*>(header), sizeof(header)) || header[0] != kGlbMagic ||
+                header[4] != kGlbChunkJson || header[3] > kMaxGlbJsonBytes)
+                return std::nullopt;
             std::string text(header[3], '\0');
             if (!in.read(text.data(), static_cast<std::streamsize>(text.size())))
                 throw std::runtime_error(std::format("'{}' has a truncated JSON chunk", core::path_to_utf8(path)));
             const auto doc = json::parse(text);
+            const json::json_pointer spz(kSpzPointer);
             for (const auto& mesh : doc.value("meshes", json::array()))
                 for (const auto& primitive : mesh.value("primitives", json::array())) {
-                    const auto& attributes = primitive.value("attributes", json::object());
-                    if (!attributes.contains("POSITION"))
+                    if (!primitive.contains(spz))
                         continue;
-                    tile.splat_count = doc.at("accessors").at(attributes.at("POSITION").get<std::size_t>()).at("count").get<std::uint64_t>();
+                    const auto& attributes = primitive.value("attributes", json::object());
+                    ContentProbe probe;
+                    probe.splats = doc.at("accessors")
+                                       .at(attributes.at("POSITION").get<std::size_t>())
+                                       .at("count")
+                                       .get<std::uint64_t>();
                     for (int degree = 3; degree > 0; --degree)
                         if (attributes.contains(std::format("KHR_gaussian_splatting:SH_DEGREE_{}_COEF_0", degree))) {
-                            tile.sh_degree = degree;
+                            probe.sh_degree = degree;
                             break;
                         }
-                    return;
+                    return probe;
                 }
-            throw std::runtime_error(std::format("'{}' has no splat primitive", core::path_to_utf8(path)));
+            return std::nullopt;
+        }
+
+        // Content kind for the skipped-content summary: "GLB" or the file extension.
+        std::string content_kind(const fs::path& path) {
+            auto extension = core::path_to_utf8(path.extension());
+            std::ranges::transform(extension, extension.begin(),
+                                   [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return extension == ".glb" ? std::string("GLB") : extension.empty() ? std::string("unknown")
+                                                                                : extension;
         }
 
         class Tiles3dSource final : public SplatTileSource {
         public:
             std::vector<SplatTile> tiles_;
-            std::vector<fs::path> contents_;
+            std::vector<std::vector<fs::path>> contents_; // splat GLBs of each tile
 
             std::span<const SplatTile> tiles() const override { return tiles_; }
 
             std::expected<core::SplatData, std::string> load_tile(const std::uint32_t tile) const override {
                 if (tile >= tiles_.size() || contents_[tile].empty())
                     return std::unexpected(std::format("tile {} has no content", tile));
-                return load_spz(contents_[tile]);
+                const auto& paths = contents_[tile];
+                if (paths.size() == 1)
+                    return load_spz(paths.front());
+                // Several contents make up the tile together: concatenate them (on the GPU,
+                // where merge_splat_tiles pads lower SH degrees) into the tile's model.
+                std::vector<core::SplatData> parts;
+                parts.reserve(paths.size());
+                for (const auto& path : paths) {
+                    auto part = load_spz(path);
+                    if (!part)
+                        return std::unexpected(part.error());
+                    using core::Device;
+                    part->means_raw() = part->means_raw().to(Device::GPU);
+                    part->sh0_raw() = part->sh0_raw().to(Device::GPU);
+                    if (part->shN_raw().is_valid() && part->shN_raw().numel() > 0)
+                        part->shN_raw() = part->shN_raw().to(Device::GPU);
+                    part->scaling_raw() = part->scaling_raw().to(Device::GPU);
+                    part->rotation_raw() = part->rotation_raw().to(Device::GPU);
+                    part->opacity_raw() = part->opacity_raw().to(Device::GPU);
+                    parts.push_back(std::move(*part));
+                }
+                std::vector<std::uint32_t> indices(parts.size());
+                std::iota(indices.begin(), indices.end(), 0u);
+                auto merged = merge_splat_tiles(*this, indices, [&](const std::uint32_t i) { return &parts[i]; });
+                if (!merged)
+                    return std::unexpected(std::format("tile {} has no splats", tile));
+                return std::move(*merged);
             }
         };
 
@@ -203,7 +296,7 @@ namespace lfs::io {
         void flatten(ParsedTile& root, Tiles3dSource& source) {
             std::deque<std::pair<ParsedTile*, std::uint32_t>> queue{{&root, 0u}};
             source.tiles_.push_back(root.tile);
-            source.contents_.push_back(std::move(root.content));
+            source.contents_.push_back(std::move(root.contents));
             while (!queue.empty()) {
                 auto [parsed, self] = queue.front();
                 queue.pop_front();
@@ -213,7 +306,7 @@ namespace lfs::io {
                     child.tile.parent = self;
                     const auto child_index = static_cast<std::uint32_t>(source.tiles_.size());
                     source.tiles_.push_back(child.tile);
-                    source.contents_.push_back(std::move(child.content));
+                    source.contents_.push_back(std::move(child.contents));
                     queue.emplace_back(&child, child_index);
                 }
             }
@@ -252,26 +345,56 @@ namespace lfs::io {
             auto source = std::make_shared<Tiles3dSource>();
             source->local_to_world = read_matrix(root);
             ParseContext context{.ecef_to_local = glm::inverse(source->local_to_world)};
-            auto parsed = parse_tile(root, path.parent_path(), glm::dmat4(1.0), false, context, 0);
+            auto parsed = parse_tile(root, path.parent_path(), glm::dmat4(1.0), false, context, 0, 0);
             flatten(parsed, *source);
 
+            // Probe every content; keep only the splat GLBs. Other content (meshes, point
+            // clouds, b3dm, ...) is skipped, so a mixed tileset still shows its splats.
             std::vector<std::string> errors(source->tiles_.size());
+            std::vector<std::vector<std::string>> skipped(source->tiles_.size());
             tbb::parallel_for(std::size_t{0}, source->tiles_.size(), [&](const std::size_t i) {
-                if (source->contents_[i].empty())
-                    return;
+                auto& tile = source->tiles_[i];
+                std::vector<fs::path> splat_contents;
                 try {
-                    probe_glb(source->contents_[i], source->tiles_[i]);
+                    for (auto& content : source->contents_[i]) {
+                        if (const auto probe = probe_content(content)) {
+                            tile.splat_count += probe->splats;
+                            tile.sh_degree = std::max(tile.sh_degree, probe->sh_degree);
+                            splat_contents.push_back(std::move(content));
+                        } else {
+                            skipped[i].push_back(content_kind(content));
+                        }
+                    }
                 } catch (const std::exception& e) {
                     errors[i] = e.what();
                 }
+                source->contents_[i] = std::move(splat_contents);
             });
             for (const auto& error : errors)
                 if (!error.empty())
                     return std::unexpected(error);
 
+            std::map<std::string, std::size_t> skipped_by_kind;
+            for (const auto& kinds : skipped)
+                for (const auto& kind : kinds)
+                    ++skipped_by_kind[kind];
+            std::string skipped_summary;
+            for (const auto& [kind, count] : skipped_by_kind) {
+                source->skipped_contents += count;
+                skipped_summary += std::format("{}{} {}", skipped_summary.empty() ? "" : ", ", count, kind);
+            }
             std::uint64_t splats = 0;
             for (const auto& tile : source->tiles_)
                 splats += tile.splat_count;
+            if (splats == 0)
+                return std::unexpected(std::format(
+                    "3D Tiles tileset '{}' has no Gaussian splat content. Only glTF tiles with KHR_gaussian_splatting "
+                    "(SPZ compression) are supported{}",
+                    core::path_to_utf8(path),
+                    skipped_summary.empty() ? std::string(".") : std::format("; found {} contents.", skipped_summary)));
+            if (source->skipped_contents > 0)
+                LOG_WARN("3D Tiles '{}': skipped {} contents without SPZ Gaussian splats ({})", core::path_to_utf8(path),
+                         source->skipped_contents, skipped_summary);
             LOG_INFO("3D Tiles '{}': {} tiles, {} splats", core::path_to_utf8(path), source->tiles_.size(), splats);
             return source;
         } catch (const std::exception& e) {

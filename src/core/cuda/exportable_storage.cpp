@@ -509,7 +509,6 @@ namespace lfs::core {
             diagnostics::VramProfiler::instance().setExportableSplatBytes(holder->committed_bytes);
         }
 
-
         LOG_INFO("Exportable CUDA block: device_ptr={} committed={} MiB reserved={} MiB granularity={} chunks={}",
                  holder->device_ptr,
                  holder->committed_bytes >> 20,

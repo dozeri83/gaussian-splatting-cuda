@@ -85,6 +85,8 @@ class Tiles3dPanel(Panel):
         ui.heading(_tr("statistics"))
         ui.label(_tr("stats_tiles", drawn=stats["drawn_tiles"], cached=stats["cached_tiles"],
                      loading=stats["loading_tiles"], failed=stats["failed_tiles"], total=stats["tiles"]))
+        if stats.get("skipped_contents", 0):
+            ui.text_disabled(_tr("stats_skipped", count=stats["skipped_contents"]))
         ui.label(_tr("stats_splats", drawn=_count(stats["drawn_splats"]),
                      full=_count(stats["full_detail_splats"])))
         ui.label(_tr("stats_memory", cache=_gib(stats["cache_bytes"]), drawn=_gib(stats["drawn_bytes"]),

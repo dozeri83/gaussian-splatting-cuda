@@ -254,6 +254,7 @@ namespace lfs::vis {
                                  .drawn_tiles = shown_set_.size(),
                                  .cached_tiles = cache_.size(),
                                  .failed_tiles = failed_.size(),
+                                 .skipped_contents = source_->skipped_contents,
                                  .full_detail_splats = full_detail_splats_,
                                  .cache_bytes = cache_bytes_,
                                  .drawn_bytes = drawn_bytes_ + building_bytes_ + (built_ ? built_bytes_ : 0),

@@ -1514,6 +1514,7 @@ namespace lfs::python {
         result["cached_tiles"] = stats->cached_tiles;
         result["loading_tiles"] = stats->loading_tiles;
         result["failed_tiles"] = stats->failed_tiles;
+        result["skipped_contents"] = stats->skipped_contents;
         result["drawn_splats"] = stats->drawn_splats;
         result["full_detail_splats"] = stats->full_detail_splats;
         result["cache_bytes"] = stats->cache_bytes;

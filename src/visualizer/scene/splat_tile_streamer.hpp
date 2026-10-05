@@ -38,6 +38,7 @@ namespace lfs::vis {
         std::size_t cached_tiles = 0;
         std::size_t loading_tiles = 0;
         std::size_t failed_tiles = 0;
+        std::size_t skipped_contents = 0; // contents without supported splat data
         std::uint64_t drawn_splats = 0;
         std::uint64_t full_detail_splats = 0;
         std::uint64_t cache_bytes = 0;
