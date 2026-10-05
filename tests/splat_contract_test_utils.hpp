@@ -59,8 +59,8 @@ namespace lfs::test::splat {
     }
 
     inline rendering::SplatRasterParameters raster_parameters(uint32_t count, uint32_t width, uint32_t height,
-                                                               rendering::SplatRasterMode mode, uint32_t capacity,
-                                                               uint32_t flags = 0, std::array<float, 4> background = {}) {
+                                                              rendering::SplatRasterMode mode, uint32_t capacity,
+                                                              uint32_t flags = 0, std::array<float, 4> background = {}) {
         rendering::SplatRasterParameters r;
         r.count = count;
         r.width = width;

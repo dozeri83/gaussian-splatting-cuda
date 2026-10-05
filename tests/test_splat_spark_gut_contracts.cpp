@@ -13,7 +13,8 @@ namespace {
     class SplatSparkGutContracts : public testing::TestWithParam<GpuBackend> {};
 
     TEST_P(SplatSparkGutContracts, RayDensityAndLodWeightMatchIndependentOracle) {
-        if (backend_unavailable_or_cuda(GetParam())) GTEST_SKIP();
+        if (backend_unavailable_or_cuda(GetParam()))
+            GTEST_SKIP();
         const GpuBackendScope scope(GetParam());
         const std::array<float, 3> means{0, 0, 3}, scales{std::log(.18f), std::log(.18f), std::log(.18f)};
         const std::array<float, 4> rotation{1, 0, 0, 0};
@@ -48,7 +49,10 @@ namespace {
                             SplatLodCut cut{&indices, &logical, nullptr, &lod_weight, nullptr, 1, false, 128};
                             ASSERT_TRUE(projector.project(source, camera, 0, SplatPrimitive::Gut, false, projected, &gut, nullptr, &cut));
                             auto raster = raster_parameters(1, width, height, SplatRasterMode::Gut, 256, 16 | 8);
-                            raster.intrinsics = camera.intrinsics; raster.clip = camera.clip_scale; raster.camera = camera.extent; raster.panorama = camera.panorama;
+                            raster.intrinsics = camera.intrinsics;
+                            raster.clip = camera.clip_scale;
+                            raster.camera = camera.extent;
+                            raster.panorama = camera.panorama;
                             const SplatRasterLogical logical_map{&logical, 128};
                             ASSERT_TRUE(rasterizer.rasterize(projected, &gut, 1, SplatRasterMode::Gut, raster, nullptr, &logical_map));
                             const auto actual = readback(rasterizer, width, height);
@@ -69,7 +73,8 @@ namespace {
                                         if (camera_model == 2) {
                                             const double longitude = ((x + .5) / width - .5) * 2 * M_PI;
                                             const double latitude = ((y + .5) / height - .5) * M_PI;
-                                            z = std::cos(latitude) * std::cos(longitude); forward = z > 0;
+                                            z = std::cos(latitude) * std::cos(longitude);
+                                            forward = z > 0;
                                         } else {
                                             const double px = (x + .5 - .5 * width) / 64, py = (y + .5 - .5 * height) / 64;
                                             z = 1 / std::sqrt(1 + px * px + py * py);
@@ -77,9 +82,11 @@ namespace {
                                         distance2 = 9 * (1 - z * z) / (.18 * .18);
                                     }
                                     const double value = std::exp(-.5 * distance2);
-                                    double expected = !forward || .5 * distance2 > power ? 0 : density ? -std::expm1(density * std::log1p(-value)) : effective * value;
+                                    double expected = !forward || .5 * distance2 > power ? 0 : density ? -std::expm1(density * std::log1p(-value))
+                                                                                                       : effective * value;
                                     expected = std::min(expected, double(.999f));
-                                    if (expected < .5 / 255) expected = 0;
+                                    if (expected < .5 / 255)
+                                        expected = 0;
                                     const size_t at = (size_t(y) * width + x) * 4;
                                     EXPECT_NEAR(half_to_float(actual.color[at + 3]), expected, .0022) << "pixel=" << x << ',' << y << " q=" << distance2;
                                     EXPECT_NEAR(half_to_float(actual.color[at]), expected * .8, .0022);

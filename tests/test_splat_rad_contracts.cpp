@@ -17,7 +17,8 @@ namespace {
     class SplatRadContracts : public testing::TestWithParam<GpuBackend> {
     protected:
         void SetUp() override {
-            if (backend_unavailable_or_cuda(GetParam())) GTEST_SKIP();
+            if (backend_unavailable_or_cuda(GetParam()))
+                GTEST_SKIP();
             scope_ = std::make_unique<GpuBackendScope>(GetParam());
         }
         std::unique_ptr<GpuBackendScope> scope_;
@@ -28,7 +29,9 @@ namespace {
         std::vector<float> xyz(count * 3);
         std::vector<uint16_t> rgb(count * 4), scales(count * 4), rotation(count * 4), alpha(count);
         for (uint32_t n = 0; n < count; ++n) {
-            xyz[n * 3 + 2] = 3; alpha[n] = float_to_half(1); rotation[n * 4] = float_to_half(1);
+            xyz[n * 3 + 2] = 3;
+            alpha[n] = float_to_half(1);
+            rotation[n * 4] = float_to_half(1);
             for (uint32_t c = 0; c < 3; ++c) {
                 scales[n * 4 + c] = float_to_half(-3);
                 rgb[n * 4 + c] = float_to_half(float(int((n + c) % 7) - 3) / 8);
@@ -36,9 +39,12 @@ namespace {
             rgb[n * 4 + 3] = scales[n * 4 + 3] = float_to_half(NAN);
         }
         std::array<std::array<float, 4>, 12> frames{};
-        for (uint32_t p = 0; p < 3; ++p) frames[p * 4] = {.25f * (p + 1), .5f * (p + 1), .75f * (p + 1), NAN};
+        for (uint32_t p = 0; p < 3; ++p)
+            frames[p * 4] = {.25f * (p + 1), .5f * (p + 1), .75f * (p + 1), NAN};
         auto means = upload(xyz), sh0 = upload(rgb), scale = upload(scales), quat = upload(rotation), opacity = upload(alpha), bounds = upload(frames);
-        auto view = projection(32, 32); view.intrinsics = {40, 40, 16, 16}; view.clip_scale = {.01f, 100, 1, .3f};
+        auto view = projection(32, 32);
+        view.intrinsics = {40, 40, 16, 16};
+        view.clip_scale = {.01f, 100, 1, .3f};
         auto output = Tensor::empty({size_t(count) * 64}, Device::GPU, DataType::UInt8);
         auto geometry = Tensor::empty({size_t(count) * 64}, Device::GPU, DataType::UInt8);
         const auto code = [](uint32_t n, uint32_t c) { return int8_t(int((n + c) % 3) * 127 - 127); };
@@ -53,7 +59,8 @@ namespace {
             SplatSources source{&means, &scale, &quat, &opacity, &sh0, &rest_tensor, &bounds, nullptr,
                                 count, rest, SplatShStorage::RadSigned8, true, 0, page};
             for (uint32_t degree = 0; degree <= 3; ++degree) {
-                if ((degree + 1) * (degree + 1) - 1 > rest) continue;
+                if ((degree + 1) * (degree + 1) - 1 > rest)
+                    continue;
                 for (auto primitive : {SplatPrimitive::Gaussian, SplatPrimitive::Points, SplatPrimitive::Discs, SplatPrimitive::Gut}) {
                     ASSERT_TRUE(projector.project(source, view, degree, primitive, false, output,
                                                   primitive == SplatPrimitive::Gut ? &geometry : nullptr));
@@ -63,13 +70,17 @@ namespace {
                         ASSERT_GT(result[n].bounds[2], result[n].bounds[0]);
                         for (uint32_t c = 0; c < 3; ++c) {
                             const auto coefficient = [&](uint32_t k) {
-                                const uint32_t component = k * 3 + c, band = component < 9 ? 0 : component < 24 ? 1 : 2;
+                                const uint32_t component = k * 3 + c, band = component < 9 ? 0 : component < 24 ? 1
+                                                                                                                : 2;
                                 return double(code(n, component)) / 127 * frames[(n / page) * 4][band];
                             };
                             double expected = .5 + .2820947917738781 * half_to_float(rgb[n * 4 + c]);
-                            if (degree >= 1) expected += std::sqrt(3. / (4 * M_PI)) * coefficient(1);
-                            if (degree >= 2) expected += std::sqrt(5. / (4 * M_PI)) * coefficient(5);
-                            if (degree >= 3) expected += std::sqrt(7. / (4 * M_PI)) * coefficient(11);
+                            if (degree >= 1)
+                                expected += std::sqrt(3. / (4 * M_PI)) * coefficient(1);
+                            if (degree >= 2)
+                                expected += std::sqrt(5. / (4 * M_PI)) * coefficient(5);
+                            if (degree >= 3)
+                                expected += std::sqrt(7. / (4 * M_PI)) * coefficient(11);
                             EXPECT_NEAR(result[n].color[c], std::max(0., expected), 2e-6);
                         }
                         EXPECT_NEAR(result[n].conic_opacity[3], 1.f / (1 + std::exp(-1.f)), 1e-6);
@@ -92,13 +103,16 @@ namespace {
                     const uint32_t physical = indices[n];
                     double expected = .5 + .2820947917738781 * half_to_float(rgb[physical * 4]);
                     for (const auto [k, basis] : std::array<std::pair<uint32_t, double>, 3>{{{1, std::sqrt(3. / (4 * M_PI))}, {5, std::sqrt(5. / (4 * M_PI))}, {11, std::sqrt(7. / (4 * M_PI))}}}) {
-                        const uint32_t component = k * 3, band = component < 9 ? 0 : component < 24 ? 1 : 2;
+                        const uint32_t component = k * 3, band = component < 9 ? 0 : component < 24 ? 1
+                                                                                                    : 2;
                         expected += basis * double(code(physical, component)) / 127 * frames[(physical / page) * 4][band];
                     }
                     EXPECT_NEAR(selected[n].color[0], std::max(0., expected), 2e-6);
                 }
-                const std::array<uint8_t, 3> deleted{1, 0, 0}; auto mask = upload(deleted);
-                source.deleted = &mask; source.deleted_count = 3;
+                const std::array<uint8_t, 3> deleted{1, 0, 0};
+                auto mask = upload(deleted);
+                source.deleted = &mask;
+                source.deleted_count = 3;
                 ASSERT_TRUE(projector.project(source, view, 3, SplatPrimitive::Gaussian, false, output, nullptr, nullptr, &cut));
                 selected = download<ProjectedSplat>(output, indices.size());
                 for (size_t n = 0; n < logical_ids.size(); ++n)
@@ -119,33 +133,44 @@ namespace {
         constexpr uint32_t n = 131, page_size = 64, capacity = 192;
         std::vector<float> xyz(n * 3), rgb(n * 3), scales(n * 3, -3), rotation(n * 4), opacity(n, 1), rest(n * 45);
         for (uint32_t s = 0; s < n; ++s) {
-            xyz[s * 3 + 2] = 3; rotation[s * 4] = 1;
-            for (uint32_t c = 0; c < 3; ++c) rgb[s * 3 + c] = float(int((s + c) % 7) - 3) / 8;
-            for (uint32_t c = 0; c < 45; ++c) rest[(size_t(s) * 15 + c / 3) * 3 + c % 3] = float(int((s + c) % 13) - 6) * .01f;
+            xyz[s * 3 + 2] = 3;
+            rotation[s * 4] = 1;
+            for (uint32_t c = 0; c < 3; ++c)
+                rgb[s * 3 + c] = float(int((s + c) % 7) - 3) / 8;
+            for (uint32_t c = 0; c < 45; ++c)
+                rest[(size_t(s) * 15 + c / 3) * 3 + c % 3] = float(int((s + c) % 13) - 6) * .01f;
         }
         for (int degree : {0, 3}) {
             SplatData model(degree, Tensor::from_vector(xyz, {n, 3}, Device::GPU), Tensor::from_vector(rgb, {n, 1, 3}, Device::GPU),
                             degree ? Tensor::from_vector(rest, {n, 15, 3}, Device::GPU) : Tensor{}, Tensor::from_vector(scales, {n, 3}, Device::GPU),
                             Tensor::from_vector(rotation, {n, 4}, Device::GPU), Tensor::from_vector(opacity, {n, 1}, Device::GPU), 1.f);
-            if (degree) (void)model.apply_shN_value_quant();
+            if (degree)
+                (void)model.apply_shN_value_quant();
             ASSERT_TRUE(!degree || model.shN_value_quantized());
-            RadPagePool pool; pool.page_splats = page_size; pool.sh_slots = degree ? 12 : 0;
+            RadPagePool pool;
+            pool.page_splats = page_size;
+            pool.sh_slots = degree ? 12 : 0;
             const std::array<size_t, 7> sizes{capacity * 12, capacity * 8, size_t(capacity) * pool.sh_slots * 4,
-                                               capacity * 8, capacity * 8, capacity * 2, 3 * 64};
+                                              capacity * 8, capacity * 8, capacity * 2, 3 * 64};
             for (size_t r = 0; r < sizes.size(); ++r)
-                if (sizes[r]) pool.regions[r] = Tensor::empty({sizes[r]}, Device::GPU, DataType::UInt8);
+                if (sizes[r])
+                    pool.regions[r] = Tensor::empty({sizes[r]}, Device::GPU, DataType::UInt8);
             for (uint32_t page = 0; page < 3; ++page) {
                 RadPageSources page_source{model.means_raw(), model.sh0_raw(), degree ? model.shN_raw() : Tensor{}, model.rotation_raw(), model.scaling_raw(), model.opacity_raw(),
                                            degree ? model.shN_value_bounds() : Tensor{}, page * page_size, std::min(page_size, n - page * page_size), degree ? 15u : 0u, bool(degree)};
                 rad_page_quantize(page_source, pool, page);
             }
             std::array<Tensor, 7> snapshot;
-            for (size_t r = 0; r < sizes.size(); ++r) if (sizes[r]) snapshot[r] = pool.regions[r].clone();
+            for (size_t r = 0; r < sizes.size(); ++r)
+                if (sizes[r])
+                    snapshot[r] = pool.regions[r].clone();
             SplatSources source{&pool.regions[0], &pool.regions[4], &pool.regions[3], &pool.regions[5], &pool.regions[1],
                                 degree ? &pool.regions[2] : nullptr, degree ? &pool.regions[6] : nullptr, nullptr,
                                 capacity, degree ? 15u : 0u, SplatShStorage::RadSigned8, true, 0, page_size};
             auto output = Tensor::empty({size_t(capacity) * 64}, Device::GPU, DataType::UInt8);
-            auto view = projection(32, 32); view.intrinsics = {40, 40, 16, 16}; view.clip_scale = {.01f, 100, 1, .3f};
+            auto view = projection(32, 32);
+            view.intrinsics = {40, 40, 16, 16};
+            view.clip_scale = {.01f, 100, 1, .3f};
             SplatProjector projector(GetParam());
             ASSERT_TRUE(projector.project(source, view, degree, SplatPrimitive::Gaussian, false, output));
             pool.regions[1].zero_();
@@ -155,12 +180,14 @@ namespace {
             const auto frames = degree ? download<float>(snapshot[6], sizes[6] / 4) : std::vector<float>{};
             for (uint32_t s = 0; s < capacity; ++s) {
                 EXPECT_EQ(result[s].bounds[2] > result[s].bounds[0], s < n);
-                if (s >= n) continue;
+                if (s >= n)
+                    continue;
                 for (uint32_t c = 0; c < 3; ++c) {
                     double expected = .5 + .2820947917738781 * half_to_float(dc[s * 4 + c]);
                     if (degree)
                         for (const auto [k, basis] : std::array<std::pair<uint32_t, double>, 3>{{{1, std::sqrt(3. / (4 * M_PI))}, {5, std::sqrt(5. / (4 * M_PI))}, {11, std::sqrt(7. / (4 * M_PI))}}}) {
-                            const uint32_t component = k * 3 + c, band = component < 9 ? 0 : component < 24 ? 1 : 2;
+                            const uint32_t component = k * 3 + c, band = component < 9 ? 0 : component < 24 ? 1
+                                                                                                            : 2;
                             const size_t at = (size_t(s / 32) * pool.sh_slots * 32 + (component / 4) * 32 + s % 32) * 4 + component % 4;
                             expected += basis * double(codes[at]) / 127 * frames[(s / page_size) * 16 + band];
                         }

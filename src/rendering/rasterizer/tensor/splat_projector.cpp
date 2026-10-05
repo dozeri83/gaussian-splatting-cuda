@@ -27,9 +27,9 @@ namespace lfs::rendering {
 
         lfs::Result<void> failure(std::string detail) {
             return lfs::Result<void>::failure(make_error({.code = ErrorCode::InvalidArgument,
-                                                     .domain = ErrorDomain::Rendering,
-                                                     .detail = std::move(detail),
-                                                     .detection = LFS_SOURCE_SITE_CURRENT()}));
+                                                          .domain = ErrorDomain::Rendering,
+                                                          .detail = std::move(detail),
+                                                          .detection = LFS_SOURCE_SITE_CURRENT()}));
         }
     } // namespace
 
@@ -54,8 +54,8 @@ namespace lfs::rendering {
     SplatProjector::~SplatProjector() = default;
 
     lfs::Result<void> SplatProjector::project(const SplatSources& in, const SplatProjection& projection, const uint32_t degree,
-                                         const SplatPrimitive primitive, const bool tight_bounds, Tensor& projected, Tensor* gut,
-                                         const SplatOverlayInputs* overlay, const SplatLodCut* lod) {
+                                              const SplatPrimitive primitive, const bool tight_bounds, Tensor& projected, Tensor* gut,
+                                              const SplatOverlayInputs* overlay, const SplatLodCut* lod) {
         auto& s = *impl_;
         const auto draw_count = lod ? lod->size : in.count;
         const auto cut_array = [&](const Tensor* tensor) { return !tensor || tensor->bytes() >= size_t(draw_count) * 4; };
@@ -100,8 +100,7 @@ namespace lfs::rendering {
         }
 
         const auto when = [overlay](const Tensor& tensor) { return overlay ? &tensor : nullptr; };
-        const Parameters parameters{.sh_storage = uint32_t(in.storage), .sh_degree = degree,
-                                    .primitive_mode = uint32_t(primitive), .tight_bounds = tight_bounds ? 1u : 0u};
+        const Parameters parameters{.sh_storage = uint32_t(in.storage), .sh_degree = degree, .primitive_mode = uint32_t(primitive), .tight_bounds = tight_bounds ? 1u : 0u};
         const std::array bindings{
             M::Binding{0, in.means}, M::Binding{8, in.scales}, M::Binding{16, in.rotations}, M::Binding{24, in.opacity},
             M::Binding{32, in.sh0}, M::Binding{40, degree ? in.sh_rest : nullptr},

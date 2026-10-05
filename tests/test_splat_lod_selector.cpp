@@ -41,7 +41,7 @@ namespace {
                                                 0, 0, 1, 0, 0, 1, 0, 0, 2, 0, 0, 2};
         for (int scenario = 0; scenario < 10; ++scenario) {
             SCOPED_TRACE(scenario);
-            const std::array<float, 7> sizes = scenario == 3 ? std::array<float, 7>{.05f, 1, 1, .02f, .02f, .02f, .02f}
+            const std::array<float, 7> sizes = scenario == 3   ? std::array<float, 7>{.05f, 1, 1, .02f, .02f, .02f, .02f}
                                                : scenario == 4 ? std::array<float, 7>{.525f, .1f, .1f, .02f, .02f, .02f, .02f}
                                                                : std::array<float, 7>{1, .1f, .1f, .02f, .02f, .02f, .02f};
             std::array<uint32_t, 14> bounds{};
@@ -113,12 +113,12 @@ namespace {
             const auto levels = download<uint32_t>(selector.levels(), count);
             auto actual = ids;
             std::sort(actual.begin(), actual.end());
-            const std::vector<uint32_t> expected = scenario == 7 ? std::vector<uint32_t>{1, 2, 3, 4, 5, 6}
-                                                    : scenario == 8 ? std::vector<uint32_t>{2, 3, 4}
-                                                    : scenario == 0 || scenario == 3 || scenario == 5 || scenario == 9 ? std::vector<uint32_t>{0}
-                                                    : scenario == 2                                                    ? std::vector<uint32_t>{3, 4, 5, 6}
-                                                    : scenario == 4                                                    ? std::vector<uint32_t>{0, 1, 2}
-                                                                                                                       : std::vector<uint32_t>{1, 2};
+            const std::vector<uint32_t> expected = scenario == 7                                                      ? std::vector<uint32_t>{1, 2, 3, 4, 5, 6}
+                                                   : scenario == 8                                                    ? std::vector<uint32_t>{2, 3, 4}
+                                                   : scenario == 0 || scenario == 3 || scenario == 5 || scenario == 9 ? std::vector<uint32_t>{0}
+                                                   : scenario == 2                                                    ? std::vector<uint32_t>{3, 4, 5, 6}
+                                                   : scenario == 4                                                    ? std::vector<uint32_t>{0, 1, 2}
+                                                                                                                      : std::vector<uint32_t>{1, 2};
             EXPECT_EQ(actual, expected);
             EXPECT_EQ(logical, ids);
             EXPECT_EQ(levels, std::vector<uint32_t>(count, 0u));
