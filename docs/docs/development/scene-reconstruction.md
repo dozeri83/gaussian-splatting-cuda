@@ -19,6 +19,8 @@ The built-in registry exposes:
 | `native` | Off | `native` (1.0) | None |
 | `spatial` | Spatial | `quality` (0.75), `balanced` (0.67), `performance` (0.50) | None |
 | `temporal` | Temporal | `quality` (0.75), `balanced` (0.67), `performance` (0.50) | Depth, motion, jitter and per-view color/depth history |
+| `metalfx_spatial` | Apple MetalFX Spatial (native Metal) | `quality` (2/3), `balanced` (1/1.7), `performance` (0.50) | None |
+| `metalfx_temporal` | Apple MetalFX Temporal (native Metal) | `quality` (2/3), `balanced` (1/1.7), `performance` (0.50) | Depth, motion and jitter; history is owned by the MetalFX feature |
 | `amd-fsr3` | AMD FSR 3.1 (optional) | `quality` (2/3), `balanced` (1/1.7), `performance` (0.50) | Depth, motion and jitter; history is owned by the FidelityFX feature |
 
 The renderer's existing `render_scale` remains the base scene scale. A selected
@@ -84,6 +86,86 @@ frames and then releases the per-view color and depth history allocations. The
 immutable compute-pipeline state remains available for a later Temporal
 selection, avoiding persistent history VRAM without paying full pipeline
 creation cost on every backend switch.
+
+## Native Metal window presentation
+
+The native compositor produces a final RGBA8 tensor. `MetalGraphicsContext`
+presents it with a fullscreen-triangle render pass: the fragment shader reads
+the tensor buffer and writes to the `CAMetalLayer` drawable as a color attachment.
+The layer therefore keeps `framebufferOnly = YES`; tensor compute stays in buffers.
+Apple specifies that
+[framebuffer-only textures](https://developer.apple.com/documentation/metal/mtltexture/isframebufferonly)
+can only be render-pass attachments and cannot be bound as texture arguments to
+compute, blit, or render encoders. A compute-based final conversion would require
+[CAMetalLayer.framebufferOnly](https://developer.apple.com/documentation/quartzcore/cametallayer/framebufferonly)
+to be disabled. The render-pass presentation avoids that incompatible usage.
+
+Validate native window presentation with Metal API Validation and the displayed
+window. The internal window-capture API reads the composited tensor before the
+drawable conversion: a correct capture does not prove that screen presentation
+is correct. The incompatible framebuffer-only compute path can show a solid
+magenta window despite a correct internal capture.
+
+## Native Metal reconstruction
+
+Apple builds with Metal graphics expose `metalfx_spatial` and
+`metalfx_temporal` only when the system GPU supports the corresponding MetalFX
+scaler. Both support queries are cached once per process. These are
+framework-backed built-ins, not Vulkan provider modules.
+They do not require the FidelityFX SDK, CUDA, MoltenVK, or Vulkan headers.
+Vulkan graphics builds retain FSR through their existing provider ABI; they do
+not advertise MetalFX. Preferences and Python/MCP use the same registry and
+requested/effective/fallback contract for both graphics APIs.
+
+The existing `spatial` and `temporal` modes execute their common Slang kernels
+on Metal tensors. They retain the original presets and reconstruction math.
+Temporal reconstruction supports perspective and orthographic Gaussian views
+and PLY comparison, with independent main/left/right histories for each
+viewport owner. Calibrated/cropped panels derive motion from crop-local
+intrinsics. Ground-truth comparison, panorama, appearance correction, and
+point-cloud temporal requests report `unsupported_mode` and remain native.
+MetalFX Spatial also reconstructs regular Gaussian and point-cloud views and
+PLY panels. GT comparison keeps its existing full-resolution reference/display
+path; no MetalFX work is applied to the reference image.
+
+MetalFX uses RGBA16Float color/output textures, R32Float non-reversed raster
+depth, and RG32Float current-to-previous motion in top-left render pixels.
+The shared motion kernel uses unjittered camera matrices. Raster jitter is
+passed separately in render pixels; macOS 26 does not need the newer
+jittered-motion descriptor option. View-space depth is converted on the GPU.
+MetalFX writes opaque alpha, so output conversion restores scene coverage by
+bilinearly sampling the current color alpha at jitter-corrected coordinates.
+Coverage is not reconstructed by MetalFX's internal temporal history.
+
+Texture packing, view-depth conversion and output unpacking use a single-source
+Slang program dispatched through `GpuKernelModule`. It writes padded
+RGBA16F/R32F/RG32F byte layouts into reusable tensors; the native MetalFX code
+only creates scaler objects and blits buffers to textures and back through
+`MetalTensorReader::submitWrites`. The shared GPU timeline orders both kernel
+dispatches around scaler execution. Input snapshots, output storage and the
+feature are retained through command completion; resize and release do not
+wait on the CPU. Tensor consumers wait through the existing GPU timeline.
+Each feature retains its conversion buffers, motion tensor and a bounded pool
+of two Float32 RGBA outputs. Released outputs are reused; if callers retain both,
+an uncached output preserves those frames. Basic tensor Temporal keeps two
+independent depth buffers per view and copies into the idle buffer, so raster
+reuse cannot overwrite history. A feature is recreated when extents change. Camera cuts, scene/backend/preset
+changes, projection/crop changes and explicit resets invalidate only the
+corresponding temporal history. Ineligible modes release history. Encoding
+failures retain the last complete frame and then fall back to native; changing
+the backend or preset permits a retry. Asynchronous GPU write failures use the
+existing sticky tensor failure contract.
+
+This remains a viewport stage. The existing offline video preflight contract
+does not execute FSR or MetalFX in the export worker.
+
+GPU regression target: `metal_scene_upscaler_contracts`. It covers native
+producer/consumer ordering, alpha, independent panels/owners, crop calibration,
+jitter, reset reasons, resize, destruction with pending work, retained/recycled
+outputs, padded UInt8 rows with flipped coverage, reused depth and invalid inputs.
+The same target includes shared tracker/coordinator/registry contracts and
+basic Metal spatial/temporal checks. Existing `tensor_rasterizer_contracts`
+provide CPU-oracle and image-convergence coverage for the basic kernels.
 
 ## Optional reconstruction providers
 

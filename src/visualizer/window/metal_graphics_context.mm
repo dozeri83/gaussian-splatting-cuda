@@ -191,6 +191,9 @@ namespace lfs::vis {
                 impl_->layer.device = impl_->reader->device();
                 impl_->layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
                 // The drawable is only a render attachment; tensor compute stays in buffers.
+                // Apple restricts framebuffer-only textures to render-pass attachments:
+                // https://developer.apple.com/documentation/metal/mtltexture/isframebufferonly
+                // https://developer.apple.com/documentation/quartzcore/cametallayer/framebufferonly
                 impl_->layer.framebufferOnly = YES;
                 impl_->layer.maximumDrawableCount = kFramesInFlight;
                 impl_->layer.allowsNextDrawableTimeout = YES;
