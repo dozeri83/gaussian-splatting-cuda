@@ -49,14 +49,26 @@ namespace lfs::vis {
         std::size_t load_workers = 0; // tile decode/upload threads currently running
     };
 
+    // Blocks until every retired streamer's workers have exited. Workers can be in the
+    // middle of a tile decode or a merge when their streamer is released; call this
+    // before the GPU backend goes away (application shutdown).
+    void wait_for_retired_tile_workers();
+
     // View-dependent streaming of a SplatTileSource into one scene node. The main
     // thread selects tiles; a worker loads them into a GPU LRU cache and merges
     // the render set into a renderer-ready model for the caller to swap in.
     class SplatTileStreamer {
     public:
+        // Releasing a Handle retires the streamer without waiting: its workers stop after
+        // their current job and the last one to exit frees the streamer.
+        struct Retire {
+            void operator()(SplatTileStreamer* streamer) const;
+        };
+        using Handle = std::unique_ptr<SplatTileStreamer, Retire>;
+
         // The node initially shows the source's coarsest cut (see Tiles3dLoader).
-        SplatTileStreamer(std::shared_ptr<const io::SplatTileSource> source,
-                          core::SplatTensorAllocator allocator);
+        [[nodiscard]] static Handle create(std::shared_ptr<const io::SplatTileSource> source,
+                                           core::SplatTensorAllocator allocator);
         ~SplatTileStreamer();
         SplatTileStreamer(const SplatTileStreamer&) = delete;
         SplatTileStreamer& operator=(const SplatTileStreamer&) = delete;
@@ -76,9 +88,12 @@ namespace lfs::vis {
             std::uint64_t last_wanted = 0;
         };
 
+        SplatTileStreamer(std::shared_ptr<const io::SplatTileSource> source,
+                          core::SplatTensorAllocator allocator);
+
         void work(const std::stop_token& stop);
-        // Grows or shrinks the decode-worker pool to `count` (at least one). Main thread,
-        // called without the mutex held because shrinking joins the retired threads.
+        // Grows or shrinks the decode-worker pool to `count` (at least one). Main thread;
+        // retired workers are stopped and detached, never joined.
         void resizeWorkers(std::size_t count);
         // Releases least recently wanted tiles until `incoming` more bytes fit the limit.
         void evictLocked(std::uint64_t incoming = 0);
@@ -128,6 +143,9 @@ namespace lfs::vis {
         std::vector<std::uint32_t> requested_set_;
         io::SplatTileView last_view_{};
 
+        // Workers each hold a reference, so the streamer outlives its released Handle until
+        // they exit; this one is the Handle's, dropped on retirement.
+        std::shared_ptr<SplatTileStreamer> self_;
         std::vector<std::jthread> workers_;
     };
 

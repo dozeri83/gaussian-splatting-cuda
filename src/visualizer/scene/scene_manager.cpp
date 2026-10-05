@@ -488,6 +488,10 @@ namespace lfs::vis {
             consolidated_compaction_thread_.request_stop();
             consolidated_compaction_thread_.join();
         }
+        // Tile workers may still be decoding or merging; they must be gone before the
+        // GPU backend shuts down.
+        tile_streamers_.clear();
+        wait_for_retired_tile_workers();
         clearMeshCpuCache();
     }
 
@@ -569,7 +573,7 @@ namespace lfs::vis {
 
     void SceneManager::attachTileStream(const core::Uuid& node, std::shared_ptr<const io::SplatTileSource> source,
                                         std::filesystem::path path) {
-        tile_streamers_[node] = std::make_unique<SplatTileStreamer>(std::move(source), makeViewerSplatTensorAllocator());
+        tile_streamers_[node] = SplatTileStreamer::create(std::move(source), makeViewerSplatTensorAllocator());
         tile_stream_paths_[node] = std::move(path);
         auto* const scene_node = scene_.getNodeByUuid(node);
         tile_stream_models_[node] = scene_node ? scene_node->model.get() : nullptr;

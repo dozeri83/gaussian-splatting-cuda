@@ -425,7 +425,8 @@ namespace lfs::vis {
         // Durable splat identity to source path. Display-name adapters above
         // resolve to UUID at the API boundary.
         std::unordered_map<core::Uuid, std::filesystem::path> splat_paths_;
-        std::unordered_map<core::Uuid, std::unique_ptr<SplatTileStreamer>> tile_streamers_;
+        // Erasing a streamer retires it without waiting for its workers.
+        std::unordered_map<core::Uuid, SplatTileStreamer::Handle> tile_streamers_;
         std::unordered_map<core::Uuid, std::filesystem::path> tile_stream_paths_;
         // Model each streamer last installed; any other model means the node was replaced.
         std::unordered_map<core::Uuid, const core::SplatData*> tile_stream_models_;

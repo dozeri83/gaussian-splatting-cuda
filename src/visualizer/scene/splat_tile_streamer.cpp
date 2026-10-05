@@ -81,6 +81,42 @@ namespace lfs::vis {
         return std::clamp<std::size_t>(cores / 4, 2, 4);
     }
 
+    namespace {
+        // Workers of every streamer, counted from launch until their last reference to the
+        // streamer is gone, so shutdown can wait for retired ones.
+        std::mutex live_workers_mutex;
+        std::condition_variable live_workers_cv;
+        std::size_t live_workers = 0;
+    } // namespace
+
+    void wait_for_retired_tile_workers() {
+        std::unique_lock lock(live_workers_mutex);
+        live_workers_cv.wait(lock, [] { return live_workers == 0; });
+    }
+
+    SplatTileStreamer::Handle SplatTileStreamer::create(std::shared_ptr<const io::SplatTileSource> source,
+                                                        core::SplatTensorAllocator allocator) {
+        std::shared_ptr<SplatTileStreamer> streamer(new SplatTileStreamer(std::move(source), std::move(allocator)));
+        streamer->self_ = streamer;
+        return Handle(streamer.get());
+    }
+
+    void SplatTileStreamer::Retire::operator()(SplatTileStreamer* const streamer) const {
+        {
+            // Workers must not call back into the viewer once the owner let go.
+            std::lock_guard lock(streamer->mutex_);
+            streamer->wake_ = nullptr;
+        }
+        for (auto& worker : streamer->workers_) {
+            worker.request_stop();
+            worker.detach();
+        }
+        streamer->workers_.clear();
+        streamer->cv_.notify_all();
+        // Frees the streamer now when no worker still holds it.
+        const auto self = std::move(streamer->self_);
+    }
+
     SplatTileStreamer::SplatTileStreamer(std::shared_ptr<const io::SplatTileSource> source,
                                          core::SplatTensorAllocator allocator)
         : source_(std::move(source)),
@@ -97,27 +133,39 @@ namespace lfs::vis {
         requested_set_ = shown_set_;
         for (const auto tile : shown_set_)
             drawn_bytes_ += tile_bytes(source_->tiles()[tile]);
-        resizeWorkers(auto_tile_load_workers());
+        // Workers start on the first update(), once self_ exists for them to hold.
     }
 
-    SplatTileStreamer::~SplatTileStreamer() {
-        for (auto& worker : workers_)
-            worker.request_stop();
-        cv_.notify_all();
-    }
+    // Runs on the last thread holding the streamer: the retiring owner, or the last
+    // worker to exit. Workers are already detached by then.
+    SplatTileStreamer::~SplatTileStreamer() = default;
 
     void SplatTileStreamer::resizeWorkers(std::size_t count) {
         count = std::max<std::size_t>(count, 1);
-        if (count == workers_.size())
+        if (count == workers_.size() || !self_)
             return;
         if (count < workers_.size()) {
-            for (std::size_t i = count; i < workers_.size(); ++i)
+            // Retired workers finish their current job on their own; nobody waits for them.
+            for (std::size_t i = count; i < workers_.size(); ++i) {
                 workers_[i].request_stop();
+                workers_[i].detach();
+            }
+            workers_.resize(count);
             cv_.notify_all();
-            workers_.resize(count); // jthread destructors join the retired workers
         } else {
-            while (workers_.size() < count)
-                workers_.emplace_back([this](const std::stop_token& stop) { work(stop); });
+            while (workers_.size() < count) {
+                {
+                    std::lock_guard lock(live_workers_mutex);
+                    ++live_workers;
+                }
+                workers_.emplace_back([self = self_](const std::stop_token& stop) mutable {
+                    self->work(stop);
+                    self.reset(); // may free the streamer; counted as live until then
+                    std::lock_guard lock(live_workers_mutex);
+                    --live_workers;
+                    live_workers_cv.notify_all();
+                });
+            }
         }
     }
 
@@ -287,6 +335,8 @@ namespace lfs::vis {
                 std::uint64_t merge_bytes = 0;
                 for (const auto tile : set)
                     merge_bytes += tile_bytes(tiles[tile]);
+                if (stop.stop_requested())
+                    break; // retired: a merge would only allocate a model nobody shows
                 building_bytes_ = merge_bytes;
                 evictLocked();
                 // The budget may be briefly exceeded while the old model is still drawn,
@@ -389,6 +439,8 @@ namespace lfs::vis {
             lock.lock();
             in_flight_.erase(next);
             in_flight_bytes_ -= next_bytes;
+            if (stop.stop_requested())
+                break; // retired while loading: drop the tile instead of caching it
             if (!loaded) {
                 LOG_ERROR("3D Tiles: tile {}: {}", next, loaded.error());
                 failed_.insert(next);
