@@ -327,7 +327,7 @@ TEST(ArgumentParserTest, RejectsOutputNamePathComponents) {
         "../outside",
     };
 
-    auto parsed = lfs::core::args::parse_args_and_params(
+    auto parsed = lfs::io::args::parse_args_and_params(
         static_cast<int>(std::size(argv)), argv);
     ASSERT_FALSE(parsed);
     EXPECT_NE(parsed.error().find("output-name"), std::string::npos);

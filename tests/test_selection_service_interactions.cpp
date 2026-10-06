@@ -17,6 +17,7 @@
 #include "scene/scene_manager.hpp"
 #include "screen/screen_service.hpp"
 #include "selection/selection_service.hpp"
+#include "test_view_targets.hpp"
 #include "tools/selection_tool.hpp"
 #include "tools/tool_base.hpp"
 #include "visualizer/nodes/modifier_manager.hpp"
@@ -225,8 +226,9 @@ TEST_F(SelectionServiceInteractionsTest, DeleteInSelectionToolDoesNotRemoveNodeW
     ASSERT_FALSE(scene_manager_->getScene().hasSelection());
 
     Viewport viewport(100, 100);
-    ToolContext context(rendering_manager_.get(), scene_manager_.get(), &viewport, nullptr);
-    InputController controller(nullptr, viewport);
+    lfs::vis::TestViewTargets views{viewport};
+    ToolContext context(rendering_manager_.get(), scene_manager_.get(), &views, nullptr);
+    InputController controller(nullptr, views);
     auto selection_tool = std::make_shared<SelectionTool>();
     selection_tool->setEnabled(true);
     controller.setSelectionTool(selection_tool);
@@ -253,8 +255,9 @@ TEST_F(SelectionServiceInteractionsTest, DeleteCommitsInteractiveSelectionThenDe
     ASSERT_FALSE(scene_manager_->getScene().hasSelection());
 
     Viewport viewport(100, 100);
-    ToolContext context(rendering_manager_.get(), scene_manager_.get(), &viewport, nullptr);
-    InputController controller(nullptr, viewport);
+    lfs::vis::TestViewTargets views{viewport};
+    ToolContext context(rendering_manager_.get(), scene_manager_.get(), &views, nullptr);
+    InputController controller(nullptr, views);
     auto selection_tool = std::make_shared<SelectionTool>();
     selection_tool->setEnabled(true);
     controller.setSelectionTool(selection_tool);
@@ -399,12 +402,12 @@ TEST_F(SelectionServiceInteractionsTest, BrushAndLassoAcceptSelectedNodeInMultiS
     ASSERT_NE(copy_id, lfs::core::NULL_NODE);
     scene_manager_->selectNodes({"test"});
     set_initial_selection({0, 0, 1, 0});
-    service_->setTestingScreenPositionsForCamera(0, make_screen_positions({
-                                                        10.0f,
-                                                        10.0f,
-                                                        80.0f,
-                                                        80.0f,
-                                                    }));
+    service_->setTestingScreenPositions(make_screen_positions({
+        10.0f,
+        10.0f,
+        80.0f,
+        80.0f,
+    }));
 
     const auto brush = service_->selectBrush(10.0f, 10.0f, 5.0f, lfs::vis::SelectionMode::Replace, 0);
     ASSERT_TRUE(brush.success) << brush.error;
