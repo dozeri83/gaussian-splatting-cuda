@@ -551,12 +551,10 @@ namespace lfs::training {
         };
         static_assert(sizeof(AdamGroupParams) == 120);
 
-        // fast_adam_group: disabled groups stay zero and are never touched.
+        // Retain read-only storage even when parameter and moment updates are disabled.
         AdamGroupParams adam_group(const lfs::gpu_ops::BackwardAdamParam& src, std::vector<const Tensor*>& uses) {
             AdamGroupParams dst{};
-            if (!src.enabled)
-                return dst;
-            dst.param = mk::address(src.parameter);
+            dst.param = address_if(src.parameter);
             uses.push_back(&src.parameter);
             if (src.value_bits == 16) {
                 dst.value_bits = 16;
@@ -588,7 +586,7 @@ namespace lfs::training {
             dst.attributes = src.attributes;
             dst.step_size = src.step_size;
             dst.bc2_sqrt_rcp = src.bc2_sqrt_rcp;
-            dst.enabled = 1;
+            dst.enabled = src.enabled ? 1u : 0u;
             if (present(src.screen_share) && src.screen_share_limit > 0.f && src.screen_share_limit < 1.f) {
                 dst.screen_share = mk::address(src.screen_share);
                 dst.screen_share_n = static_cast<int32_t>(src.screen_share.numel());

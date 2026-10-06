@@ -597,7 +597,7 @@ static void fast_adam_shN(constant FastAdamGroup& g, const uint p, const uint pa
     if (t.lane == 0u) {
         if (g.enabled != 0u && g.bounds != nullptr)
             g.bounds[t.block] = mm;
-        if (q16)
+        if (q16 && g.enabled != 0u)
             g.value_bounds[t.block] = vmm;
     }
 

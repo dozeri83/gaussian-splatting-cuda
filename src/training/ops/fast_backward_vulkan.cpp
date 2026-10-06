@@ -92,11 +92,13 @@ namespace lfs::training::vulkan {
         b.slots = slots;
         const auto& scale = adam.groups[static_cast<size_t>(AdamSlot::Scaling)];
         const auto& opacity = adam.groups[static_cast<size_t>(AdamSlot::Opacity)];
-        b.scale_weight = scale.enabled ? adam.scale_reg_weight : 0;
-        b.flatten_weight = scale.enabled ? adam.flatten_reg_weight : 0;
-        b.opacity_weight = opacity.enabled ? adam.opacity_reg_weight : 0;
-        b.scale_elements = scale.enabled ? scale.elements : 0;
-        b.opacity_elements = opacity.enabled ? opacity.elements : 0;
+        // Losses still read disabled groups; only the optimizer dispatch below
+        // gates parameter and moment updates, matching the CUDA descriptor.
+        b.scale_weight = adam.scale_reg_weight;
+        b.flatten_weight = adam.flatten_reg_weight;
+        b.opacity_weight = adam.opacity_reg_weight;
+        b.scale_elements = scale.elements;
+        b.opacity_elements = opacity.elements;
         b.rendered_count = address(adam.rendered_count);
         b.erank_loss = address(adam.erank_reg_loss);
         b.dc_loss = address(adam.dc_reg_loss);
@@ -104,8 +106,8 @@ namespace lfs::training::vulkan {
         b.scale_loss = address(adam.scale_reg_loss);
         b.log_scale = adam.scale_reg_log;
         b.scale_normalizer = adam.scale_reg_normalizer;
-        b.erank_weight = scale.enabled ? adam.erank_reg_weight : 0.f;
-        b.dc_weight = adam.groups[4].enabled ? adam.dc_reg_weight : 0.f;
+        b.erank_weight = adam.erank_reg_weight;
+        b.dc_weight = adam.dc_reg_weight;
         b.sh_weight = adam.groups[5].enabled ? adam.sh_rest_reg_weight : 0.f;
         if (adam.sparsity_sigmoid.is_valid() && adam.sparsity_z.is_valid() && adam.sparsity_u.is_valid()) {
             b.sigmoid = address(adam.sparsity_sigmoid);

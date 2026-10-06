@@ -69,8 +69,8 @@ namespace fast_lfs::rasterization::kernels::backward {
         const uint sh_layout_slots,
         FusedAdamSettings fused_adam,
         // model-truth shN-rest decode binds. fused_adam.shN.sh_value_*
-        // is enablement-gated (null during SH warmup) and gates only the UPDATE
-        // path; reading sh_coefficients_rest must always use these.
+        // may be absent during SH warmup. Reading sh_coefficients_rest must
+        // always use these model bindings, independently of optimizer enablement.
         const float2* __restrict__ shN_value_bounds,
         const uint shN_value_n_cells,
         const uint shN_value_bits) {

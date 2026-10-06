@@ -2293,7 +2293,7 @@ namespace {
                      capture(lfs::training::Family::Photometric, GpuBackend::Vulkan), true);
     }
 
-    Capture capture_fast_nonzero(GpuBackend backend, int degree, bool mip, bool symmetric = false, bool old_momentum = false, bool quantized = false, DensificationType densify = DensificationType::MRNF, bool september = false) {
+    Capture capture_fast_nonzero(GpuBackend backend, int degree, bool mip, bool symmetric = false, bool old_momentum = false, bool quantized = false, DensificationType densify = DensificationType::MRNF, bool september = false, float disabled_dc_sh_weight = -1.f, bool disable_sh_rest = false) {
         const lfs::test::DefaultGpuBackendForTesting scope(backend);
         Capture out;
         if (!scope.switched()) {
@@ -2358,7 +2358,9 @@ namespace {
             }
         }
         ops::FastSaved saved{.backend = table->create()};
-        for (int step = 1101; step <= (old_momentum ? 1102 : 1101); ++step) {
+        for (int step = 1101; step <= (disabled_dc_sh_weight >= 0.f ? 1110 : old_momentum ? 1102
+                                                                                          : 1101);
+             ++step) {
             optimizer.zero_grad(step);
             lfs::training::RenderOutput output;
             const auto result = lfs::training::fast_render(*table, saved, camera, splat, background,
@@ -2405,6 +2407,15 @@ namespace {
                 adam.dc_reg_loss = Tensor::zeros({1}, Device::GPU);
                 adam.sh_rest_reg_loss = Tensor::zeros({1}, Device::GPU);
             }
+            if (disabled_dc_sh_weight >= 0.f) {
+                // Keep read-only parameters available while disabling updates.
+                // A regularizer alone must not change below-black channels.
+                adam.sh_rest_reg_weight = disabled_dc_sh_weight;
+                for (size_t group = 0; group < 5; ++group)
+                    adam.groups[group].enabled = false;
+            }
+            if (disable_sh_rest)
+                adam.groups[5].enabled = false;
             if (september && degree > 0) {
                 const auto& sh = adam.groups[5];
                 keep_f(out.snapshot, prefix + ".sh.step_size", sh.step_size, kExact);
@@ -2416,8 +2427,39 @@ namespace {
             auto grad_alpha = Tensor::full(output.alpha.shape(), 0.0003f, Device::GPU);
             auto grad_depth = Tensor::full(output.depth.shape(), -0.0002f, Device::GPU);
             auto grad_normal = pattern_mrnf(output.normal.shape(), 0.0001f, 11);
+            if (disabled_dc_sh_weight >= 0.f) {
+                grad = Tensor::zeros_like(grad);
+                grad_alpha = Tensor::zeros_like(grad_alpha);
+                grad_depth = Tensor::zeros_like(grad_depth);
+                grad_normal = Tensor::zeros_like(grad_normal);
+            }
+            std::vector<Tensor> disabled_before;
+            if (disabled_dc_sh_weight >= 0.f || disable_sh_rest)
+                for (const auto& group : adam.groups) {
+                    if (group.enabled)
+                        continue;
+                    for (const auto* tensor : {&group.parameter, &group.packed_moments, &group.joint_bounds, &group.sh_value_bounds})
+                        if (tensor->is_valid())
+                            disabled_before.push_back(tensor->cpu().clone());
+                }
             table->backward(saved, {grad, grad_alpha, grad_depth, grad_normal}, densification,
                             error, edges, scores, adam, densify);
+            if (disabled_dc_sh_weight >= 0.f || disable_sh_rest) {
+                size_t index = 0;
+                for (size_t i = 0; i < adam.groups.size(); ++i) {
+                    const auto& group = adam.groups[i];
+                    if (group.enabled)
+                        continue;
+                    for (const auto* tensor : {&group.parameter, &group.packed_moments, &group.joint_bounds, &group.sh_value_bounds}) {
+                        if (!tensor->is_valid())
+                            continue;
+                        const auto actual = tensor->cpu().contiguous();
+                        const auto& before = disabled_before[index++];
+                        EXPECT_EQ(std::memcmp(before.data_ptr(), actual.data_ptr(), before.bytes()), 0)
+                            << "disabled group " << i << " step " << step;
+                    }
+                }
+            }
             if (september) {
                 keep(out.snapshot, backend, prefix + ".rendered_count", adam.rendered_count, kExact);
                 keep(out.snapshot, backend, prefix + ".scale_loss", adam.scale_reg_loss, kReduce);
@@ -2467,7 +2509,7 @@ namespace {
         }
         if (september && std::getenv("LFS_PARITY_DIAGNOSTICS"))
             write_golden(std::filesystem::path(std::getenv("LFS_PARITY_DIAGNOSTICS")) /
-                             std::format("september_{}_degree{}.golden", backend_name(backend), degree),
+                             std::format("september_{}_degree{}_q16{}_weight{}.golden", backend_name(backend), degree, quantized, disabled_dc_sh_weight),
                          out);
         return out;
     }
@@ -2495,6 +2537,30 @@ namespace {
                 SCOPED_TRACE(std::format("{} degree={}", backend_name(backend), degree));
                 expect_match(capture_fast_nonzero(backend, degree, false, false, true, false, DensificationType::MRNF, true),
                              capture_fast_nonzero(GpuBackend::CUDA, degree, false, false, true, false, DensificationType::MRNF, true), false);
+            }
+        }
+    }
+
+    TEST(TrainingOpsFastParity, DisabledDcPreservesShRegularizerGate) {
+        if (!lfs::core::gpu_backend_available(GpuBackend::CUDA) || !lfs::core::gpu_backend_available(GpuBackend::Vulkan))
+            GTEST_SKIP() << "CUDA and Vulkan devices required";
+        for (const bool quantized : {false, true})
+            for (const int degree : {1, 3})
+                for (const float weight : {0.f, 0.001f, 1.f}) {
+                    SCOPED_TRACE(std::format("Q16={} degree={} weight={}", quantized, degree, weight));
+                    expect_match(capture_fast_nonzero(GpuBackend::Vulkan, degree, false, false, false, quantized, DensificationType::MRNF, true, weight),
+                                 capture_fast_nonzero(GpuBackend::CUDA, degree, false, false, false, quantized, DensificationType::MRNF, true, weight), false);
+                }
+    }
+
+    TEST(TrainingOpsFastParity, DisabledShRestPreservesQuantizedStorage) {
+        for (const auto backend : {GpuBackend::CUDA, GpuBackend::Vulkan, GpuBackend::Metal}) {
+            if (!lfs::core::gpu_backend_available(backend))
+                continue;
+            for (const int degree : {1, 3}) {
+                SCOPED_TRACE(std::format("{} degree={}", backend_name(backend), degree));
+                const auto result = capture_fast_nonzero(backend, degree, false, false, true, true, DensificationType::MRNF, true, -1.f, true);
+                EXPECT_TRUE(result.error.empty()) << result.error;
             }
         }
     }

@@ -871,9 +871,8 @@ namespace lfs::training {
 
     fast_lfs::rasterization::FusedAdamParam fast_adam_group(const lfs::gpu_ops::BackwardAdamParam& src) {
         fast_lfs::rasterization::FusedAdamParam dst;
-        if (!src.enabled) {
-            return dst;
-        }
+        // Disabled groups still provide read-only parameters for regularizers.
+        // The kernel's enabled flag gates parameter and optimizer-state writes.
         dst.param = static_cast<float*>(lfs::core::resolve_exportable_device_ptr(src.parameter));
         if (src.value_bits == 16 && src.sh_value_bounds.is_valid() && src.sh_value_bounds.numel() > 0) {
             dst.sh_value_bounds = static_cast<float*>(
@@ -905,7 +904,7 @@ namespace lfs::training {
         dst.n_attributes = src.attributes;
         dst.step_size = src.step_size;
         dst.bias_correction2_sqrt_rcp = src.bc2_sqrt_rcp;
-        dst.enabled = true;
+        dst.enabled = src.enabled;
         if (src.screen_share.is_valid() && src.screen_share.numel() > 0 &&
             src.screen_share_limit > 0.f && src.screen_share_limit < 1.f) {
             dst.screen_share_max = src.screen_share.ptr<float>();
