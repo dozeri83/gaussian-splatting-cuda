@@ -2712,10 +2712,16 @@
   },
   "tiles3d": {
     "title": "3D Tiles Viewer Settings",
+    "mode": "Modus: {mode}",
+    "mode_stream": "Streaming (ansichtsabhängig)",
+    "mode_flat": "flach (volle Detailstufe geladen)",
+    "flat_help": "Das Tileset war klein genug, um vollständig geladen zu werden; es gibt nichts zu streamen.",
     "cache_fraction": "Cache size",
     "cache_fraction_help": "Fraction (0-1) of total GPU memory that loaded tiles may occupy. It counts tiles only; the drawn model and the renderer need memory on top. Changing it clears the cache and reloads the tiles.",
     "max_sse": "Max SSE",
     "max_sse_help": "Maximum screen-space error: pixels of error a tile may show before finer tiles replace it. Lower is sharper but loads more tiles.",
+    "num_load_workers": "Lade-Threads",
+    "num_load_workers_help": "Threads, die Tiles lesen, dekodieren und hochladen. 0 wählt automatisch (Kerne / 4, begrenzt auf 2-4). Mehr Threads verfeinern schneller, konkurrieren aber mit Rendering und Training.",
     "cull": "Cull off-view",
     "cull_help": "When off, tiles are chosen by distance only, so turning the camera shows loaded tiles at once.",
     "freeze": "Freeze selection",
@@ -2724,8 +2730,9 @@
     "stats_tiles": "Tiles: {drawn} drawn, {cached} cached, {loading} loading, {failed} failed of {total}",
     "stats_skipped": "{count} Inhalte übersprungen: keine SPZ-Gaussian-Splats",
     "stats_splats": "Splats: {drawn} drawn of {full} at full detail",
-    "stats_memory": "Cache: {cache} of {limit} GiB (GPU {total} GiB)",
+    "stats_memory": "Speicher: {cache} Cache + {drawn} gezeichnet von {limit} GiB (GPU {total} GiB)",
     "stats_sse": "Max SSE in use: {sse} (raised while the view exceeds the cache)",
+    "stats_workers": "Lade-Threads: {workers}",
     "stats_build": "Last rebuild: {ms} ms"
   },
   "startup_recent": {

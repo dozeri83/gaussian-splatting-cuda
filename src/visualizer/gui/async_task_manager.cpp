@@ -1781,8 +1781,11 @@ namespace lfs::vis::gui {
         for (const auto& name : node_names) {
             const auto* node = scene.getNode(name);
             if (node && scene_manager->isTileStreamNode(node->uuid)) {
-                // A streamed node holds only the tiles drawn for the current view.
-                publishExportFailureState(format, path, LOC("runtime.tiles3d_export_streamed"));
+                // A streamed node holds only the tiles drawn for the current view. The export
+                // dialog closes on its own, so report the reason to the user as well.
+                const std::string error = LOC("runtime.tiles3d_export_streamed");
+                publishExportFailureState(format, path, error);
+                lfs::core::events::state::ExportFailed{.error = error}.emit();
                 return;
             }
             if (node && node->type == core::NodeType::SPLAT && node->model) {
