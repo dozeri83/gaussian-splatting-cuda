@@ -963,6 +963,42 @@ TEST(ArgumentParserTest, Mesh2SplatParsesOutputPathAndOptions) {
     EXPECT_FLOAT_EQ(mode->params.options.sigma, 0.5f);
 }
 
+TEST(ArgumentParserTest, ConvertRejectsOutputSuffixThatConflictsWithFormat) {
+    const auto directory = std::filesystem::path(
+        make_test_path("lfs_arg_parser_convert_suffix"));
+    const auto input = directory / "input.ply";
+    std::ofstream(input).put('\n');
+    const auto output = (directory / "output.ply").string();
+    const auto input_text = input.string();
+    const char* argv[] = {
+        "LichtFeld-Studio", "convert", input_text.c_str(),
+        "--format", "spz", "--output", output.c_str()};
+
+    const auto parsed = lfs::core::args::parse_args(
+        static_cast<int>(std::size(argv)), argv);
+    ASSERT_FALSE(parsed);
+    EXPECT_NE(parsed.error().find("extension"), std::string::npos);
+    EXPECT_NE(parsed.error().find(".ply"), std::string::npos);
+}
+
+TEST(ArgumentParserTest, Mesh2SplatRejectsOutputSuffixThatConflictsWithFormat) {
+    const auto directory = std::filesystem::path(
+        make_test_path("lfs_arg_parser_mesh2splat_suffix"));
+    const auto input = directory / "input.obj";
+    std::ofstream(input) << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    const auto output = (directory / "output.ply").string();
+    const auto input_text = input.string();
+    const char* argv[] = {
+        "LichtFeld-Studio", "mesh2splat", input_text.c_str(),
+        "--format", "spz", "--output", output.c_str()};
+
+    const auto parsed = lfs::core::args::parse_args(
+        static_cast<int>(std::size(argv)), argv);
+    ASSERT_FALSE(parsed);
+    EXPECT_NE(parsed.error().find("extension"), std::string::npos);
+    EXPECT_NE(parsed.error().find(".ply"), std::string::npos);
+}
+
 TEST(ArgumentParserTest, Mesh2SplatParsesMultipleOutputFormats) {
     const auto dir = make_test_path("lfs_mesh2splat_multi_format_arg_parser");
     const auto input = std::filesystem::path(dir) / "input.obj";
@@ -1791,6 +1827,32 @@ TEST(ArgumentParserTest, ResumeCliFlagsPopulateExplicitOverrides) {
     EXPECT_EQ(restored.optimization.eval_steps, std::vector<size_t>({30100}));
     EXPECT_EQ(restored.dataset.test_every, 64);
     EXPECT_EQ(restored.optimization.max_cap, 42);
+}
+
+TEST(ArgumentParserTest, ResumeRejectsExplicitInitFile) {
+    const auto directory = make_test_path("lfs_arg_parser_resume_init_conflict");
+    const auto project = std::filesystem::path(directory) / "session.licht";
+    const auto init = std::filesystem::path(directory) / "init.ply";
+    std::ofstream(project).put('\n');
+    std::ofstream(init).put('\n');
+    const auto project_text = project.string();
+    const auto init_text = init.string();
+
+    const char* argv[] = {
+        "LichtFeld-Studio",
+        "--resume",
+        project_text.c_str(),
+        "--headless",
+        "--train",
+        "--init",
+        init_text.c_str(),
+    };
+    auto parsed = lfs::core::args::parse_args_and_params(
+        static_cast<int>(std::size(argv)), argv);
+
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("--init"), std::string::npos);
+    EXPECT_NE(parsed.error().find("--resume"), std::string::npos);
 }
 
 TEST(ArgumentParserTest, ResumeConfigKeysPopulateExplicitOverrides) {
