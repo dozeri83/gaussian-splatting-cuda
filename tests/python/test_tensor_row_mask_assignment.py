@@ -53,7 +53,7 @@ def test_same_shape_mask_still_selects_elements(lf, numpy, device):
     numpy.testing.assert_array_equal(tensor.numpy(), array)
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
 def test_row_mask_view_keeps_its_source(lf, numpy, device):
     source = getattr(lf.Tensor.from_numpy(numpy.array([True, False, True, False])), device)()
     mask = source[:3]
