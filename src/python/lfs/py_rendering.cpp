@@ -1460,21 +1460,40 @@ namespace lfs::python {
     }
 
     namespace {
-        vis::SceneManager* tile_scene_manager() {
+        // The viewer thread updates and erases the tile streamers and reads their settings
+        // every frame; scripts run on their own thread, so tile state is only touched on
+        // the viewer thread (like the capture functions). Returns `fn()`, or an empty
+        // result when there is no scene or the viewer is shutting down.
+        template <typename Fn>
+        auto on_viewer_thread(Fn fn) -> std::invoke_result_t<Fn, vis::SceneManager&> {
+            using Result = std::invoke_result_t<Fn, vis::SceneManager&>;
             auto* const viewer = get_visualizer();
-            return viewer ? viewer->getSceneManager() : nullptr;
+            const auto run = [viewer, &fn]() -> Result {
+                auto* const scene_manager = viewer ? viewer->getSceneManager() : nullptr;
+                return scene_manager ? fn(*scene_manager) : Result{};
+            };
+            if (!viewer || viewer->isOnViewerThread())
+                return run();
+            if (!viewer->acceptsPostedWork())
+                return Result{};
+            nb::gil_scoped_release release;
+            return vis::post_work_and_wait(
+                [viewer](vis::Visualizer::WorkItem work) { return viewer->postWork(std::move(work)); }, run,
+                [] { return Result{}; });
         }
     } // namespace
 
     nb::dict get_tiles_settings() {
+        const auto settings = on_viewer_thread([](vis::SceneManager& scene_manager) {
+            return std::optional(scene_manager.tileStreamSettings());
+        });
         nb::dict result;
-        if (auto* const scene_manager = tile_scene_manager()) {
-            const auto& settings = scene_manager->tileStreamSettings();
-            result["cache_fraction"] = settings.cache_fraction;
-            result["max_sse"] = settings.max_sse;
-            result["cull"] = settings.cull;
-            result["freeze"] = settings.freeze;
-            result["num_load_workers"] = settings.num_load_workers;
+        if (settings) {
+            result["cache_fraction"] = settings->cache_fraction;
+            result["max_sse"] = settings->max_sse;
+            result["cull"] = settings->cull;
+            result["freeze"] = settings->freeze;
+            result["num_load_workers"] = settings->num_load_workers;
         }
         return result;
     }
@@ -1482,30 +1501,32 @@ namespace lfs::python {
     void set_tiles_settings(const std::optional<float> cache_fraction, const std::optional<float> max_sse,
                             const std::optional<bool> cull, const std::optional<bool> freeze,
                             const std::optional<int> num_load_workers) {
-        auto* const scene_manager = tile_scene_manager();
-        if (!scene_manager)
-            return;
-        auto& settings = scene_manager->tileStreamSettings();
-        if (cache_fraction)
-            settings.cache_fraction = std::clamp(*cache_fraction, 0.0f, 1.0f);
-        if (max_sse)
-            settings.max_sse = std::max(*max_sse, 0.0f);
-        if (cull)
-            settings.cull = *cull;
-        if (freeze)
-            settings.freeze = *freeze;
-        if (num_load_workers)
-            settings.num_load_workers = std::max(*num_load_workers, 0);
+        const bool applied = on_viewer_thread([&](vis::SceneManager& scene_manager) {
+            auto& settings = scene_manager.tileStreamSettings();
+            if (cache_fraction)
+                settings.cache_fraction = std::clamp(*cache_fraction, 0.0f, 1.0f);
+            if (max_sse)
+                settings.max_sse = std::max(*max_sse, 0.0f);
+            if (cull)
+                settings.cull = *cull;
+            if (freeze)
+                settings.freeze = *freeze;
+            if (num_load_workers)
+                settings.num_load_workers = std::max(*num_load_workers, 0);
+            return true;
+        });
+        // Streamers apply settings on the next frame; draw one even when idle.
+        if (applied)
+            request_redraw();
     }
 
     std::optional<std::string> get_tiles_mode() {
-        auto* const scene_manager = tile_scene_manager();
-        return scene_manager ? scene_manager->tileMode() : std::nullopt;
+        return on_viewer_thread([](vis::SceneManager& scene_manager) { return scene_manager.tileMode(); });
     }
 
     std::optional<nb::dict> get_tiles_stats() {
-        auto* const scene_manager = tile_scene_manager();
-        const auto stats = scene_manager ? scene_manager->tileStreamStats() : std::nullopt;
+        const auto stats =
+            on_viewer_thread([](vis::SceneManager& scene_manager) { return scene_manager.tileStreamStats(); });
         if (!stats)
             return std::nullopt;
         nb::dict result;

@@ -7,6 +7,7 @@
 #include "core/splat_data.hpp"
 #include "core/tensor_backend.hpp"
 #include "io/splat_tile_source.hpp"
+#include <algorithm>
 #include <chrono>
 #include <format>
 #include <limits>
@@ -17,14 +18,13 @@
 namespace lfs::io {
 
     namespace {
-        // Full detail loads flat (editable, no streaming) when it takes at most this
-        // share of free VRAM and stays below this many splats.
-        constexpr double kFlatVramFraction = 0.5;
+        // Full detail loads flat (editable, no streaming) when its loading peak fits free
+        // VRAM and it stays below this many splats.
         constexpr std::uint64_t kFlatMaxSplats = 8'000'000;
 
-        std::uint64_t splat_bytes(const SplatTile& tile) {
-            const int rest = (tile.sh_degree + 1) * (tile.sh_degree + 1) - 1;
-            return tile.splat_count * (14 + 3 * rest) * sizeof(float);
+        std::uint64_t splat_bytes(const std::uint64_t splats, const int sh_degree) {
+            const int rest = (sh_degree + 1) * (sh_degree + 1) - 1;
+            return splats * (14 + 3 * rest) * sizeof(float);
         }
 
         Result<std::unique_ptr<SplatData>> load_merged(const SplatTileSource& source,
@@ -75,12 +75,18 @@ namespace lfs::io {
 
         const auto everything = [](std::uint32_t) { return true; };
         const auto full = select_splat_tiles(**source, {.sse_per_error = 1.0f, .max_sse = 0.0f}, everything);
-        std::uint64_t full_bytes = 0;
-        for (const auto tile : full.render)
-            full_bytes += splat_bytes((*source)->tiles()[tile]);
+        // Loading flat holds every tile at its own SH degree and then their merged copy,
+        // which pads every splat to the highest degree among them.
+        std::uint64_t tile_bytes = 0;
+        int max_sh_degree = 0;
+        for (const auto index : full.render) {
+            const auto& tile = (*source)->tiles()[index];
+            tile_bytes += splat_bytes(tile.splat_count, tile.sh_degree);
+            max_sh_degree = std::max(max_sh_degree, tile.sh_degree);
+        }
+        const std::uint64_t full_bytes = tile_bytes + splat_bytes(full.render_splats, max_sh_degree);
         const auto memory = core::gpu_backend_memory_info(core::default_gpu_backend());
-        const bool flat = full.render_splats <= kFlatMaxSplats &&
-                          full_bytes <= kFlatVramFraction * static_cast<double>(memory.free_bytes);
+        const bool flat = full.render_splats <= kFlatMaxSplats && full_bytes <= memory.free_bytes;
 
         // Streaming starts from the coarsest content; the viewer refines from there.
         const auto& tiles = flat ? full.render
