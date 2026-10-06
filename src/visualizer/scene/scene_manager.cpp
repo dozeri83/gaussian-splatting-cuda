@@ -59,6 +59,7 @@
 #include <algorithm>
 #include <cctype>
 #include <format>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_access.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <limits>
@@ -495,9 +496,7 @@ namespace lfs::vis {
         clearMeshCpuCache();
     }
 
-    void SceneManager::updateTileStreams(const glm::mat4& view, const glm::mat4& projection,
-                                         const float viewport_height, const float vfov_radians,
-                                         const std::function<void()>& wake) {
+    void SceneManager::updateTileStreams(const TileStreamCamera& camera, const std::function<void()>& wake) {
         constexpr const char* kTileStreamPanel = "lfs.tiles3d";
         if (open_tile_stream_panel_ && gui::PanelRegistry::instance().get_panel(kTileStreamPanel)) {
             gui::PanelRegistry::instance().set_panel_enabled(kTileStreamPanel, true);
@@ -548,16 +547,33 @@ namespace lfs::vis {
             // The viewport camera lives in visualizer world axes; model data in dataset axes.
             const glm::mat4 model_to_world =
                 lfs::rendering::dataWorldTransformToVisualizerWorld(scene_.getWorldTransform(node->id));
-            const glm::mat4 clip = projection * view * model_to_world;
-            io::SplatTileView tile_view{
-                .camera = glm::vec3(glm::inverse(view * model_to_world)[3]),
-                .sse_per_error = viewport_height / (2.0f * std::tan(vfov_radians * 0.5f)),
-                .max_sse = settings.max_sse};
-            // Side planes only (Gribb-Hartmann); they meet at the camera, so they also cull behind it.
-            for (int i = 0; settings.cull && i < 4; ++i) {
-                const glm::vec4 row = glm::row(clip, i / 2);
-                const glm::vec4 plane = glm::row(clip, 3) + (i % 2 ? -row : row);
-                tile_view.planes[i] = plane / glm::length(glm::vec3(plane));
+            io::SplatTileView tile_view{.camera = glm::vec3(glm::inverse(camera.view * model_to_world)[3]),
+                                        .max_sse = settings.max_sse};
+            if (camera.equirectangular) {
+                // The image spans 180 degrees vertically and sees every direction: no culling.
+                tile_view.sse_per_error = camera.viewport_height / glm::pi<float>();
+            } else if (camera.orthographic) {
+                // Pixels per local unit: world zoom times the node's largest scale.
+                const float node_scale = std::max({glm::length(glm::vec3(model_to_world[0])),
+                                                   glm::length(glm::vec3(model_to_world[1])),
+                                                   glm::length(glm::vec3(model_to_world[2]))});
+                tile_view.sse_per_error = camera.ortho_scale * node_scale;
+                tile_view.orthographic = true;
+            } else {
+                tile_view.sse_per_error = camera.viewport_height / (2.0f * std::tan(camera.vfov_radians * 0.5f));
+            }
+            if (settings.cull && camera.cull && !camera.equirectangular) {
+                // Gribb-Hartmann side planes of the actual projection. Perspective side planes
+                // meet at the camera, so they also cull behind it; orthographic ones are
+                // parallel, so the near plane does that.
+                const glm::mat4 clip = camera.projection * camera.view * model_to_world;
+                const auto plane = [&](const glm::vec4& p) { return p / glm::length(glm::vec3(p)); };
+                for (int i = 0; i < 4; ++i) {
+                    const glm::vec4 row = glm::row(clip, i / 2);
+                    tile_view.planes[i] = plane(glm::row(clip, 3) + (i % 2 ? -row : row));
+                }
+                if (camera.orthographic)
+                    tile_view.planes[4] = plane(glm::row(clip, 3) + glm::row(clip, 2));
             }
             if (auto model = it->second->update(tile_view, settings, wake)) {
                 LOG_DEBUG("3D Tiles: '{}' now shows {} splats", node->name, model->size());

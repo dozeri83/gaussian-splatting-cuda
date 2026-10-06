@@ -72,7 +72,7 @@ namespace lfs::vis {
 
         bool same_view(const io::SplatTileView& a, const io::SplatTileView& b) {
             return a.camera == b.camera && a.planes == b.planes && a.sse_per_error == b.sse_per_error &&
-                   a.max_sse == b.max_sse;
+                   a.max_sse == b.max_sse && a.orthographic == b.orthographic;
         }
     } // namespace
 

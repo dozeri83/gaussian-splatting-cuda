@@ -2284,12 +2284,24 @@ namespace lfs::vis {
 
         if (const auto& viewport = getViewport();
             scene_manager_ && rendering_manager_ && viewport.windowSize.y > 0) {
-            const float focal_length_mm = rendering_manager_->getFocalLengthMm();
-            scene_manager_->updateTileStreams(viewport.getViewMatrix(),
-                                              viewport.getProjectionMatrix(focal_length_mm),
-                                              static_cast<float>(viewport.windowSize.y),
-                                              lfs::rendering::focalLengthToVFovRad(focal_length_mm),
-                                              [this] { wakeMainLoop(); });
+            // Select tiles for the view's actual projection: orthographic zoom and the
+            // all-around equirectangular image change what each tile's error looks like.
+            // Every 3D view draws the same streamed model; the active camera picks the
+            // detail, and with other views visible nothing is culled to its frustum.
+            const auto view = rendering_manager_->settingsForView(rendering_manager_->activeViewId()).view();
+            const std::size_t visible_views =
+                gui_manager_ ? gui_manager_->visibleViews().size() : screen_service_.screen().views().size();
+            scene_manager_->updateTileStreams(
+                {.view = viewport.getViewMatrix(),
+                 .projection = lfs::rendering::createProjectionMatrixFromFocal(
+                     viewport.windowSize, view.focal_length_mm, view.orthographic, view.ortho_scale),
+                 .viewport_height = static_cast<float>(viewport.windowSize.y),
+                 .vfov_radians = lfs::rendering::focalLengthToVFovRad(view.focal_length_mm),
+                 .orthographic = view.orthographic,
+                 .ortho_scale = view.ortho_scale,
+                 .equirectangular = view.equirectangular,
+                 .cull = visible_views <= 1},
+                [this] { wakeMainLoop(); });
         }
 
         if (pending_training_completion_refresh_frames_ > 0 &&

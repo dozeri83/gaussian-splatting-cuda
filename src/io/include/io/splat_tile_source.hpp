@@ -93,8 +93,10 @@ namespace lfs::io {
     struct SplatTileView {
         glm::vec3 camera{0.0f};            // source-local frame
         std::array<glm::vec4, 6> planes{}; // normalized frustum planes, inside >= 0; zero = no culling
-        float sse_per_error = 0.0f;        // pixels per unit error at unit distance: H / (2 tan(fov/2))
+        float sse_per_error = 0.0f;        // pixels per unit error at unit distance: H / (2 tan(fov/2));
+                                           // orthographic: pixels per unit error at any distance
         float max_sse = 16.0f;             // pixels of error a tile may show before refining
+        bool orthographic = false;         // screen-space error does not shrink with distance
     };
 
     struct SplatTileSelection {

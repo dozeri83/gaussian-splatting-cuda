@@ -130,9 +130,21 @@ namespace lfs::vis {
                                                         bool preserve_raw = false,
                                                         core::NodeId parent = core::NULL_NODE,
                                                         bool defer_import_license = false, core::Uuid* imported_uuid = nullptr, uint32_t* import_selection_generation = nullptr);
-        // Refines view-dependent (3D Tiles) nodes for the current camera; main thread.
-        void updateTileStreams(const glm::mat4& view, const glm::mat4& projection, float viewport_height,
-                               float vfov_radians, const std::function<void()>& wake);
+        // A camera that view-dependent tile selection serves, with its actual projection.
+        struct TileStreamCamera {
+            glm::mat4 view{1.0f};
+            glm::mat4 projection{1.0f}; // perspective or orthographic; unused when equirectangular
+            float viewport_height = 0.0f;
+            float vfov_radians = 0.0f;
+            bool orthographic = false;
+            float ortho_scale = 0.0f; // orthographic: pixels per world unit
+            bool equirectangular = false;
+            // Other views draw the same model: when they are visible, culling to this
+            // camera's frustum would leave them without the tiles they look at.
+            bool cull = true;
+        };
+        // Refines view-dependent (3D Tiles) nodes for the camera; main thread.
+        void updateTileStreams(const TileStreamCamera& camera, const std::function<void()>& wake);
         [[nodiscard]] SplatTileStreamSettings& tileStreamSettings() { return tile_stream_settings_; }
         // Streams `source` into the splat node `node`; its model then holds only the drawn tiles.
         void attachTileStream(const core::Uuid& node, std::shared_ptr<const io::SplatTileSource> source,

@@ -29,8 +29,10 @@ namespace lfs::io {
                 const auto& tile = source.tiles()[index];
                 if (!visible(tile))
                     return true;
-                const float distance = std::max(tile.distance(view.camera), 1e-6f);
-                const float sse = tile.geometric_error * view.sse_per_error / distance;
+                const float sse = view.orthographic
+                                      ? tile.geometric_error * view.sse_per_error
+                                      : tile.geometric_error * view.sse_per_error /
+                                            std::max(tile.distance(view.camera), 1e-6f);
                 const bool has = tile.splat_count > 0;
                 const bool ready = has && resident(index);
                 if (has)

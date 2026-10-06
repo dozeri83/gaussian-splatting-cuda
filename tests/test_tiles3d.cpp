@@ -293,3 +293,14 @@ TEST(Tiles3d, AddRefinementShowsResidentChildren) {
     EXPECT_EQ(sorted(selection.render), (std::vector<std::uint32_t>{1, 2, 3, 5, 6}));
     EXPECT_TRUE(selection.complete);
 }
+
+TEST(Tiles3d, OrthographicErrorDependsOnZoomNotDistance) {
+    const FakeSource source;
+    // Perspective far away keeps the coarse level, but an orthographic view zoomed in to
+    // 1000 pixels per unit shows every unit of error as 1000 pixels at any distance.
+    auto zoomed = select_splat_tiles(source, {.camera = {0, 0, 1000}, .sse_per_error = 1000, .orthographic = true}, kAll);
+    EXPECT_EQ(sorted(zoomed.render), (std::vector<std::uint32_t>{3, 4, 5, 6}));
+    // Zoomed out to 10 pixels per unit, the coarse error (1) stays below max_sse at any distance.
+    auto wide = select_splat_tiles(source, {.camera = {0, 0, 1}, .sse_per_error = 10, .orthographic = true}, kAll);
+    EXPECT_EQ(sorted(wide.render), (std::vector<std::uint32_t>{1, 2}));
+}
