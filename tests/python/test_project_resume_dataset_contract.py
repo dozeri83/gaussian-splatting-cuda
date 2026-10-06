@@ -102,7 +102,7 @@ def _python_environment() -> tuple[Path, dict[str, str]]:
 
 
 def _run_app(
-    app: Path, home: Path, deadline: float, *args: str
+    app: Path, home: Path, deadline: float, config: Path, *args: str
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -110,7 +110,7 @@ def _run_app(
     env["LFS_ASSET_MANAGER_DIR"] = str(home / "assets")
     env["LFS_ASSET_MANAGER_ASSETS_DIR"] = str(home / "assets" / "assets")
     return subprocess.run(
-        [str(app), "--headless", *args],
+        [str(app), "--headless", "--config", str(config), *args],
         env=env,
         capture_output=True,
         text=True,
@@ -131,10 +131,18 @@ def test_resume_uses_compatible_external_dataset_masks_and_embedded_fallback(tmp
     _make_dataset(incompatible, "other")
     home = tmp_path / "home"
     seed_output = tmp_path / "seed"
+    # Keep the resume fixture short without rounding training intervals to zero.
+    config = tmp_path / "optimization.json"
+    defaults = json.loads(
+        (REPO_ROOT / "tests/data/param_json_golden/mrnf.json").read_text(encoding="utf-8")
+    )
+    defaults["steps_scaler"] = 0
+    config.write_text(json.dumps(defaults), encoding="utf-8")
     seed = _run_app(
         app,
         home,
         deadline,
+        config,
         "--data-path",
         str(dataset),
         "--images",
@@ -185,6 +193,7 @@ def test_resume_uses_compatible_external_dataset_masks_and_embedded_fallback(tmp
         app,
         home,
         deadline,
+        config,
         "--resume",
         str(project),
         "--data-path",
@@ -207,6 +216,7 @@ def test_resume_uses_compatible_external_dataset_masks_and_embedded_fallback(tmp
         app,
         home,
         deadline,
+        config,
         "--resume",
         str(project),
         "--data-path",
@@ -234,6 +244,7 @@ def test_resume_uses_compatible_external_dataset_masks_and_embedded_fallback(tmp
         app,
         home,
         deadline,
+        config,
         "--resume",
         str(project),
         "--data-path",
@@ -266,6 +277,7 @@ def test_resume_uses_compatible_external_dataset_masks_and_embedded_fallback(tmp
                 app,
                 home,
                 deadline,
+                config,
                 "--resume",
                 str(embedded_project),
                 "--iter",
