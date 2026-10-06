@@ -1193,7 +1193,7 @@ static ulong arg_extreme_key(float value, uint position) {
     uint bits = as_type<uint>(value);
     uint order;
     if ((bits & 0x7fffffffu) > 0x7f800000u) {
-        order = position == 0 ? 0xfffffffeu : 0xffffffffu;
+        order = 0xffffffffu;
     } else {
         if ((bits & 0x7fffffffu) == 0u)
             bits = 0u; // -0 ties +0, as the CPU's strict comparison does.
