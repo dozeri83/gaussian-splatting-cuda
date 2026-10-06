@@ -27,7 +27,7 @@ namespace lfs::io {
         static constexpr std::uint32_t kNone = std::numeric_limits<std::uint32_t>::max();
 
         glm::vec3 center{0.0f};
-        glm::mat3 half_axes{0.0f};    // oriented box: columns are half-extent axes
+        glm::mat3 half_axes{0.0f};    // oriented box: columns are mutually orthogonal half-extent axes
         glm::mat4 transform{1.0f};    // content frame -> source-local frame
         float geometric_error = 0.0f; // detail missing versus the children, local units
         bool additive = false;        // ADD refinement: children draw with the parent
@@ -37,15 +37,37 @@ namespace lfs::io {
         std::uint64_t splat_count = 0; // 0: no content
         int sh_degree = 0;
 
-        // Distance from `point` to the oriented box, 0 inside.
+        // Distance from `point` to the oriented box, 0 inside. A zero-length axis (a flat
+        // box, e.g. a planar tile) still has a direction: the one perpendicular to the
+        // others, along which the box has no extent.
         [[nodiscard]] float distance(const glm::vec3& point) const {
-            const glm::vec3 offset = point - center;
-            glm::vec3 outside{0.0f};
+            std::array<glm::vec3, 3> direction{};
+            std::array<float, 3> half{};
+            std::array<int, 3> missing{};
+            int missing_count = 0;
             for (int axis = 0; axis < 3; ++axis) {
-                const float half = glm::length(half_axes[axis]);
-                const float along = half > 0.0f ? std::abs(glm::dot(offset, half_axes[axis])) / half : 0.0f;
-                outside[axis] = std::max(along - half, 0.0f);
+                half[axis] = glm::length(half_axes[axis]);
+                if (half[axis] > 0.0f)
+                    direction[axis] = half_axes[axis] / half[axis];
+                else
+                    missing[missing_count++] = axis;
             }
+            const glm::vec3 offset = point - center;
+            if (missing_count == 3)
+                return glm::length(offset); // a point
+            if (missing_count == 2) {
+                // A segment: any two directions perpendicular to it complete the frame.
+                const glm::vec3 along = direction[3 - missing[0] - missing[1]];
+                const glm::vec3 helper = std::abs(along.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+                direction[missing[0]] = glm::normalize(glm::cross(along, helper));
+                direction[missing[1]] = glm::cross(along, direction[missing[0]]);
+            } else if (missing_count == 1) {
+                direction[missing[0]] =
+                    glm::normalize(glm::cross(direction[(missing[0] + 1) % 3], direction[(missing[0] + 2) % 3]));
+            }
+            glm::vec3 outside{0.0f};
+            for (int axis = 0; axis < 3; ++axis)
+                outside[axis] = std::max(std::abs(glm::dot(offset, direction[axis])) - half[axis], 0.0f);
             return glm::length(outside);
         }
 
@@ -84,7 +106,8 @@ namespace lfs::io {
 
     // 3D Tiles traversal: a tile refines when its screen-space error, measured to its
     // bounding volume, exceeds max_sse. A REPLACE tile draws until all its visible
-    // descendants are resident, so the render set has no holes.
+    // descendants are resident, so the render set has no holes; an ADD tile draws with
+    // whichever of its children are already resident.
     [[nodiscard]] LFS_IO_API SplatTileSelection select_splat_tiles(
         const SplatTileSource& source, const SplatTileView& view,
         const std::function<bool(std::uint32_t)>& resident);

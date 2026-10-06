@@ -31,12 +31,17 @@ namespace {
     }
 
     // A GLB whose JSON chunk declares `count` splats; the probe never reads the payload.
-    void write_glb(const fs::path& path, const std::uint64_t count, const int sh_degree) {
+    // Without `splats` the primitive is a plain mesh, which tilesets skip.
+    void write_glb(const fs::path& path, const std::uint64_t count, const int sh_degree, const bool splats = true) {
         Json attributes = {{"POSITION", 0}};
         if (sh_degree > 0)
             attributes[std::format("KHR_gaussian_splatting:SH_DEGREE_{}_COEF_0", sh_degree)] = 1;
+        Json primitive = {{"attributes", attributes}};
+        if (splats)
+            primitive["extensions"] = {
+                {"KHR_gaussian_splatting", {{"extensions", {{"KHR_gaussian_splatting_compression_spz_2", {{"bufferView", 0}}}}}}}};
         const Json doc = {{"asset", {{"version", "2.0"}}},
-                          {"meshes", {{{"primitives", {{{"attributes", attributes}}}}}}},
+                          {"meshes", {{{"primitives", {primitive}}}}},
                           {"accessors", {{{"count", count}}, {{"count", count}}}}};
         std::string text = doc.dump();
         text.resize((text.size() + 3) & ~std::size_t{3}, ' ');
@@ -113,7 +118,9 @@ TEST(Tiles3d, ParsesTreeRelativeToRootFrame) {
     EXPECT_DOUBLE_EQ((*source)->local_to_world[3][0], 1e6);
     EXPECT_EQ(tiles[0].first_child, 1u);
     EXPECT_EQ(tiles[0].child_count, 2u);
-    EXPECT_FLOAT_EQ(tiles[0].geometric_error, 5.0f); // error in world units / root scale
+    // 3D Tiles 1.1: the error scales with the tile transform (x2), and the local frame
+    // undoes the root transform (/2).
+    EXPECT_FLOAT_EQ(tiles[0].geometric_error, 10.0f);
     EXPECT_NEAR(tiles[1].center.x, -2.0f, 1e-4f);
     EXPECT_EQ(tiles[1].splat_count, 100u);
     EXPECT_EQ(tiles[1].sh_degree, 3);
@@ -178,4 +185,111 @@ TEST(Tiles3d, HonorsMaxScreenSpaceErrorAndCullsOutsideFrustum) {
     view.planes[0] = {1, 0, 0, -2};
     auto culled = select_splat_tiles(source, view, kAll);
     EXPECT_EQ(sorted(culled.render), (std::vector<std::uint32_t>{5, 6}));
+}
+
+namespace {
+    fs::path write_tileset(const fs::path& dir, const Json& root) {
+        const auto path = dir / "tileset.json";
+        write_text(path, Json{{"asset", {{"version", "1.1"}}}, {"geometricError", 20}, {"root", root}}.dump());
+        return path;
+    }
+} // namespace
+
+TEST(Tiles3d, ScalesGeometricErrorByChildTransform) {
+    TempDir dir;
+    write_glb(dir.path / "a.glb", 10, 0);
+    const Json child = {{"transform", {100, 0, 0, 0, 0, 100, 0, 0, 0, 0, 100, 0, 0, 0, 0, 1}},
+                        {"boundingVolume", box(0, 1)},
+                        {"geometricError", 1},
+                        {"content", {{"uri", "a.glb"}}}};
+    auto source = open_tiles3d(
+        write_tileset(dir.path, {{"boundingVolume", box(0, 200)}, {"geometricError", 1000}, {"children", {child}}}));
+    ASSERT_TRUE(source) << source.error();
+    EXPECT_FLOAT_EQ((*source)->tiles()[1].geometric_error, 100.0f);
+}
+
+TEST(Tiles3d, LoadsAllContentsAndSkipsNonSplatContent) {
+    TempDir dir;
+    write_glb(dir.path / "a.glb", 10, 0);
+    write_glb(dir.path / "b.glb", 5, 1);
+    write_glb(dir.path / "mesh.glb", 7, 0, false);
+    write_text(dir.path / "c.b3dm", "b3dm");
+    const Json contents = {{{"uri", "a.glb"}}, {{"uri", "b.glb"}}, {{"uri", "mesh.glb"}}, {{"uri", "c.b3dm"}}};
+    auto source = open_tiles3d(write_tileset(dir.path, {{"boundingVolume", box(0, 1)}, {"geometricError", 0}, {"contents", contents}}));
+    ASSERT_TRUE(source) << source.error();
+    EXPECT_EQ((*source)->tiles()[0].splat_count, 15u);
+    EXPECT_EQ((*source)->tiles()[0].sh_degree, 1);
+    EXPECT_EQ((*source)->skipped_contents, 2u);
+}
+
+TEST(Tiles3d, RejectsTilesetWithoutSplatContent) {
+    TempDir dir;
+    write_glb(dir.path / "mesh.glb", 7, 0, false);
+    auto source = open_tiles3d(
+        write_tileset(dir.path, {{"boundingVolume", box(0, 1)}, {"geometricError", 0}, {"content", {{"uri", "mesh.glb"}}}}));
+    ASSERT_FALSE(source);
+    EXPECT_NE(source.error().find("no Gaussian splat content"), std::string::npos) << source.error();
+}
+
+TEST(Tiles3d, DecodesRelativeContentUris) {
+    TempDir dir;
+    write_glb(dir.path / "tile one.glb", 10, 0);
+    auto source = open_tiles3d(write_tileset(
+        dir.path, {{"boundingVolume", box(0, 1)}, {"geometricError", 0}, {"content", {{"uri", "tile%20one.glb?v=2#x"}}}}));
+    ASSERT_TRUE(source) << source.error();
+    EXPECT_EQ((*source)->tiles()[0].splat_count, 10u);
+
+    auto remote = open_tiles3d(write_tileset(
+        dir.path, {{"boundingVolume", box(0, 1)}, {"geometricError", 0}, {"content", {{"uri", "https://example.com/a.glb"}}}}));
+    ASSERT_FALSE(remote);
+    EXPECT_NE(remote.error().find("scheme"), std::string::npos) << remote.error();
+}
+
+TEST(Tiles3d, RejectsTooDeepTileTree) {
+    TempDir dir;
+    write_glb(dir.path / "a.glb", 10, 0);
+    Json node = {{"boundingVolume", box(0, 1)}, {"geometricError", 0}, {"content", {{"uri", "a.glb"}}}};
+    for (int level = 0; level < 200; ++level)
+        node = {{"boundingVolume", box(0, 1)}, {"geometricError", 1}, {"children", {node}}};
+    auto source = open_tiles3d(write_tileset(dir.path, node));
+    ASSERT_FALSE(source);
+    EXPECT_NE(source.error().find("deeper"), std::string::npos) << source.error();
+}
+
+TEST(Tiles3d, EnclosesSkewedBoxesInOrthogonalOnes) {
+    TempDir dir;
+    write_glb(dir.path / "a.glb", 10, 0);
+    // Non-uniform scale after a 45 degree rotation shears the child's box.
+    const double c = std::sqrt(0.5);
+    const Json child = {{"transform", {4 * c, 4 * c, 0, 0, -c, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}},
+                        {"boundingVolume", {{"box", {0, 0, 0, 1, 1, 0, -1, 1, 0, 0, 0, 1}}}},
+                        {"geometricError", 0},
+                        {"content", {{"uri", "a.glb"}}}};
+    auto source = open_tiles3d(
+        write_tileset(dir.path, {{"boundingVolume", box(0, 20)}, {"geometricError", 10}, {"children", {child}}}));
+    ASSERT_TRUE(source) << source.error();
+    const auto& axes = (*source)->tiles()[1].half_axes;
+    for (int i = 0; i < 3; ++i)
+        for (int j = i + 1; j < 3; ++j)
+            EXPECT_NEAR(glm::dot(axes[i], axes[j]), 0.0f, 1e-3f);
+}
+
+TEST(Tiles3d, FlatBoxDistanceUsesItsNormal) {
+    SplatTile flat;
+    flat.half_axes = glm::mat3(glm::vec3(5, 0, 0), glm::vec3(0, 5, 0), glm::vec3(0));
+    EXPECT_FLOAT_EQ(flat.distance({0, 0, 100}), 100.0f); // above a flat box is not inside
+    EXPECT_FLOAT_EQ(flat.distance({1, 2, 0}), 0.0f);
+    SplatTile point;
+    EXPECT_FLOAT_EQ(point.distance({3, 4, 0}), 5.0f);
+}
+
+TEST(Tiles3d, AddRefinementShowsResidentChildren) {
+    FakeSource source;
+    for (auto& tile : source.tiles_)
+        tile.additive = true;
+    const SplatTileView view{.camera = {0, 0, 10}, .sse_per_error = 1000};
+    // Leaf 4 is missing: its ADD parent and sibling still draw, and the cut is complete.
+    auto selection = select_splat_tiles(source, view, [](const std::uint32_t tile) { return tile != 4; });
+    EXPECT_EQ(sorted(selection.render), (std::vector<std::uint32_t>{1, 2, 3, 5, 6}));
+    EXPECT_TRUE(selection.complete);
 }

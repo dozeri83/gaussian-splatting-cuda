@@ -66,6 +66,13 @@ namespace lfs::io {
             return std::cbrt(std::abs(glm::determinant(glm::dmat3(m))));
         }
 
+        // Largest axis scale of a transform: 3D Tiles 1.1 scales a tile's geometric error
+        // by this factor of its accumulated transform.
+        double max_scale(const glm::dmat4& m) {
+            return std::max({glm::length(glm::dvec3(m[0])), glm::length(glm::dvec3(m[1])),
+                             glm::length(glm::dvec3(m[2]))});
+        }
+
         glm::dvec3 wgs84_to_ecef(const double lon, const double lat, const double height) {
             constexpr double a = 6378137.0;
             constexpr double e2 = 6.69437999014e-3;
@@ -73,6 +80,41 @@ namespace lfs::io {
             return {(n + height) * std::cos(lat) * std::cos(lon),
                     (n + height) * std::cos(lat) * std::sin(lon),
                     (n * (1.0 - e2) + height) * std::sin(lat)};
+        }
+
+        // A box transformed by non-uniform scale and rotation becomes a parallelepiped whose
+        // axes are no longer orthogonal; distances assume orthogonal axes. Replace it by
+        // the orthogonal box around it (support extents along an orthonormal frame built
+        // from its longest axes), which can only make a tile look nearer, never farther.
+        glm::dmat3 enclose_orthogonal(const glm::dmat3& axes) {
+            constexpr double kTolerance = 1e-6;
+            bool orthogonal = true;
+            for (int i = 0; i < 3; ++i)
+                for (int j = i + 1; j < 3; ++j)
+                    orthogonal = orthogonal && std::abs(glm::dot(axes[i], axes[j])) <=
+                                                   kTolerance * glm::length(axes[i]) * glm::length(axes[j]);
+            if (orthogonal)
+                return axes;
+            std::array<int, 3> order{0, 1, 2};
+            std::ranges::sort(order, [&](const int a, const int b) {
+                return glm::length(axes[a]) > glm::length(axes[b]);
+            });
+            const glm::dvec3 e0 = glm::normalize(axes[order[0]]);
+            glm::dvec3 e1 = axes[order[1]] - glm::dot(axes[order[1]], e0) * e0;
+            if (glm::length(e1) <= kTolerance * glm::length(axes[order[0]]))
+                e1 = axes[order[2]] - glm::dot(axes[order[2]], e0) * e0;
+            if (glm::length(e1) <= kTolerance * glm::length(axes[order[0]]))
+                e1 = glm::cross(e0, std::abs(e0.x) < 0.9 ? glm::dvec3(1, 0, 0) : glm::dvec3(0, 1, 0));
+            e1 = glm::normalize(e1);
+            const std::array<glm::dvec3, 3> frame{e0, e1, glm::cross(e0, e1)};
+            glm::dmat3 enclosing(0.0);
+            for (int i = 0; i < 3; ++i) {
+                double extent = 0.0;
+                for (int k = 0; k < 3; ++k)
+                    extent += std::abs(glm::dot(axes[k], frame[i]));
+                enclosing[i] = frame[i] * extent;
+            }
+            return enclosing;
         }
 
         // Bounding volume -> oriented box in the source-local frame. `to_local` maps the
@@ -85,13 +127,14 @@ namespace lfs::io {
                     throw std::runtime_error("bounding box must have 12 values");
                 tile.center = glm::vec3(to_local * glm::dvec4(b[0], b[1], b[2], 1.0));
                 const glm::dmat3 axes(b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11]);
-                tile.half_axes = glm::mat3(glm::dmat3(to_local) * axes);
+                tile.half_axes = glm::mat3(enclose_orthogonal(glm::dmat3(to_local) * axes));
             } else if (volume.contains("sphere")) {
                 const auto s = volume.at("sphere").get<std::vector<double>>();
                 if (s.size() != 4)
                     throw std::runtime_error("bounding sphere must have 4 values");
                 tile.center = glm::vec3(to_local * glm::dvec4(s[0], s[1], s[2], 1.0));
-                tile.half_axes = glm::mat3(static_cast<float>(s[3] * uniform_scale(to_local)));
+                // Non-uniform scale stretches the sphere; its largest axis bounds it.
+                tile.half_axes = glm::mat3(static_cast<float>(s[3] * max_scale(to_local)));
             } else if (volume.contains("region")) {
                 const auto r = volume.at("region").get<std::vector<double>>();
                 if (r.size() != 6)
@@ -177,7 +220,9 @@ namespace lfs::io {
             const glm::dmat4 to_local = context.ecef_to_local * world;
             auto& tile = parsed.tile;
             tile.transform = glm::mat4(to_local);
-            tile.geometric_error = static_cast<float>(node.at("geometricError").get<double>() *
+            // Error in the tileset frame (scaled by the accumulated tile transform), then
+            // expressed in the source-local frame the distances are measured in.
+            tile.geometric_error = static_cast<float>(node.at("geometricError").get<double>() * max_scale(world) *
                                                       uniform_scale(context.ecef_to_local));
             tile.additive = node.contains("refine") ? node.at("refine").get<std::string>() == "ADD" : parent_additive;
             read_bounds(node.at("boundingVolume"), to_local, context.ecef_to_local, tile);

@@ -46,10 +46,13 @@ namespace lfs::io {
                 for (std::uint32_t c = 0; c < tile.child_count; ++c)
                     covered = visit(tile.first_child + c, children) && covered;
                 if (tile.additive) {
+                    // ADD: children only add detail on top of the drawn parent, so a missing
+                    // (or failed) child leaves no hole; show the ones already loaded. Without
+                    // parent content the children alone must cover the region.
                     if (ready)
                         render.push_back(index);
                     render.insert(render.end(), children.begin(), children.end());
-                    return covered && (!has || ready);
+                    return has ? ready : covered;
                 }
                 if (covered || !ready) {
                     render.insert(render.end(), children.begin(), children.end());
