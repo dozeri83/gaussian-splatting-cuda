@@ -237,7 +237,7 @@ static uint lfs_precise_divide(uint x, uint y) {
                     const auto root = bits("sqrt(fmax(0.0f, 1.0f - " + x + " * " + x + "))");
                     const auto result = op == ExprOp::Asin ? bits("atan2(" + x + ", " + f(root) + ")")
                                                            : bits("atan2(" + f(root) + ", " + x + ")");
-                    return "((as_type<uint>(" + x + ") & 0x7fffffffu) > 0x3f800000u ? 0x7fc00000u : " + result + ")";
+                    return define("((as_type<uint>(" + x + ") & 0x7fffffffu) > 0x3f800000u ? 0x7fc00000u : " + v(result) + ")");
                 }
                 case ExprOp::Atan: return bits("atan(" + x + ")");
                 case ExprOp::Sinh: return bits("sinh(" + x + ")");
