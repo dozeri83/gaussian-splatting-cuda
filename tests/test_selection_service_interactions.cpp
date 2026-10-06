@@ -409,15 +409,14 @@ TEST_F(SelectionServiceInteractionsTest, BrushAndLassoAcceptSelectedNodeInMultiS
         80.0f,
     }));
 
-    const auto brush = service_->selectBrush(10.0f, 10.0f, 5.0f, lfs::vis::SelectionMode::Replace, 0);
+    const auto brush = service_->selectBrush(10.0f, 10.0f, 5.0f, lfs::vis::SelectionMode::Replace);
     ASSERT_TRUE(brush.success) << brush.error;
     EXPECT_EQ(brush.affected_count, 2u);
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0, 1, 0}));
 
     const auto lasso = service_->selectLasso(
         {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}},
-        lfs::vis::SelectionMode::Replace,
-        0);
+        lfs::vis::SelectionMode::Replace);
     ASSERT_TRUE(lasso.success) << lasso.error;
     EXPECT_EQ(lasso.affected_count, 2u);
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0, 1, 0}));

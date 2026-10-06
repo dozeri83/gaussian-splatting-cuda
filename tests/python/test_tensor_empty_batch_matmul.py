@@ -18,7 +18,7 @@ def test_empty_batch_matmul_matches_numpy(lf, numpy, device, left, right):
     result = a.matmul(b)
     expected = numpy.matmul(numpy.zeros(left, dtype=numpy.float32), numpy.zeros(right, dtype=numpy.float32))
     assert result.shape == expected.shape
-    assert result.device == device
+    assert result.device == a.device
     numpy.testing.assert_array_equal(result.numpy(), expected)
     # An empty operation must leave CUDA usable for subsequent work.
     numpy.testing.assert_array_equal(lf.Tensor.ones((2, 2), device=device).matmul(lf.Tensor.ones((2, 2), device=device)).numpy(), numpy.full((2, 2), 2))
