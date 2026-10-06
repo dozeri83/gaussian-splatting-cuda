@@ -514,10 +514,10 @@ namespace {
         const Tensor frozen = bool_mask(n, 5);
         const Tensor crop = bool_mask(n, 7);
         const Tensor raw_scales = pattern({n, 3}, 2.f, 17);
-        const Tensor far = bool_mask(n, 3);
+        const Tensor far_splats = bool_mask(n, 3);
         const Tensor share = pattern({n}, 0.4f, 23).abs();
-        const ops::AdamMasks masks{frozen, crop, raw_scales, far, share};
-        table->validate_far_mask(far.ptr<bool>());
+        const ops::AdamMasks masks{frozen, crop, raw_scales, far_splats, share};
+        table->validate_far_mask(far_splats.ptr<bool>());
         out.snapshot.exact_i("adam.validate_far_mask", 1);
 
         struct Group {
@@ -1008,8 +1008,8 @@ namespace {
         keep(out.snapshot, backend, "mrnf.noise", means, kExact);
         auto raw = pattern_mrnf({n}, 1.5f, 9);
         auto log_scales = pattern_mrnf({n, 3}, 0.4f, 11);
-        const Tensor far = bool_mask(n, 3);
-        table->decay(raw, log_scales, frozen, far, {.opacity_decay = 0.02f, .scale_decay = 0.01f, .far_decay_scale = 0.25f, .train_t = 0.4f});
+        const Tensor far_splats = bool_mask(n, 3);
+        table->decay(raw, log_scales, frozen, far_splats, {.opacity_decay = 0.02f, .scale_decay = 0.01f, .far_decay_scale = 0.25f, .train_t = 0.4f});
         keep(out.snapshot, backend, "mrnf.decay.opacity", raw, kExact);
         keep(out.snapshot, backend, "mrnf.decay.scales", log_scales, kExact);
 
