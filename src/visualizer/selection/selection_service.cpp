@@ -546,11 +546,11 @@ namespace lfs::vis {
                 core::Tensor expanded;
                 if (preserves_active_group) {
                     expanded = existing_mask->eq(group_id);
-                    if (expanded.device() != core::Device::CUDA) {
-                        expanded = expanded.cuda();
+                    if (expanded.device() != core::Device::GPU) {
+                        expanded = expanded.gpu();
                     }
                 } else {
-                    expanded = core::Tensor::zeros({full_count}, core::Device::CUDA, core::DataType::Bool);
+                    expanded = core::Tensor::zeros({full_count}, core::Device::GPU, core::DataType::Bool);
                 }
                 expanded.index_copy_(0, selected_indices, selection);
                 return expanded;
