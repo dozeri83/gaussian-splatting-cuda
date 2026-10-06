@@ -1855,9 +1855,7 @@ contract["test_selection_submode_follows_native_mode"](lf)
     }
 
     TEST_F(VisualizerImplResetTest, DroppedProjectReplacesCurrentDuringHydration) {
-        if (!cuda_device_available()) {
-            GTEST_SKIP() << "CUDA device unavailable";
-        }
+        LFS_CUDA_BACKEND_OR_RETURN();
         auto options = projectOptions();
         lfs::vis::VisualizerImpl viewer(options);
         ASSERT_TRUE(viewer.getParameterManager()->ensureLoaded());
@@ -1866,9 +1864,7 @@ contract["test_selection_submode_follows_native_mode"](lf)
     }
 
     TEST_F(VisualizerImplResetTest, DroppedProjectReplacesCurrentAfterHydration) {
-        if (!cuda_device_available()) {
-            GTEST_SKIP() << "CUDA device unavailable";
-        }
+        LFS_CUDA_BACKEND_OR_RETURN();
         auto options = projectOptions();
         lfs::vis::VisualizerImpl viewer(options);
         ASSERT_TRUE(viewer.getParameterManager()->ensureLoaded());
