@@ -876,10 +876,10 @@ class Tensor:
     def from_dlpack(obj: object) -> Tensor:
         """Create tensor from DLPack capsule or object"""
 
-    def __getitem__(self, arg: object, /) -> Tensor:
+    def __getitem__(self, key: object | None) -> Tensor:
         """Get item/slice"""
 
-    def __setitem__(self, arg0: object, arg1: object, /) -> None:
+    def __setitem__(self, key: object | None, value: object) -> None:
         """Set item/slice"""
 
     @overload
@@ -2364,15 +2364,6 @@ class OptimizationParams:
 
     @screen_share_penalty.setter
     def screen_share_penalty(self, arg: float, /) -> None: ...
-
-    @property
-    def oversize_split_fraction(self) -> float:
-        """
-        Fraction of MRNF growth budget used to split Gaussians over the screen-share cap; 0 disables
-        """
-
-    @oversize_split_fraction.setter
-    def oversize_split_fraction(self, arg: float, /) -> None: ...
 
     @property
     def steps_scaler(self) -> float:

@@ -887,6 +887,10 @@ set(TEST_FILES
     test_fastgs_sort_buffers.cpp
     test_warp_cull_blend.cpp
     test_warp_cull_bwd.cpp
+    test_thin_structure.cpp
+    test_blob_seeding.cpp
+    test_rendered_structure.cpp
+    test_gradient_residual.cpp
     test_fused_reg_loss.cpp
     test_fused_bg_blend.cpp
     test_photometric_hygiene.cpp
@@ -1757,6 +1761,7 @@ set(LFS_PYTHON_FAST_TESTS
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_store_subscriptions.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_float16_import.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_basic_indexing.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_arg_extrema_nan.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_empty_slices.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_empty_batch_matmul.py
@@ -1868,6 +1873,7 @@ add_test(NAME lichtfeld.python.gpu
     COMMAND ${Python_EXECUTABLE} -m pytest -q
         -m gpu
         ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_basic_indexing.py
         ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_arg_extrema_nan.py
         ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_empty_slices.py
         ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_empty_batch_matmul.py

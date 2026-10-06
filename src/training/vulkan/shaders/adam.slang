@@ -12,6 +12,9 @@ struct Params {
     float lr, bc1, bc2, beta1, beta2, eps;
     float frozenScale, cropScale;
     float screenLimit, screenPenalty, stepSize;
+    uint64_t meanScales, meanFar;
+    uint meanScaleCount, meanFarCount;
+    float meanMedian;
 };
 struct Push { uint64_t parameters; };
 
@@ -173,6 +176,13 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex, uniform Push pu
         bool valid = row < p.primitives;
         bool apply = valid;
         float step = rowScale(p, row, false);
+        if (valid && (p.entryCount & 1u) != 0u && p.meanScales != 0 && p.meanFar != 0 &&
+            row < p.meanFarCount && uint64_t(row) * 3 + 2 < p.meanScaleCount && p.meanMedian > 0.0f &&
+            ((Ptr<uint8_t, Access.Read>)p.meanFar)[row] != 0) {
+            Ptr<float, Access.Read> scales = (Ptr<float, Access.Read>)p.meanScales;
+            float extent = exp((scales[row * 3] + scales[row * 3 + 1] + scales[row * 3 + 2]) * (1.0f / 3.0f));
+            step *= qMin(qMax(extent / p.meanMedian, 1.0f), 300.0f);
+        }
         if (valid && p.frozenMask != 0 && row < p.frozenCount && ((Ptr<uint8_t, Access.Read>)p.frozenMask)[row] != 0 && p.frozenScale == 0.0f) apply = false;
         if (valid && p.cropMask != 0 && row < p.cropCount && ((Ptr<uint8_t, Access.Read>)p.cropMask)[row] != 0 && p.cropScale == 0.0f) apply = false;
         if (valid) for (uint a=0; a<attrs; ++a) {

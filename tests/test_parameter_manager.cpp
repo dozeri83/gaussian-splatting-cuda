@@ -10,12 +10,14 @@
 #include "io/argument_parser.hpp"
 #include "io/project_chapters.hpp"
 
+#include <array>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <random>
+#include <string_view>
 
 namespace {
 
@@ -368,6 +370,55 @@ namespace {
         EXPECT_EQ(partial->optimization.iterations, 4321u);
     }
 
+    TEST(ParameterManagerTest, ConfigImportRejectsUnknownOptimizationEnums) {
+        const auto config_path = unique_temp_config_path();
+        const std::array<std::pair<std::string_view, std::string_view>, 2> cases = {{
+            {"bg_mode", "solid_color"},
+            {"eval_space", "distorted"},
+        }};
+
+        for (const auto& [field, accepted_value] : cases) {
+            SCOPED_TRACE(field);
+            std::ofstream(config_path)
+                << nlohmann::json{{"optimization", {{field, "unknown-value"}}}}.dump();
+            const auto imported =
+                lfs::core::param::read_training_parameters_from_json(config_path);
+            ASSERT_FALSE(imported.has_value());
+            const auto detail = imported.error().detail();
+            EXPECT_NE(detail.find(field), std::string::npos);
+            EXPECT_NE(detail.find(accepted_value), std::string::npos);
+        }
+
+        std::error_code ec;
+        std::filesystem::remove(config_path, ec);
+    }
+
+    TEST(ParameterManagerTest, ConfigImportRejectsWrongJsonTypesWithFieldAndExpectedType) {
+        const auto config_path = unique_temp_config_path();
+        const std::array<std::pair<nlohmann::json, std::string_view>, 7> cases = {{
+            {nlohmann::json{{"dataset", {{"max_width", "160"}}}}, "max_width"},
+            {nlohmann::json{{"optimization", {{"max_cap", 100.5}}}}, "max_cap"},
+            {nlohmann::json{{"dataset", {{"images", 123}}}}, "images"},
+            {nlohmann::json{{"optimization", {{"bg_color", "black"}}}}, "bg_color"},
+            {nlohmann::json{{"optimization", {{"eval_steps", {1, 2.5}}}}}, "eval_steps"},
+            {nlohmann::json{{"dataset", {{"loading_params", {{"use_cpu_memory", "yes"}}}}}}, "loading_params.use_cpu_memory"},
+            {nlohmann::json{{"server", {{"tcp_connection", "yes"}}}}, "tcp_connection"},
+        }};
+
+        for (const auto& [config, field] : cases) {
+            SCOPED_TRACE(field);
+            std::ofstream(config_path) << config.dump();
+            const auto imported = lfs::core::param::read_training_parameters_from_json(config_path);
+            ASSERT_FALSE(imported.has_value());
+            const auto detail = imported.error().detail();
+            EXPECT_NE(detail.find(field), std::string::npos);
+            EXPECT_NE(detail.find("expected"), std::string::npos);
+        }
+
+        std::error_code ec;
+        std::filesystem::remove(config_path, ec);
+    }
+
     TEST(ParameterManagerTest, SessionDefaultsCanReplaceCheckpointImportState) {
         lfs::vis::ParameterManager manager;
         const auto load_result = manager.ensureLoaded();
@@ -486,6 +537,30 @@ namespace {
         auto rejected = target.restorePendingProjectState(invalid);
         EXPECT_FALSE(rejected);
         EXPECT_EQ(target.getCurrentParams("mcmc").iterations, 101u);
+    }
+
+    TEST(ParameterManagerTest, ProjectResumeRetainsAutomaticCapacityValues) {
+        lfs::vis::ParameterManager source;
+        ASSERT_TRUE(source.ensureLoaded());
+        source.modifyActiveParams([](auto& params) {
+            params.max_cap = 1'000'000;
+            params.grow_fraction = -1.0f;
+            params.shs_lr = -1.0f;
+        });
+        auto captured = source.capturePendingProjectState();
+        ASSERT_TRUE(captured) << captured.error().user_message();
+
+        lfs::vis::ParameterManager resumed;
+        ASSERT_TRUE(resumed.ensureLoaded());
+        auto restored = resumed.restorePendingProjectState(*captured);
+        ASSERT_TRUE(restored) << restored.error().user_message();
+        auto params = resumed.copyActiveParams();
+        EXPECT_FLOAT_EQ(params.grow_fraction, -1.0f);
+        EXPECT_FLOAT_EQ(params.shs_lr, -1.0f);
+
+        params.resolve_mrnf_capacity_defaults();
+        EXPECT_NEAR(params.grow_fraction, 0.0758f, 1.0e-7f);
+        EXPECT_FLOAT_EQ(params.shs_lr, 0.005f);
     }
 
     TEST(ParameterValidationTest, RejectsCrashProneIterationAndNumericValues) {

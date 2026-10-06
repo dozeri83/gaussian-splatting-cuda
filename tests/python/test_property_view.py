@@ -504,8 +504,17 @@ EXPECTED_SELECT_ROWS = {
 EXPECTED_ADVANCED_IDS = (
     "means_lr_end",
     "scaling_lr_end",
+    "late_lr_anneal",
     "cropbox_lr_scale",
     "cropbox_loss_weight",
+    "scale_reg_decay_power",
+    "erank_reg",
+    "dc_reg",
+    "sh_rest_reg",
+    "thin_structure_weight",
+    "gradient_loss_weight",
+    "opacity_decay_rendered_only",
+    "densify_structure_weight",
     "morton_reorder_interval",
     "min_opacity",
     "growth_grad_threshold",
@@ -518,8 +527,8 @@ EXPECTED_ADVANCED_IDS = (
     "densify_error_map",
     "max_screen_share",
     "screen_share_penalty",
-    "oversize_split_fraction",
     "use_edge_map",
+    "ppisp_holdout_appearance",
 )
 
 
@@ -556,7 +565,7 @@ def test_full_migration_inventory_and_schema_are_exact(lf):
     group_info = lf.ui.property_group_info("optimization")
     resolved_runs = property_view.resolve_runs(group_info)
     rendered = tuple(prop for run in resolved_runs for prop in run.prop_ids)
-    assert len(EXPECTED_RENDERED_PROP_IDS) == 82  # Backend alone has a bespoke selector.
+    assert len(EXPECTED_RENDERED_PROP_IDS) == 91  # Backend has a bespoke selector.
     assert len(rendered) == len(set(rendered)) == len(EXPECTED_RENDERED_PROP_IDS)
     assert set(rendered) == EXPECTED_RENDERED_PROP_IDS
 
@@ -742,7 +751,8 @@ def test_all_number_rows_match_registry_declarations(lf):
         assert prop_info["precision"] == precision
         assert prop_info["step"] == pytest.approx(step)
         if prop_id in property_view.LEARNING_RATES:
-            assert prop_info["live_update"] is True
+            # Opacity LR is fixed during training on this branch; late_lr_anneal schedules it.
+            assert prop_info["live_update"] is (prop_id != "opacity_lr")
 
 
 def test_checkbox_and_select_rows_match_registry_declarations(lf):

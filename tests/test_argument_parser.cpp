@@ -736,9 +736,23 @@ TEST(ArgumentParserTest, TrainingDefaultsApplyMaxWidthCap) {
     EXPECT_EQ((*parsed)->optimization.morton_reorder_interval, 5000u);
 }
 
-TEST(ArgumentParserTest, ExposureCorrectionFlagSetsField) {
+TEST(ArgumentParserTest, ExposureCorrectionDefaultsOnAndCanBeDisabled) {
     const auto data_path = make_test_path("lfs_arg_parser_exposure_correction_data");
     const auto output_path = make_test_path("lfs_arg_parser_exposure_correction_output");
+
+    const char* default_argv[] = {
+        "LichtFeld-Studio",
+        "--headless",
+        "--data-path",
+        data_path.c_str(),
+        "--output-path",
+        output_path.c_str()};
+    auto default_parsed = lfs::io::args::parse_args_and_params(
+        static_cast<int>(std::size(default_argv)), default_argv);
+    ASSERT_TRUE(default_parsed.has_value()) << default_parsed.error();
+    EXPECT_TRUE((*default_parsed)->optimization.use_exposure_correction);
+    EXPECT_FALSE((*default_parsed)->optimization.use_bilateral_grid);
+    EXPECT_FALSE((*default_parsed)->optimization.use_ppisp);
 
     const char* argv[] = {
         "LichtFeld-Studio",
@@ -747,10 +761,10 @@ TEST(ArgumentParserTest, ExposureCorrectionFlagSetsField) {
         data_path.c_str(),
         "--output-path",
         output_path.c_str(),
-        "--exposure-correction"};
+        "--no-exposure-correction"};
     auto parsed = lfs::io::args::parse_args_and_params(static_cast<int>(std::size(argv)), argv);
     ASSERT_TRUE(parsed.has_value()) << parsed.error();
-    EXPECT_TRUE((*parsed)->optimization.use_exposure_correction);
+    EXPECT_FALSE((*parsed)->optimization.use_exposure_correction);
     EXPECT_FALSE((*parsed)->optimization.use_bilateral_grid);
     EXPECT_FALSE((*parsed)->optimization.use_ppisp);
     EXPECT_EQ((*parsed)->optimization.exposure_correction_grid_start_iter, 1000);
@@ -815,6 +829,31 @@ TEST(ArgumentParserTest, MortonReorderIntervalFlag) {
         static_cast<int>(std::size(argv_1000)), argv_1000);
     ASSERT_TRUE(parsed_1000.has_value()) << parsed_1000.error();
     EXPECT_EQ((*parsed_1000)->optimization.morton_reorder_interval, 1000u);
+}
+
+TEST(ArgumentParserTest, MrnfCapacityDefaultsResolveAfterCliOverrides) {
+    const auto data_path = make_test_path("lfs_arg_parser_mrnf_capacity_data");
+    const auto output_path = make_test_path("lfs_arg_parser_mrnf_capacity_output");
+    const char* argv[] = {
+        "LichtFeld-Studio",
+        "--headless",
+        "--data-path",
+        data_path.c_str(),
+        "--output-path",
+        output_path.c_str(),
+        "--strategy",
+        "mrnf",
+        "--max-cap",
+        "1000000"};
+
+    auto parsed = lfs::io::args::parse_args_and_params(static_cast<int>(std::size(argv)), argv);
+    ASSERT_TRUE(parsed.has_value()) << parsed.error();
+    EXPECT_FLOAT_EQ((*parsed)->optimization.grow_fraction, -1.0f);
+    EXPECT_FLOAT_EQ((*parsed)->optimization.shs_lr, -1.0f);
+
+    (*parsed)->optimization.resolve_mrnf_capacity_defaults();
+    EXPECT_NEAR((*parsed)->optimization.grow_fraction, 0.0758f, 1.0e-7f);
+    EXPECT_FLOAT_EQ((*parsed)->optimization.shs_lr, 0.005f);
 }
 
 TEST(ArgumentParserTest, SafeModeIsProcessLocalAndNotATrainingConfigurationOption) {
@@ -928,6 +967,37 @@ TEST(ArgumentParserTest, CommandLineOverridesConfigAfterLoading) {
 
     EXPECT_EQ((*parsed)->optimization.iterations, 777u);
     EXPECT_FLOAT_EQ((*parsed)->optimization.opacity_lr, 0.0375f);
+}
+
+TEST(ArgumentParserTest, ConfigRejectsWrongDatasetJsonTypeBeforeApplyingOverrides) {
+    const auto dir = std::filesystem::path(make_test_path("lfs_arg_parser_config_wrong_dataset_type"));
+    const auto config_path = dir / "config.json";
+    std::filesystem::create_directories(dir);
+    const auto config = nlohmann::json{
+        {"optimization", lfs::core::param::OptimizationParameters::mrnf_defaults().to_json()},
+        {"dataset", {{"max_width", "160"}}},
+    };
+    std::ofstream(config_path) << config.dump();
+
+    const auto data_path = (dir / "data").string();
+    const auto output_path = (dir / "output").string();
+    const auto config_text = config_path.string();
+    const char* argv[] = {
+        "LichtFeld-Studio",
+        "--headless",
+        "--data-path",
+        data_path.c_str(),
+        "--output-path",
+        output_path.c_str(),
+        "--config",
+        config_text.c_str()};
+
+    const auto parsed = lfs::io::args::parse_args_and_params(static_cast<int>(std::size(argv)), argv);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("dataset.max_width"), std::string::npos) << parsed.error();
+    EXPECT_NE(parsed.error().find("integer"), std::string::npos) << parsed.error();
 }
 
 TEST(ArgumentParserTest, Mesh2SplatParsesOutputPathAndOptions) {
@@ -1457,6 +1527,62 @@ TEST(ArgumentParserTest, NegativeShDegreeIntervalReportsSuppliedValue) {
     EXPECT_EQ(parsed.error().find("18446744073709551615"), std::string::npos);
 }
 
+TEST(ArgumentParserTest, TrainingRejectsInvalidNormalLossSpace) {
+    const auto data_path = make_test_path("lfs_arg_parser_invalid_normal_space_data");
+    const auto output_path = make_test_path("lfs_arg_parser_invalid_normal_space_output");
+
+    for (const auto& value : {"bogus", "WORLD", "", "42"}) {
+        SCOPED_TRACE(std::string("--normal-loss-space=") + value);
+        const char* argv[] = {
+            "LichtFeld-Studio",
+            "--headless",
+            "--data-path",
+            data_path.c_str(),
+            "--output-path",
+            output_path.c_str(),
+            "--normal-loss-space",
+            value};
+
+        auto parsed = lfs::io::args::parse_args_and_params(static_cast<int>(std::size(argv)), argv);
+        ASSERT_FALSE(parsed.has_value());
+        EXPECT_NE(parsed.error().find("--normal-loss-space must be one of"), std::string::npos) << parsed.error();
+    }
+}
+
+TEST(ArgumentParserTest, TrainingConfigRejectsUnknownNormalLossSpace) {
+    const auto config_path = std::filesystem::path(make_test_path("lfs_invalid_normal_space_config")) / "config.json";
+    {
+        auto config_json = lfs::core::param::OptimizationParameters::mrnf_defaults().to_json();
+        config_json["normal_loss_space"] = "bogus";
+        std::ofstream config_file(config_path);
+        config_file << config_json.dump(2);
+    }
+
+    auto parsed = lfs::core::param::read_optim_params_from_json(config_path);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("normal_loss_space"), std::string::npos) << parsed.error();
+    EXPECT_NE(parsed.error().find("bogus"), std::string::npos) << parsed.error();
+    EXPECT_NE(parsed.error().find("camera-opencv"), std::string::npos) << parsed.error();
+    EXPECT_NE(parsed.error().find("world"), std::string::npos) << parsed.error();
+}
+
+TEST(ArgumentParserTest, TrainingConfigRejectsUnknownBackgroundMode) {
+    const auto config_path = std::filesystem::path(make_test_path("lfs_invalid_bg_mode_config")) / "config.json";
+    {
+        auto config_json = lfs::core::param::OptimizationParameters::mrnf_defaults().to_json();
+        config_json["bg_mode"] = "future-mode";
+        std::ofstream config_file(config_path);
+        config_file << config_json.dump(2);
+    }
+
+    auto parsed = lfs::core::param::read_optim_params_from_json(config_path);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("bg_mode"), std::string::npos) << parsed.error();
+    EXPECT_NE(parsed.error().find("future-mode"), std::string::npos) << parsed.error();
+    EXPECT_NE(parsed.error().find("solid_color"), std::string::npos) << parsed.error();
+    EXPECT_NE(parsed.error().find("modulation"), std::string::npos) << parsed.error();
+}
+
 TEST(ArgumentParserTest, TrainingParsesNoNormalAutoGenerate) {
     const auto data_path = make_test_path("lfs_arg_parser_no_normal_auto_data");
     const auto output_path = make_test_path("lfs_arg_parser_no_normal_auto_output");
@@ -1922,6 +2048,34 @@ TEST(ArgumentParserTest, ResumeConfigKeysPopulateExplicitOverrides) {
     EXPECT_EQ(restored.optimization.eval_steps, std::vector<size_t>({30100}));
     EXPECT_EQ(restored.optimization.save_steps, std::vector<size_t>({30100}));
     EXPECT_EQ(restored.dataset.test_every, 64);
+}
+
+TEST(ArgumentParserTest, InitFileConflictsWithRandomInitialization) {
+    const auto data_path = make_test_path("lfs_arg_parser_random_init_data");
+    const auto output_path = make_test_path("lfs_arg_parser_random_init_output");
+    const auto init_path = std::filesystem::path(
+                               make_test_path("lfs_arg_parser_random_init_input")) /
+                           "init.ply";
+    std::ofstream(init_path).put('\n');
+    const auto init_text = init_path.string();
+
+    const char* argv[] = {
+        "LichtFeld-Studio",
+        "--headless",
+        "--data-path",
+        data_path.c_str(),
+        "--output-path",
+        output_path.c_str(),
+        "--random",
+        "--init",
+        init_text.c_str(),
+    };
+    auto parsed = lfs::io::args::parse_args_and_params(
+        static_cast<int>(std::size(argv)), argv);
+
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(parsed.error().find("--init"), std::string::npos);
+    EXPECT_NE(parsed.error().find("--random"), std::string::npos);
 }
 
 TEST(ArgumentParserTest, ViewModeHonorsMcpPortOverride) {
@@ -2570,7 +2724,7 @@ TEST(ArgumentParserTest, IterationsAloneRescalesTimetable) {
     EXPECT_FLOAT_EQ(opt.steps_scaler, 7'000.f / 30'000.f);
     EXPECT_FLOAT_EQ(opt.image_count_scaler, 1.f);
     EXPECT_EQ(opt.stop_refine, 6'650u);
-    EXPECT_EQ(opt.refine_every, 47u);
+    EXPECT_EQ(opt.refine_every, 38u);
     EXPECT_EQ(opt.sh_degree_interval, 233u);
     EXPECT_EQ(opt.eval_steps, expected_steps);
     EXPECT_EQ(opt.save_steps, expected_steps);
@@ -2588,7 +2742,7 @@ TEST(ArgumentParserTest, ScalingPrecedesAbsoluteStepOverrides) {
     EXPECT_EQ(opt.eval_steps, std::vector<size_t>{1000});
     EXPECT_EQ(opt.iterations, 15000u);
     EXPECT_EQ(opt.stop_refine, 14250u);
-    EXPECT_EQ(opt.refine_every, 100u);
+    EXPECT_EQ(opt.refine_every, 82u);
     EXPECT_TRUE((*parsed)->overrides.has_optimization_key("morton_reorder_interval"));
     lfs::core::param::TrainingParameters restored;
     apply_explicit_training_overrides(restored, (*parsed)->overrides);
@@ -2628,7 +2782,7 @@ TEST(ArgumentParserTest, ExplicitIterationsRespectDisabledConfigScaling) {
         ASSERT_TRUE(parsed) << parsed.error();
         EXPECT_EQ((*parsed)->optimization.iterations, 2500u);
         EXPECT_EQ((*parsed)->optimization.stop_refine, 28'500u);
-        EXPECT_EQ((*parsed)->optimization.refine_every, 200u);
+        EXPECT_EQ((*parsed)->optimization.refine_every, 163u);
         EXPECT_FLOAT_EQ((*parsed)->optimization.steps_scaler, disabled_scaler);
     }
     std::filesystem::remove(path);

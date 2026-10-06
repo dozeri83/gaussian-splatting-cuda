@@ -53,6 +53,17 @@ namespace lfs::core {
             AlphaConsistent   // Enforce exact alpha values from mask
         };
 
+        enum class PPISPHoldoutAppearance { Mean,
+                                            Nearest };
+
+        [[nodiscard]] inline constexpr std::optional<PPISPHoldoutAppearance> ppisp_holdout_appearance_from_string(std::string_view value) noexcept {
+            if (value == "mean")
+                return PPISPHoldoutAppearance::Mean;
+            if (value == "nearest")
+                return PPISPHoldoutAppearance::Nearest;
+            return std::nullopt;
+        }
+
         enum class EvalSpace {
             Distorted,
             Undistorted,
@@ -201,6 +212,7 @@ namespace lfs::core {
             float shs_lr = 0.0025f;
             float opacity_lr = 0.025f;
             float scaling_lr = 0.005f;
+            float late_lr_anneal = 1.0f;
             float scaling_lr_end = 0.005f;
             float rotation_lr = 0.001f;
             // Adam and refinement signals only; strategy noise, decay, and resets remain crop-unaware.
@@ -216,6 +228,14 @@ namespace lfs::core {
             int sh_degree = 3;
             float opacity_reg = 0.01f;
             float scale_reg = 0.01f;
+            float scale_reg_decay_power = -1.0f;
+            float erank_reg = 0.0f;
+            float dc_reg = 0.0f;
+            float sh_rest_reg = 0.0f;
+            float thin_structure_weight = 0.0f;
+            float gradient_loss_weight = 0.0f;
+            bool opacity_decay_rendered_only = false;
+            float densify_structure_weight = 0.0f;
             float init_opacity = 0.5f;
             float init_scaling = 0.1f;
             int max_cap = 1000000;
@@ -277,7 +297,7 @@ namespace lfs::core {
             float tv_loss_weight = 10.f;
 
             // Combined per-photo exposure + residual grid (replaces standalone grid/PPISP)
-            bool use_exposure_correction = false;
+            bool use_exposure_correction = true;
             int exposure_correction_grid_start_iter = 1000;
 
             [[nodiscard]] bool bilateral_grid_active() const {
@@ -295,6 +315,7 @@ namespace lfs::core {
             int ppisp_warmup_steps = 500;
             bool ppisp_freeze_from_sidecar = false;
             std::filesystem::path ppisp_sidecar_path = {};
+            PPISPHoldoutAppearance ppisp_holdout_appearance = PPISPHoldoutAppearance::Nearest;
             bool ppisp_use_controller = false;
             bool ppisp_freeze_gaussians_on_distill = true;
             int ppisp_controller_activation_step = -1; // Negative values use the last-5000-steps default schedule
@@ -321,8 +342,6 @@ namespace lfs::core {
             // Dimensionless on-screen share cap. <=0 or >=1 disables the cap.
             float max_screen_share = 0.3f;
             float screen_share_penalty = 1.0f;
-            // Fraction of MRNF growth budget spent splitting over-cap splats. 0 disables.
-            float oversize_split_fraction = 0.15f;
             bool use_edge_map = true;
 
             // Random initialization parameters
@@ -349,6 +368,8 @@ namespace lfs::core {
             void remove_step_scaling();
             [[nodiscard]] int resolved_total_iterations() const;
             [[nodiscard]] bool normal_supervision_active(int iter) const;
+            [[nodiscard]] float scale_reg_at(int iter) const;
+            void resolve_mrnf_capacity_defaults();
             // Every test_every-th image is withheld from training for evaluation.
             [[nodiscard]] bool holds_out_eval_images() const { return enable_eval && !eval_all; }
             [[nodiscard]] int resolved_ppisp_controller_activation_step(int total_iterations) const;
