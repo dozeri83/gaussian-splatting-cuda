@@ -27,6 +27,6 @@ def test_to_preserves_supported_devices(lf, gpu_available, device):
         pytest.skip("GPU not available")
 
     result = _make_mesh_data(lf).to(device)
-    expected = "cuda" if device != "cpu" else "cpu"
+    expected = lf.Tensor.ones((1,), device="gpu").device if device != "cpu" else "cpu"
     assert result.vertices.device == expected
     assert result.indices.device == expected

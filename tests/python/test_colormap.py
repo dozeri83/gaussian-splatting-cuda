@@ -24,7 +24,7 @@ def test_colormap_preserves_documented_vector_behavior(lf, numpy, gpu_available,
     result = lf.colormap(values)
 
     assert result.shape == (3, 3)
-    assert result.device == device
+    assert result.device == values.device
     numpy.testing.assert_allclose(
         result.cpu().numpy(),
         numpy.array([[0.0, 0.0, 1.0], [0.5, 1.0, 0.0], [0.5, 0.0, 0.0]], dtype=numpy.float32),
