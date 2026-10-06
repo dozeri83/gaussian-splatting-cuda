@@ -925,7 +925,7 @@ namespace lfs::diagnostics {
             metric.peak_bytes = std::max(metric.peak_bytes, bytes);
             metric.allocated_bytes = std::max(metric.allocated_bytes, bytes);
             metric.allocation_count = std::max<std::uint64_t>(metric.allocation_count,
-                                                               bytes > 0 ? 1 : 0);
+                                                              bytes > 0 ? 1 : 0);
             metric.method = VramAllocationMethod::Metal;
             metric.current_sample = true;
         };

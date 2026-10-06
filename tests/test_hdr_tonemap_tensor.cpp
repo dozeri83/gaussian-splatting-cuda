@@ -202,8 +202,8 @@ namespace {
                                                                   3840, 2160, pixels, error);
                 ASSERT_TRUE(rendered) << error;
                 elapsed.push_back(1000.0 * std::chrono::duration<double>(
-                                                 std::chrono::steady_clock::now() - started)
-                                                 .count());
+                                               std::chrono::steady_clock::now() - started)
+                                               .count());
             }
             std::sort(elapsed.begin() + 1, elapsed.end());
             const double mean = std::accumulate(elapsed.begin() + 1, elapsed.end(), 0.0) / 30.0;
