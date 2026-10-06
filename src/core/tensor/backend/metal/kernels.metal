@@ -93,14 +93,16 @@ static float accurate_log1p(float value) {
 }
 
 static float accurate_asin(float value) {
-    // Clamp rounding overshoot, but keep NaN (clamp would drop it).
-    const float bounded = isnan(value) ? value : clamp(value, -1.0f, 1.0f);
+    if ((as_type<uint>(value) & 0x7fffffffu) > 0x3f800000u)
+        return as_type<float>(0x7fc00000u);
+    const float bounded = value;
     return atan2(bounded, sqrt(max(0.0f, 1.0f - bounded * bounded)));
 }
 
 static float accurate_acos(float value) {
-    // Clamp rounding overshoot, but keep NaN (clamp would drop it).
-    const float bounded = isnan(value) ? value : clamp(value, -1.0f, 1.0f);
+    if ((as_type<uint>(value) & 0x7fffffffu) > 0x3f800000u)
+        return as_type<float>(0x7fc00000u);
+    const float bounded = value;
     return atan2(sqrt(max(0.0f, 1.0f - bounded * bounded)), bounded);
 }
 
@@ -188,7 +190,7 @@ static float float_unary(float value, float scalar, bool scalar_on_right) {
     if (kOp == LFS_OP_Square) return value * value;
     if (kOp == LFS_OP_Tanh) return tanh(value);
     if (kOp == LFS_OP_Rsqrt) return rsqrt(value);
-    if (kOp == LFS_OP_Sign) return float(int(value > 0.0f) - int(value < 0.0f));
+    if (kOp == LFS_OP_Sign) return isnan(value) ? value : float(int(value > 0.0f) - int(value < 0.0f));
     if (kOp == LFS_OP_Reciprocal) return 1.0f / value;
     if (kOp == LFS_OP_Floor) return floor(value);
     if (kOp == LFS_OP_Ceil) return ceil(value);
@@ -438,6 +440,10 @@ kernel void clamp_values(device const uchar* input_buffer [[buffer(0)]],
         const float value = ((device const float*)(input_buffer + params.input_offset))[index];
         ((device float*)(output_buffer + params.output_offset))[index] =
             isnan(value) ? value : min(max(value, params.float_minimum), params.float_maximum);
+    } else if (kInputDType == LFS_DT_Float16) {
+        const float value = float(((device const half*)(input_buffer + params.input_offset))[index]);
+        ((device half*)(output_buffer + params.output_offset))[index] =
+            half(isnan(value) ? value : min(max(value, params.float_minimum), params.float_maximum));
     } else {
         const int value = ((device const int*)(input_buffer + params.input_offset))[index];
         ((device int*)(output_buffer + params.output_offset))[index] =
@@ -487,7 +493,7 @@ static float chain_unary(float value, uint kind) {
     case 17: return value * value;
     case 18: return tanh(value);
     case 19: return rsqrt(value);
-    case 20: return float(int(value > 0.0f) - int(value < 0.0f));
+    case 20: return isnan(value) ? value : float(int(value > 0.0f) - int(value < 0.0f));
     case 21: return 1.0f / value;
     case 22: return floor(value);
     case 23: return ceil(value);
@@ -1187,7 +1193,7 @@ static ulong arg_extreme_key(float value, uint position) {
     uint bits = as_type<uint>(value);
     uint order;
     if ((bits & 0x7fffffffu) > 0x7f800000u) {
-        order = position == 0 ? 0xfffffffeu : 0xffffffffu;
+        order = 0xffffffffu;
     } else {
         if ((bits & 0x7fffffffu) == 0u)
             bits = 0u; // -0 ties +0, as the CPU's strict comparison does.
@@ -2104,8 +2110,8 @@ kernel void random_op(device uchar* output_buffer [[buffer(0)]],
         }
         ((device long*)output)[index] = long(sample);
     } else {
-        const float u = min(max(unit_interval(words.x), 1e-10f), 1.0f - 1e-10f);
-        keys[index] = log(max(weights[index], 1e-10f)) - log(-log(u));
+        const float u = min(max(unit_interval(words.x), 1e-10f), 0.9999999403953552f);
+        keys[index] = (weights[index] > 0.0f ? log(weights[index]) : -INFINITY) - log(-log(u));
     }
 }
 
@@ -2129,6 +2135,7 @@ struct RadiusParams {
     device uchar* output;
     device const uchar* queries;
     device const uchar* values;
+    device const float* radii;
     uint count;
     uint bucket_mask;
     float radius;
@@ -2205,7 +2212,7 @@ static float radius_spacing(constant RadiusParams& p, uint i) {
                         if (uint(j) == i || !all(radius_cell(other, p.radius) == target))
                             continue;
                         const float3 delta = point - other;
-                        const float distance = dot(delta, delta);
+                        const float distance = dot_rounded(delta, delta);
                         if (distance < best.z) {
                             best.z = max(best.y, distance);
                             best.y = max(best.x, min(best.y, distance));
@@ -2227,6 +2234,8 @@ static float radius_spacing(constant RadiusParams& p, uint i) {
 template <typename T>
 static T radius_minimum(constant RadiusParams& p, uint i, device const T* values) {
     T result = values[i];
+    if (p.radii && !(p.radii[i] > p.radius * 0.5f))
+        return result;
     const float3 point = radius_point(p, i);
     if (!all(isfinite(point)))
         return result;
@@ -2237,7 +2246,8 @@ static T radius_minimum(constant RadiusParams& p, uint i, device const T* values
                 const int3 target = center + int3(x, y, z);
                 for (int j = p.heads[radius_bucket(target, p.bucket_mask)]; j >= 0; j = p.next[j]) {
                     const float3 other = radius_point(p, uint(j));
-                    if (all(radius_cell(other, p.radius) == target) && within_radius(point, other, p.radius))
+                    if (all(radius_cell(other, p.radius) == target) &&
+                        within_radius(point, other, p.radii ? min(p.radius, min(p.radii[i], p.radii[j])) : p.radius))
                         result = min(result, values[j]);
                 }
             }
@@ -3856,9 +3866,9 @@ kernel void cdist(device const uchar* lhs_buffer [[buffer(0)]],
         else if (p == 1.0f)
             distance += abs(difference);
         else if (p == 0.0f)
-            distance += difference != 0.0f ? 1.0f : 0.0f;
+            distance += a[d] != b[d] ? 1.0f : 0.0f;
         else if (isinf(p))
-            distance = max(distance, abs(difference));
+            distance = isnan(distance) || isnan(difference) ? distance + difference : max(distance, abs(difference));
         else
             distance += pow(abs(difference), p);
     }

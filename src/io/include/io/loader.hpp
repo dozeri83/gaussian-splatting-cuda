@@ -135,6 +135,12 @@ namespace lfs::io {
             ImportWorldOriginProvenance::None;
     };
 
+    struct PhotoReconstructionView {
+        float source_aspect = 1.0f;
+        std::array<float, 3> bounds_min{-1.0f, -1.0f, 0.0f};
+        std::array<float, 3> bounds_max{1.0f, 1.0f, 2.0f};
+    };
+
     struct LoadResult {
         std::variant<std::shared_ptr<SplatData>, LoadedScene, std::shared_ptr<MeshData>> data;
         Tensor scene_center;
@@ -148,6 +154,7 @@ namespace lfs::io {
         std::shared_ptr<SplatTileSource> tile_source;
         // Set when the source is a 3D Tiles tileset, whether it streams or loaded flat.
         bool is_tileset = false;
+        std::optional<PhotoReconstructionView> photo_view;
     };
 
     /**

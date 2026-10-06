@@ -68,6 +68,7 @@ NUMBER_PROPS = (
     "sparsify_steps",
     "init_rho",
     "ppisp_controller_lr",
+    "eval_mask_opacity",
 )
 
 BOOL_PROPS = (
@@ -91,7 +92,6 @@ BOOL_PROPS = (
     "enable_eval",
     "eval_all",
     "eval_mask_invert",
-    "background_improvements",
 )
 
 SELECT_PROPS = ("mask_mode", "bg_mode", "normal_loss_space", "eval_space")
@@ -138,7 +138,6 @@ def _run(
 
 BASIC_RUNS = (
     _run("basic_struct", "iterations", "max_cap"),
-    _run("basic_background", "background_improvements", visibility_condition_id="dep_mrnf"),
     _run(
         "basic_bilateral_toggle",
         "use_bilateral_grid",
@@ -221,6 +220,11 @@ DATASET_RUNS = (
         "dataset_eval_mask_invert",
         "eval_mask_invert",
         visibility_condition_id="dep_eval_mask",
+    ),
+    _run(
+        "dataset_eval_mask_opacity",
+        "eval_mask_opacity",
+        visibility_condition_id="dep_eval_mask_splat",
     ),
 )
 
@@ -305,7 +309,7 @@ def _basic_runs(*ids):
 METHOD_RUNS = _basic_runs("basic_struct")
 CAMERA_RUNS = _basic_runs("basic_undistort", "basic_mip_filter")
 MASK_RUNS = _basic_runs("basic_live_start", "mask_invert", "mask_threshold", "mask_alpha", "mask_penalties")
-BACKGROUND_RUNS = _basic_runs("basic_background", "bg_mode")
+BACKGROUND_RUNS = _basic_runs("bg_mode")
 EXPOSURE_ACTIVATION_RUNS = (_run("basic_exposure_correction", "use_exposure_correction"),)
 APPEARANCE_RUNS = _basic_runs(
     "ppisp_exif", "ppisp_freeze",
@@ -314,7 +318,7 @@ APPEARANCE_RUNS = _basic_runs(
     _run("appearance_tuning", "ppisp_lr", "ppisp_reg_weight", "ppisp_warmup_steps",
          visibility_condition_id="dep_ppisp_params"),
 )
-_EVALUATION_RUN_IDS = {"dataset_eval", "dataset_eval_train", "dataset_eval_space", "dataset_eval_mask_invert"}
+_EVALUATION_RUN_IDS = {"dataset_eval", "dataset_eval_train", "dataset_eval_space", "dataset_eval_mask_invert", "dataset_eval_mask_opacity"}
 EVALUATION_RUNS = tuple(run for run in DATASET_RUNS if run.id in _EVALUATION_RUN_IDS)
 DATASET_RUNS = tuple(run for run in DATASET_RUNS if run.id not in _EVALUATION_RUN_IDS)
 

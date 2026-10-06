@@ -92,7 +92,6 @@ namespace lfs::vis {
         void setPlyPath(std::string name, const std::filesystem::path& path);
         void setPlyPath(const core::Uuid& uuid, const std::filesystem::path& path);
         void clearPlyPath(core::NodeId id);
-        void clearPlyPath(std::string name);
         void clearPlyPath(const core::Uuid& uuid);
         void setDatasetPath(const std::filesystem::path& path);
 
@@ -168,7 +167,9 @@ namespace lfs::vis {
         std::string addGeneratedSplatNode(std::unique_ptr<core::SplatData> model,
                                           const std::string& source_name,
                                           const std::string& desired_name,
-                                          bool select_new_node = true);
+                                          bool select_new_node = true,
+                                          const std::string& history_label = "Add Simplified Splat",
+                                          std::optional<glm::mat4> initial_transform = std::nullopt);
         size_t consolidateNodeModels();
 
         [[nodiscard]] std::expected<void, std::string> canRemoveNode(core::NodeId id) const;
@@ -221,7 +222,6 @@ namespace lfs::vis {
         // Full transform for selected node (includes rotation and scale)
         void setSelectedNodeTransform(const glm::mat4& transform);
         glm::mat4 getSelectedNodeTransform() const; // Returns local transform
-        [[nodiscard]] glm::mat4 getSelectedNodeVisualizerWorldTransform() const;
 
         // Multi-selection support
         [[nodiscard]] glm::vec3 getSelectionCenter() const;
@@ -230,15 +230,11 @@ namespace lfs::vis {
 
         // Cropbox operations for selected node
         core::NodeId getSelectedNodeCropBoxId() const;
-        core::CropBoxData* getSelectedNodeCropBox();
-        const core::CropBoxData* getSelectedNodeCropBox() const;
         core::NodeId getActiveSelectionCropBoxId() const;
         void syncCropBoxToRenderSettings();
 
         // Ellipsoid operations for selected node
         core::NodeId getSelectedNodeEllipsoidId() const;
-        core::EllipsoidData* getSelectedNodeEllipsoid();
-        const core::EllipsoidData* getSelectedNodeEllipsoid() const;
         core::NodeId getActiveSelectionEllipsoidId() const;
 
         std::expected<void, std::string> loadDataset(const std::filesystem::path& path,
@@ -294,7 +290,7 @@ namespace lfs::vis {
         std::string addGroupNode(const std::string& name, core::NodeId parent_id);
         std::string addPlySequenceNode(const std::string& name, const std::string& parent_name = "", size_t frame_count = 0);
 
-        // Allocator that backs splat tensors with Vulkan-external interop storage (the
+        // Allocator that backs splat tensors with renderer-visible storage (the
         // form the rasterizer can bind zero-copy). Returns an empty allocator when interop
         // is unavailable. The PLY-sequence streaming player uses this on the main thread to
         // upload background-decoded frames into render-ready storage.
@@ -352,13 +348,12 @@ namespace lfs::vis {
         void setAppearanceModel(std::unique_ptr<AppearanceTensorModel> model);
         void clearAppearanceModel();
         [[nodiscard]] const AppearanceTensorModel* getAppearanceTensorModel() const { return appearance_tensor_model_.get(); }
-        [[nodiscard]] bool hasAppearanceController() const;
         [[nodiscard]] bool hasAppearanceModel() const { return appearance_tensor_model_ != nullptr; }
 
         // Drop the GUI's borrowed scene-image tensor and drain the GPU so no
         // in-flight Vulkan work references model tensors that are about to be
         // freed. Must run before releasing splat models, especially when their
-        // tensors are backed by Vulkan-external storage.
+        // tensors are backed by renderer-visible storage.
         void drainGpuForTensorRelease();
 
     private:

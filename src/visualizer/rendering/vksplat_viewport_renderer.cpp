@@ -23,7 +23,9 @@
 #include "core/tensor.hpp"
 #include "core/tensor_backend.hpp"
 #include "core/tensor_readback.hpp"
+#include "core/tensor_vulkan_interop.hpp"
 #include "diagnostics/vram_profiler.hpp"
+#include "graphics_external_tensor.hpp"
 #include "io/formats/rad.hpp"
 #include "rendering/coordinate_conventions.hpp"
 #include "rendering/rasterizer/vulkan/src/indirect_layout.h"
@@ -34,7 +36,6 @@
 #include "viewport/vksplat_compose.comp.spv.h"
 #include "vksplat_input_packer.hpp"
 #include "vksplat_shared_scratch_install.hpp"
-#include "vulkan_external_tensor.hpp"
 #include "window/vulkan_result.hpp"
 
 #include <algorithm>
@@ -3629,6 +3630,7 @@ namespace lfs::vis {
         RELEASE_PRIVATE_SCRATCH(visible_dispatch);
         RELEASE_PRIVATE_SCRATCH(macro_partials);
         RELEASE_PRIVATE_SCRATCH(macro_active_mask);
+        RELEASE_PRIVATE_SCRATCH(exact_depth_sample_mask);
         RELEASE_PRIVATE_SCRATCH(macro_wave_args);
         RELEASE_PRIVATE_SCRATCH(depth_wave_dispatch);
         RELEASE_PRIVATE_SCRATCH(wave_predicates);
@@ -6285,21 +6287,6 @@ namespace lfs::vis {
         return {readback_ring_.outstandingCount(), readback_ring_.ringFullWaitCount(), readback_ring_.cellPinWaitCount()};
     }
 
-    std::size_t VksplatViewportRenderer::outstandingReadbackTickets() const {
-        std::lock_guard<std::mutex> lock(readback_mutex_);
-        return readback_ring_.outstandingCount();
-    }
-
-    std::uint64_t VksplatViewportRenderer::readbackRingFullWaitCount() const {
-        std::lock_guard<std::mutex> lock(readback_mutex_);
-        return readback_ring_.ringFullWaitCount();
-    }
-
-    std::uint64_t VksplatViewportRenderer::readbackCellPinWaitCount() const {
-        std::lock_guard<std::mutex> lock(readback_mutex_);
-        return readback_ring_.cellPinWaitCount();
-    }
-
     lfs::Result<glm::ivec2> VksplatViewportRenderer::latestOutputImageSize(
         const RenderTargetId target) const {
         std::lock_guard<std::mutex> readback_lock(readback_mutex_);
@@ -7783,6 +7770,8 @@ namespace lfs::vis {
             uniforms.splat_render_profile = request.splat_render_profile == 1 ? 1u : 0u;
             uniforms.step = static_cast<std::uint32_t>(modelTransformCount(request.scene.model_transforms));
             uniforms.sort_capacity = HIGS_DEPTH_WAVE_INSTANCES;
+            if (request.depth_view || request.require_exact_depth)
+                uniforms.mip_filter |= 2u;
         }
 
         // This pass re-reads the resident sort buffers in shared arena scratch:
@@ -7837,7 +7826,8 @@ namespace lfs::vis {
                             overlay_bindings->preview_mask,
                             overlay_bindings->selection_colors,
                             overlay_bindings->overlay_params,
-                            overlay_bindings->raster_overlays_active);
+                            overlay_bindings->raster_overlays_active,
+                            true, request.exact_depth_sample_mask);
                     } else {
                         renderer_.executeLegacyDepthWaves(
                             uniforms,
@@ -8545,12 +8535,13 @@ namespace lfs::vis {
         const bool higs_candidate =
             !request.gut && renderer_.supportsFloat16Storage() && !synchronize_input_upload &&
             !depth_capture_mode_;
-        // Depth view colorizes the per-pixel median depth. mip_filter bit 1
-        // switches the macro compose to an exact per-pixel replay of the single
-        // batch that crosses transmittance 0.5, so the map is smooth instead of
+        // Depth view and camera-frustum occlusion consume per-pixel median depth.
+        // mip_filter bit 1
+        // switches macro compose to independent FP32 depth replay through the
+        // transmittance crossing, so the map is smooth instead of
         // quantized to the crossing batch's leading splat. Bit 0 stays the mip
         // anti-aliasing flag; the raster reads them independently.
-        if (request.depth_view) {
+        if (request.depth_view || request.require_exact_depth) {
             uniforms.mip_filter |= 2u;
         }
         // Synchronous exports use the exact instance-count gate and must keep
@@ -8581,7 +8572,7 @@ namespace lfs::vis {
         // This test reference uses FP32 geometry and accurate partial T; its
         // timings must be labeled separately from the production FP16 profile.
         if (higs_active && request.transparent_background)
-            uniforms.mip_filter |= 8u;
+            uniforms.mip_filter |= 16u;
 #endif
         renderer_.setBandedExport((uniforms.mip_filter & 4u) != 0u);
         // Capture forces the non-batched per-pixel rasterizer (full pixel_depth
@@ -9022,7 +9013,8 @@ namespace lfs::vis {
                         overlay_bindings->selection_colors,
                         overlay_bindings->overlay_params,
                         overlay_bindings->raster_overlays_active,
-                        /*predicate_waves=*/!export_wave_batch);
+                        /*predicate_waves=*/!export_wave_batch,
+                        request.exact_depth_sample_mask);
                 } else {
                     renderer_.executeLegacyDepthWaves(
                         uniforms,

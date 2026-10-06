@@ -24,11 +24,14 @@
 #include "gui/ui_context.hpp"
 #include "input/input_controller.hpp"
 #include "internal/resource_paths.hpp"
+#include "ipc/view_context.hpp"
 #include "preferences.hpp"
 #include "python_runtime.hpp"
 #include "rendering/rendering_manager.hpp"
+#include "rendering/scene_upscaler_registry.hpp"
 #include "scene/scene_manager.hpp"
 #include "theme/theme.hpp"
+#include <RmlUi/Core/StringUtilities.h>
 #if LFS_BUILD_TRAINER
 #include "training/trainer.hpp"
 #endif
@@ -505,6 +508,30 @@ namespace lfs::vis::gui {
         ctor.Bind("renderer_label", &model_.renderer_label);
         ctor.Bind("renderer_value", &model_.renderer_value);
         ctor.Bind("renderer_tooltip", &model_.renderer_tooltip);
+        ctor.Bind("upscaler_label", &model_.upscaler_label);
+        ctor.Bind("upscaler_value", &model_.upscaler_value);
+        ctor.Bind("upscaler_tooltip", &model_.upscaler_tooltip);
+        ctor.Bind("upscaler_menu", &model_.upscaler_menu);
+        ctor.Bind("upscaler_menu_expanded", &model_.upscaler_menu_expanded);
+        ctor.BindEventCallback("toggle_upscaler_menu", [this](Rml::DataModelHandle, Rml::Event& event, const Rml::VariantList&) {
+            event.StopPropagation();
+            if (model_.safe_mode)
+                return;
+            setModelBool("mcp_details_expanded", model_.mcp_details_expanded, false);
+            setModelBool("upscaler_menu_expanded", model_.upscaler_menu_expanded, !model_.upscaler_menu_expanded);
+            resetTooltip();
+            markModelDirty();
+        });
+        ctor.BindEventCallback("choose_upscaler", [this](Rml::DataModelHandle, Rml::Event& event, const Rml::VariantList& args) {
+            event.StopPropagation();
+            if (args.size() == 1)
+                selectUpscaler(args[0].Get<Rml::String>());
+        });
+        ctor.BindEventCallback("choose_upscaler_preset", [this](Rml::DataModelHandle, Rml::Event& event, const Rml::VariantList& args) {
+            event.StopPropagation();
+            if (args.size() == 2)
+                selectUpscaler(args[0].Get<Rml::String>(), args[1].Get<Rml::String>());
+        });
         ctor.Bind("tensor_label", &model_.tensor_label);
         ctor.Bind("tensor_value", &model_.tensor_value);
         ctor.Bind("tensor_tooltip", &model_.tensor_tooltip);
@@ -564,7 +591,7 @@ namespace lfs::vis::gui {
         subscriptions_.clear();
         model_handle_ = {};
         if (rml_manager_)
-            rml_manager_->releaseCachedVulkanContext(direct_cache_);
+            rml_manager_->releaseCachedContext(direct_cache_);
         if (rml_context_ && rml_manager_)
             rml_manager_->destroyContext("status_bar");
         rml_context_ = nullptr;
@@ -592,7 +619,7 @@ namespace lfs::vis::gui {
             return;
 
         if (rml_manager_)
-            rml_manager_->releaseCachedVulkanContext(direct_cache_);
+            rml_manager_->releaseCachedContext(direct_cache_);
 
         if (document_) {
             if (document_registered_)
@@ -663,6 +690,8 @@ namespace lfs::vis::gui {
         bind(store.scene_generation);
         bind(store.selection_generation);
         bind(store.viewer_backend);
+        bind(store.render_settings_generation);
+        bind(store.scene_upscaler_generation);
         bind(store.language_generation);
         bind(store.mode_text);
         subscriptions_.push_back(store.perf_hud.subscribe([this](const lfs::vis::AppStore::PerfHud& state) {
@@ -701,6 +730,7 @@ namespace lfs::vis::gui {
 
     void RmlStatusBar::postStatusMessage(std::string text, const ErrorNoticeLevel level) {
         status_message_.post(std::move(text), level);
+        external_model_dirty_.store(true, std::memory_order_release);
     }
 
     bool RmlStatusBar::updateTheme() {
@@ -845,6 +875,7 @@ namespace lfs::vis::gui {
 
         if (!mcp_toggle_listener_) {
             mcp_toggle_listener_ = new CallbackListener([this] {
+                setModelBool("upscaler_menu_expanded", model_.upscaler_menu_expanded, false);
                 model_.mcp_details_expanded = !model_.mcp_details_expanded;
                 model_handle_.DirtyVariable("mcp_details_expanded");
                 markModelDirty();
@@ -1688,6 +1719,10 @@ namespace lfs::vis::gui {
             updateBackendContent(backend_manager->activeViewerBackend());
         else
             updateBackendContent();
+        if (backend_manager)
+            updateUpscalerContent(backend_manager->getSettings(), backend_manager->sceneUpscalerRuntimeSelection());
+        else
+            updateUpscalerContent(RenderSettings{}, {});
         setModelString("git_commit", model_.git_commit, GIT_COMMIT_HASH_SHORT);
 
         section_signature_ =
@@ -1745,6 +1780,63 @@ namespace lfs::vis::gui {
                        core::gpu_backend_name(tensor_backend));
         setModelString("tensor_tooltip", model_.tensor_tooltip,
                        std::string(LOC("status_bar.tensor_backend")) + ": " + LOC("status_bar.tensor_backend_tooltip"));
+    }
+
+    void RmlStatusBar::selectUpscaler(const std::string& backend_id, const std::optional<std::string>& preset_id) {
+        if (model_.safe_mode)
+            return;
+        const auto backend = sceneUpscalerBackendFromId(backend_id);
+        if (!backend || !sceneUpscalerBackendAvailable(*backend) ||
+            (preset_id && !sceneUpscalerPreset(*backend, *preset_id)))
+            return;
+        auto settings = get_render_settings();
+        if (!settings)
+            return;
+        settings->scene_upscaler = backend_id;
+        if (preset_id)
+            settings->scene_upscaler_preset = *preset_id;
+        // Same atomic, preference-persisting update used by Preferences/Python.
+        update_render_settings(*settings, {.scene_upscaler_explicit = true,
+                                           .scene_upscaler_preset_explicit = preset_id.has_value()});
+        setModelBool("upscaler_menu_expanded", model_.upscaler_menu_expanded, false);
+        markModelDirty();
+    }
+
+    void RmlStatusBar::updateUpscalerContent(const RenderSettings& settings, SceneUpscalerSelection selection) {
+        const auto requested = sceneUpscalerBackendFromId(settings.scene_upscaler).value_or(SceneUpscalerBackend::Native);
+        const bool pending = selection.requested != requested;
+        const auto name = [](const SceneUpscalerDescriptor& descriptor) {
+            return descriptor.display_name.empty() ? std::string(LOC(descriptor.label_key)) : descriptor.display_name;
+        };
+        setModelString("upscaler_label", model_.upscaler_label, LOC("status_bar.upscaler_backend_short"));
+        setModelString("upscaler_value", model_.upscaler_value,
+                       name(sceneUpscalerDescriptor(pending ? SceneUpscalerBackend::Native : selection.effective)));
+        std::string tooltip = std::string(LOC("status_bar.upscaler_backend")) + ": " +
+                              name(sceneUpscalerDescriptor(requested));
+        if (const auto preset = sceneUpscalerPreset(requested, settings.scene_upscaler_preset); preset && requested != SceneUpscalerBackend::Native)
+            tooltip += " / " + std::string(LOC(preset->label_key));
+        if (pending)
+            tooltip += "\n" + std::string(LOC("status_bar.upscaler_pending"));
+        else if (selection.fellBack())
+            tooltip += "\n" + std::string(LOC(selection.fallback == SceneUpscalerFallback::UnsupportedMode
+                                                  ? "status_bar.upscaler_unsupported"
+                                                  : "status_bar.upscaler_unavailable"));
+        setModelString("upscaler_tooltip", model_.upscaler_tooltip, std::move(tooltip));
+        std::string menu;
+        for (const auto& descriptor : sceneUpscalerDescriptors()) {
+            menu += "<button class='upscaler-choice" + std::string(descriptor.backend == requested ? " selected" : "") +
+                    "' data-event-click=\"choose_upscaler('" + std::string(descriptor.id) + "')\">" +
+                    Rml::StringUtilities::EncodeRml(name(descriptor)) + "</button>";
+        }
+        const auto presets = sceneUpscalerDescriptor(requested).presets;
+        if (presets.size() > 1 && sceneUpscalerBackendAvailable(requested)) {
+            menu += "<div class='upscaler-presets-label'>" + Rml::StringUtilities::EncodeRml(LOC("preferences.scene_reconstruction_preset")) + "</div>";
+            for (const auto& preset : presets)
+                menu += "<button class='upscaler-choice" + std::string(preset.id == settings.scene_upscaler_preset ? " selected" : "") +
+                        "' data-event-click=\"choose_upscaler_preset('" + std::string(sceneUpscalerBackendId(requested)) + "','" +
+                        std::string(preset.id) + "')\">" + Rml::StringUtilities::EncodeRml(LOC(preset.label_key)) + "</button>";
+        }
+        setModelString("upscaler_menu", model_.upscaler_menu, std::move(menu));
     }
 
     void RmlStatusBar::resetTooltip() {
@@ -1858,6 +1950,8 @@ namespace lfs::vis::gui {
         last_mouse_modifiers_ = sdlModsToRml(input.key_ctrl, input.key_shift,
                                              input.key_alt, input.key_super);
         if (!is_inside) {
+            if (input.mouse_clicked[0] || input.mouse_clicked[1])
+                setModelBool("upscaler_menu_expanded", model_.upscaler_menu_expanded, false);
             rml_context_->ProcessMouseLeave();
             updateHoverTooltip();
         }
@@ -1894,6 +1988,12 @@ namespace lfs::vis::gui {
                 popup && popup->IsVisible())
                 popup_height = std::max(popup_height, popup->GetOffsetHeight() + 20.0f * dp_ratio);
         }
+        if (model_.upscaler_menu_expanded) {
+            const float ratio = rml_context_ ? rml_context_->GetDensityIndependentPixelRatio() : 1.f;
+            popup_height = std::max(popup_height, 240.f * ratio);
+            if (auto* popup = document_ ? document_->GetElementById("upscaler-popup") : nullptr; popup && popup->IsVisible())
+                popup_height = std::max(popup_height, popup->GetOffsetHeight() + 20.f * ratio);
+        }
         // Only reserve the measured tooltip surface; it never captures input.
         return std::max(popup_height, tooltip_overlay_height_);
     }
@@ -1903,7 +2003,7 @@ namespace lfs::vis::gui {
         (void)bar_w;
         if (overlayHeight() <= 0.0f || !document_)
             return false;
-        auto* const popup = document_->GetElementById("mcp-popup");
+        auto* const popup = document_->GetElementById(model_.upscaler_menu_expanded ? "upscaler-popup" : "mcp-popup");
         if (!popup || !popup->IsVisible())
             return false;
         const auto offset = popup->GetAbsoluteOffset(Rml::BoxArea::Border);
@@ -1918,8 +2018,8 @@ namespace lfs::vis::gui {
         if (!rml_manager_ || !rml_context_)
             return;
         std::optional<RmlRect> popup_rect;
-        if (model_.mcp_details_expanded && document_) {
-            if (auto* const popup = document_->GetElementById("mcp-popup");
+        if ((model_.mcp_details_expanded || model_.upscaler_menu_expanded) && document_) {
+            if (auto* const popup = document_->GetElementById(model_.upscaler_menu_expanded ? "upscaler-popup" : "mcp-popup");
                 popup && popup->IsVisible()) {
                 const auto offset = popup->GetAbsoluteOffset(Rml::BoxArea::Border);
                 popup_rect = RmlRect{
@@ -1936,17 +2036,17 @@ namespace lfs::vis::gui {
                                         popup_rect);
     }
 
-    void RmlStatusBar::queueCachedVulkanContext(const float x, const float y,
-                                                const float w_px, const float h_px,
-                                                const int screen_w, const int screen_h,
-                                                const int render_w, const int render_h,
-                                                const bool refresh_cache) {
-        if (!rml_manager_ || !rml_manager_->getVulkanRenderInterface())
+    void RmlStatusBar::queueCachedContext(const float x, const float y,
+                                          const float w_px, const float h_px,
+                                          const int screen_w, const int screen_h,
+                                          const int render_w, const int render_h,
+                                          const bool refresh_cache) {
+        if (!rml_manager_ || !rml_manager_->getUiRenderer())
             return;
 
         const auto blit_rect = toFramebufferBlitRect(rml_manager_->getWindow(),
                                                      x, y, w_px, h_px, screen_w, screen_h);
-        rml_manager_->queueCachedVulkanContext({
+        rml_manager_->queueCachedContext({
             .context = rml_context_,
             .cache = &direct_cache_,
             .cache_width = render_w,
@@ -1998,6 +2098,8 @@ namespace lfs::vis::gui {
         const bool size_changed = (render_w != last_render_w_ || render_h != last_render_h_);
         const float dp_ratio = rml_context_->GetDensityIndependentPixelRatio();
         const bool dp_changed = dp_ratio != last_dp_ratio_;
+        if (external_model_dirty_.exchange(false, std::memory_order_acq_rel))
+            markModelDirty();
         const bool had_pending_model_dirty = model_dirty_;
         const bool theme_changed = updateTheme();
         const auto now = std::chrono::steady_clock::now();
@@ -2005,12 +2107,12 @@ namespace lfs::vis::gui {
             size_changed || dp_changed || theme_changed || had_pending_model_dirty ||
             next_refresh_at_ == std::chrono::steady_clock::time_point{} ||
             now >= next_refresh_at_;
-        const bool content_changed = updateContent(ctx);
+        const bool content_changed = refresh_due && updateContent(ctx);
         const bool section_signature_changed = section_signature_ != last_section_signature_;
         const bool needs_render = size_changed || dp_changed || theme_changed || had_pending_model_dirty ||
                                   content_changed || tooltip_.revealDue() ||
                                   (animation_active_ && refresh_due);
-        if (!rml_manager_ || !rml_manager_->getVulkanRenderInterface()) {
+        if (!rml_manager_ || !rml_manager_->getUiRenderer()) {
             rml_animation_active_ = false;
             animation_active_ = model_animation_active_;
             return;
@@ -2039,13 +2141,14 @@ namespace lfs::vis::gui {
             last_section_signature_ = section_signature_;
             last_render_w_ = render_w;
             last_render_h_ = render_h;
+            model_dirty_ = false;
         }
 
         trackRenderedContextFrame(x, y, overlay_height);
 
-        queueCachedVulkanContext(x, y - overlay_height, w_px, h_px + overlay_height,
-                                 screen_w, screen_h,
-                                 render_w, render_h, needs_render || direct_cache_.texture == 0);
+        queueCachedContext(x, y - overlay_height, w_px, h_px + overlay_height,
+                           screen_w, screen_h,
+                           render_w, render_h, needs_render || direct_cache_.texture == 0);
     }
 
 } // namespace lfs::vis::gui

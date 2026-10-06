@@ -79,6 +79,8 @@ namespace lfs::core::internal::metal {
         // Threads to run, or threadgroups when group_size is set.
         MTLSize grid;
         MTLSize group_size{};
+        // GPU address of three uint32 threadgroup counts; replaces grid.
+        uint64_t indirect = 0;
     };
 
     template <class Params>
@@ -170,6 +172,7 @@ namespace lfs::core::internal::metal {
         struct Block {
             id<MTLBuffer> buffer;
             uint64_t address = 0;
+            size_t requested = 0;
             size_t capacity = 0;
             uint64_t guard = 0;
             std::unique_ptr<StorageMeta> meta;
@@ -263,6 +266,11 @@ namespace lfs::core::internal::metal {
         std::map<size_t, std::vector<Block>> free_;
         size_t cached_bytes_ = 0;
         size_t cache_limit_ = 0;
+        bool trim_requested_ = false;
+        size_t live_requested_bytes_ = 0;
+        size_t live_capacity_bytes_ = 0;
+        size_t peak_live_capacity_bytes_ = 0;
+        size_t peak_reserved_bytes_ = 0;
     };
 
     std::shared_ptr<Context> acquire_context();

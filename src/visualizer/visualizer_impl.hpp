@@ -65,6 +65,7 @@ namespace lfs::vis {
     } // namespace tools
 
     class LFS_VIS_API VisualizerImpl : public Visualizer, public ViewTargets {
+        friend class SequencerFrameDemandTest_PropagatesPlaybackStreamAndPreviewDemand_Test;
         friend class gui::GuiManager;
         friend class gui::AsyncTaskManager;
 
@@ -255,11 +256,6 @@ namespace lfs::vis {
             return rendering_manager_ ? rendering_manager_->getAverageFPS() : 0.0f;
         }
 
-        // Antialiasing state
-        bool isAntiAliasingEnabled() const {
-            return rendering_manager_ ? rendering_manager_->getSettings().antialiasing : false;
-        }
-
         tools::AlignTool* getAlignTool() {
             return align_tool_.get();
         }
@@ -387,7 +383,8 @@ namespace lfs::vis {
         friend class VisualizerImplResetTest_TrainingSnapshotCancelTerminalizesBeforeSettlement_Test;
         friend class VisualizerImplResetTest_FailedAutosaveSettlementAppliesBackoffBeforeRetry_Test;
         friend class VisualizerImplResetTest_PendingCloseSuppressesBackgroundAutosave_Test;
-        friend class VisualizerImplResetTest_StoppingTrainerBlocksIdleCompactionAndAutosave_Test;
+        friend class VisualizerImplResetTest_StoppingTrainerBlocksAutosave_Test;
+        friend class VisualizerImplResetTest_IdleMaintenanceKeepsEverySave_Test;
         friend class VisualizerImplResetTest_SessionSoftDirtyDoesNotPromptOrArmAutosave_Test;
         friend class VisualizerImplResetTest_SceneEditStillPromptsAndArmsAutosave_Test;
         friend class VisualizerImplResetTest_ParametersUnchangedRoundTripStaysClean_Test;

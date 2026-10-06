@@ -1466,7 +1466,31 @@ namespace lfs::vis {
                                                    : projection.error().message});
         SelectionFilterState filters;
         filters.restrict_to_selected_nodes = false;
-        const auto hovered = resolveCommandHoveredGaussianId(x, y, camera_index, filters, *projection);
+        std::optional<int> hovered;
+        // Paint and eyedropper must hit the visible surface, not whichever
+        // projected centre happens to be closest in 2D (possibly behind it).
+        // This is the same SceneRenderer query used by ring selection.
+        if (!testing_hovered_gaussian_id_) {
+            if (const auto frame_view = frameViewFromProjectionContext(*projection)) {
+                glm::vec2 point{x, y};
+                float padding = RING_PICK_PADDING_PX;
+                if (projection->viewer_layout) {
+                    const auto& layout = *projection->viewer_layout;
+                    point = screenToRender(point, layout);
+                    padding *= static_cast<float>(layout.render_width) / layout.width;
+                }
+                std::uint32_t picked = std::numeric_limits<std::uint32_t>::max();
+                if (const auto mask = tryBuildVksplatSelectionMask(
+                        scene_manager_, rendering_manager_, *frame_view, projection->equirectangular,
+                        RenderingManager::VksplatSelectionMaskShape::Ring, {{point.x, point.y, padding, 0.0f}}, &picked)) {
+                    if (picked == std::numeric_limits<std::uint32_t>::max())
+                        return std::unexpected(ViewportPickError{"No hovered gaussian"});
+                    hovered = static_cast<int>(picked);
+                }
+            }
+        }
+        if (!hovered)
+            hovered = resolveCommandHoveredGaussianId(x, y, camera_index, filters, *projection);
         if (!hovered || *hovered < 0)
             return std::unexpected(ViewportPickError{"No hovered gaussian"});
 
@@ -1890,10 +1914,6 @@ namespace lfs::vis {
         }
     }
 
-    size_t SelectionService::getTotalGaussianCount() const {
-        return activeSelectionGaussianCount(scene_manager_);
-    }
-
     bool SelectionService::hasScreenPositions() const {
         const auto screen_positions = getScreenPositions();
         return screen_positions && screen_positions->is_valid();
@@ -1923,18 +1943,6 @@ namespace lfs::vis {
         testing_screen_positions_ = std::move(screen_positions);
     }
 
-    void SelectionService::setTestingScreenPositionsForCamera(const int camera_index,
-                                                              std::shared_ptr<core::Tensor> screen_positions) {
-        if (camera_index < 0) {
-            return;
-        }
-        if (screen_positions && screen_positions->is_valid()) {
-            testing_camera_screen_positions_[camera_index] = std::move(screen_positions);
-            return;
-        }
-        testing_camera_screen_positions_.erase(camera_index);
-    }
-
     void SelectionService::setTestingViewport(ViewportInfo viewport) {
         testing_viewport_ = std::move(viewport);
     }
@@ -1948,19 +1956,8 @@ namespace lfs::vis {
         testing_hovered_gaussian_id_ = hovered_gaussian_id;
     }
 
-    bool SelectionService::hasTestingScreenPositionsForCamera(const int camera_index) const {
-        if (camera_index < 0) {
-            return false;
-        }
-        const auto it = testing_camera_screen_positions_.find(camera_index);
-        return it != testing_camera_screen_positions_.end() && it->second && it->second->is_valid();
-    }
-
     bool SelectionService::commandCameraValidationRequired(const int camera_index) const {
-        if (camera_index < 0) {
-            return false;
-        }
-        return !hasTestingScreenPositionsForCamera(camera_index);
+        return camera_index >= 0;
     }
 
     std::optional<SelectionProjectionContext> SelectionService::projectionContextFromViewerContext(
@@ -2249,13 +2246,6 @@ namespace lfs::vis {
     std::shared_ptr<core::Tensor> SelectionService::screenPositionsForCommandPass(
         const int camera_index, const SelectionProjectionContext& projection_context) const {
         if (camera_index >= 0) {
-            if (const auto it = testing_camera_screen_positions_.find(camera_index);
-                it != testing_camera_screen_positions_.end() &&
-                it->second &&
-                it->second->is_valid()) {
-                return it->second;
-            }
-            return renderScreenPositionsForProjectionContext(projection_context);
         }
         if (testing_screen_positions_ && testing_screen_positions_->is_valid()) {
             return testing_screen_positions_;
@@ -3130,14 +3120,6 @@ namespace lfs::vis {
                                                                           const int camera_index,
                                                                           const SelectionFilterState& filters,
                                                                           const SelectionProjectionContext& projection_context) {
-        if (camera_index >= 0) {
-            if (const auto it = testing_camera_screen_positions_.find(camera_index);
-                it != testing_camera_screen_positions_.end() &&
-                it->second &&
-                it->second->is_valid()) {
-                return pickHoveredGaussianIdFromScreenPositions(*it->second, {x, y}, filters, projection_context);
-            }
-        }
 
         if (!scene_manager_ || camera_index < 0) {
             return std::nullopt;

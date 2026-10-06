@@ -47,7 +47,6 @@ namespace lfs::core::prop {
         void register_operator_args(const std::string& operator_id, std::vector<PropertyMeta> args);
         void unregister_operator_args(const std::string& operator_id);
 
-        size_t subscribe(PropertyCallback callback);
         size_t subscribe(const std::string& group_id, const std::string& prop_id, PropertyCallback callback);
         void unsubscribe(size_t id);
         void notify(const std::string& group_id, const std::string& prop_id,
@@ -58,7 +57,6 @@ namespace lfs::core::prop {
 
         mutable std::mutex mutex_;
         std::unordered_map<std::string, PropertyGroup> groups_;
-        std::unordered_map<size_t, PropertyCallback> global_subscribers_;
         std::unordered_map<PropertyKey, std::unordered_map<size_t, PropertyCallback>, PropertyKeyHash>
             prop_subscribers_;
         size_t next_id_ = 1;

@@ -121,6 +121,7 @@ namespace {
         auto loaded = lfs::core::nn::models::Lpips::load(path, Device::GPU, dtype);
         if (!loaded)
             throw std::runtime_error(std::string(loaded.error().detail()));
+        EXPECT_GT(loaded->weights_bytes(), 0u);
         return std::move(*loaded);
     }
 
@@ -297,6 +298,29 @@ TEST_F(LpipsCudaTest, WideImageEstimateCoversNewDeviceAllocations) {
     EXPECT_LT(model->estimated_peak_bytes(512, 6000), required);
     model->release_activations();
     EXPECT_EQ(model->estimated_peak_bytes(512, 6000), required);
+    Tensor::trim_memory_pool();
+}
+
+TEST_F(LpipsCudaTest, MaskedWideImageEstimateCoversMaskBuffers) {
+    auto model = load_model(DataType::Float16);
+    ASSERT_TRUE(model);
+    auto [a, b] = synthetic_pair(512, 6000);
+    const auto mask = Tensor::ones({512, 6000}, Device::CUDA);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    Tensor::trim_memory_pool();
+    const auto required = model->estimated_peak_bytes(512, 6000, true);
+    EXPECT_GT(required, model->estimated_peak_bytes(512, 6000));
+    std::size_t free_before, free_after, total;
+    ASSERT_EQ(cudaMemGetInfo(&free_before, &total), cudaSuccess);
+    if (free_before < required)
+        GTEST_SKIP() << "Not enough free VRAM for the allocation regression";
+    auto value = model->forward(a, b, mask);
+    ASSERT_TRUE(value) << value.error().detail();
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    ASSERT_EQ(cudaMemGetInfo(&free_after, &total), cudaSuccess);
+    if (free_after < free_before)
+        EXPECT_LE(free_before - free_after, required);
+    model->release_activations();
     Tensor::trim_memory_pool();
 }
 

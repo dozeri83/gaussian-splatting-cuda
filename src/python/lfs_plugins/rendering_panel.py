@@ -8,6 +8,7 @@ import os
 import lichtfeld as lf
 
 from . import rml_widgets as w
+from .panels import panel_class
 from .scrub_fields import ScrubFieldController, ScrubFieldSpec
 from .types import Panel
 from .ui import RuntimeState, PanelStateBinding, native_value as _native_store_value
@@ -32,8 +33,8 @@ def _theme():
     return lf.ui.theme()
 
 
-def _vulkan_capabilities():
-    query = getattr(lf, "get_vulkan_capabilities", None)
+def _graphics_capabilities():
+    query = getattr(lf, "get_graphics_capabilities", None)
     if query is None:
         return {}
     try:
@@ -43,11 +44,11 @@ def _vulkan_capabilities():
 
 
 def _mesh_wireframe_supported():
-    return bool(_vulkan_capabilities().get("mesh_wireframe", False))
+    return bool(_graphics_capabilities().get("mesh_wireframe", False))
 
 
 def _mesh_wide_lines_supported():
-    return bool(_vulkan_capabilities().get("wide_lines", False))
+    return bool(_graphics_capabilities().get("wide_lines", False))
 
 
 def _theme_vignette():
@@ -55,12 +56,12 @@ def _theme_vignette():
     return theme.vignette if theme else None
 
 
-def _set_theme_vignette_style(*, intensity=None, radius=None, softness=None):
+def _set_theme_vignette_style(*, radius=None, softness=None):
     vignette = _theme_vignette()
     if vignette is None:
         return
     lf.ui.set_theme_vignette_style(
-        float(vignette.intensity if intensity is None else intensity),
+        float(vignette.intensity),
         float(vignette.radius if radius is None else radius),
         float(vignette.softness if softness is None else softness),
     )
@@ -286,6 +287,7 @@ RENDERING_INITIALLY_COLLAPSED = {
 }
 
 
+@panel_class("rendering")
 class RenderingPanel(Panel):
     id = "lfs.rendering"
     label = "window.rendering"

@@ -45,8 +45,8 @@
 #include "preferences.hpp"
 #include "project/project_switch_error.hpp"
 #include "project/session_state.hpp"
+#include "rendering/graphics_external_tensor.hpp"
 #include "rendering/image_layout.hpp"
-#include "rendering/vulkan_external_tensor.hpp"
 #include "scene/scene_manager.hpp"
 #include "scene/viewer_splat_quantize.hpp"
 #if LFS_BUILD_TRAINER
@@ -2259,10 +2259,6 @@ namespace lfs::vis::project {
                 json.value(
                     "autosave_quiet_seconds",
                     std::uint64_t{2});
-            settings.compaction_idle_seconds =
-                json.value(
-                    "compaction_idle_seconds",
-                    std::uint64_t{30});
             const auto entries = json.find("mru");
             if (entries != json.end()) {
                 if (!entries->is_array()) {
@@ -2393,9 +2389,6 @@ namespace lfs::vis::project {
                 {"autosave_quiet_seconds",
                  settings
                      .autosave_quiet_seconds},
-                {"compaction_idle_seconds",
-                 settings
-                     .compaction_idle_seconds},
                 {"mru", std::move(entries)},
                 {"dismissed_recovery",
                  std::move(dismissed)},
@@ -5284,7 +5277,7 @@ namespace lfs::vis::project {
 
     lfs::Result<void>
     ProjectLifecycle::startCompaction(
-        const bool automatic, const bool clean,
+        const bool clean,
         const std::filesystem::path& destination, const lfs::core::Uuid& expected_commit) {
         if (clean && viewer_.getTrainerManager() && viewer_.getTrainerManager()->isTrainingActive()) {
             return fail<void>(lfs::ErrorCode::FailedPrecondition,
@@ -5354,8 +5347,7 @@ namespace lfs::vis::project {
         }
         auto handle = viewer_.jobs().init(
             JobType::ProjectWrite,
-            automatic ? "Idle project compaction"
-                      : "Compacting project");
+            "Compacting project");
         if (!handle) {
             return fail<void>(
                 lfs::ErrorCode::FailedPrecondition,
@@ -5373,8 +5365,6 @@ namespace lfs::vis::project {
         project_write_purpose_ =
             ProjectWritePurpose::Compaction;
         project_write_destination_ = path;
-        project_write_automatic_ =
-            automatic;
         last_project_write_error_.clear();
         last_project_write_error_code_.reset();
         last_project_write_typed_error_.reset();
@@ -5481,7 +5471,7 @@ namespace lfs::vis::project {
 
     lfs::Result<void>
     ProjectLifecycle::compact() {
-        return startCompaction(false);
+        return startCompaction();
     }
 
     void ProjectLifecycle::cancelCleanup() {
@@ -5491,7 +5481,7 @@ namespace lfs::vis::project {
 
     lfs::Result<void> ProjectLifecycle::clean(
         const std::filesystem::path& destination, const lfs::core::Uuid& expected_commit) {
-        return startCompaction(false, true, destination, expected_commit);
+        return startCompaction(true, destination, expected_commit);
     }
 
     void ProjectLifecycle::joinPendingWrite() {
@@ -5620,7 +5610,6 @@ namespace lfs::vis::project {
             project_write_job_.reset();
             project_write_purpose_ = ProjectWritePurpose::None;
             project_write_destination_.clear();
-            project_write_automatic_ = false;
             cached_project_info_.reset();
             return;
         }
@@ -5884,10 +5873,7 @@ namespace lfs::vis::project {
                 ProjectWritePurpose::
                     Compaction) {
                 LOG_INFO(
-                    "{} project compaction completed: {}",
-                    project_write_automatic_
-                        ? "Idle"
-                        : "Explicit",
+                    "Project compaction completed: {}",
                     lfs::core::path_to_utf8(
                         project_write_destination_));
                 resetMaintenanceClocks();
@@ -6004,7 +5990,6 @@ namespace lfs::vis::project {
             ProjectWritePurpose::None;
         project_write_destination_.clear();
         project_write_autosave_sequence_ = 0;
-        project_write_automatic_ = false;
         if ((error.empty() || was_thumbnail) &&
             in_flight_preview_generation_ != 0 &&
             in_flight_preview_generation_ ==
@@ -6076,33 +6061,6 @@ namespace lfs::vis::project {
         }
         const bool training_write_window =
             isTrainingWriteWindowOpen();
-        const auto* const gui = viewer_.getGuiManager();
-        const bool modal_open = gui && gui->modalOverlay() && gui->isModalWindowOpen();
-        if (!training_write_window &&
-            !modal_open &&
-            !isScratchBoundSession() &&
-            compaction_suggested_ &&
-            settings_.compaction_idle_seconds !=
-                0 &&
-            now - last_mutation_at_ >=
-                std::chrono::seconds(
-                    settings_
-                        .compaction_idle_seconds) &&
-            !scene_dirty_.load(
-                std::memory_order_acquire) &&
-            !payload_dirty_.load(
-                std::memory_order_acquire) &&
-            !hasHardDirtyChapters(*document_)) {
-            if (auto started =
-                    startCompaction(true);
-                !started) {
-                LOG_DEBUG(
-                    "Idle compaction deferred: {}",
-                    developerError(
-                        started.error()));
-            }
-            return;
-        }
         if (recovered_master_path_) {
             return;
         }
@@ -9575,11 +9533,6 @@ namespace lfs::vis::project {
                 lfs::core::path_to_utf8(master),
                 developerError(removed.error()));
         }
-    }
-
-    bool ProjectLifecycle::isApplicationClosePending()
-        const {
-        return application_close_pending_;
     }
 
     void ProjectLifecycle::setSuppressTrainingAdoption(

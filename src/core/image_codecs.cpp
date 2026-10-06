@@ -1190,14 +1190,6 @@ namespace lfs::core::image_codecs {
         return decode_stb(image_data, false, result, error);
     }
 
-    bool decode_jpeg_memory(const std::uint8_t* data, const size_t size, Image& result, std::string& error) {
-        if (!data || size == 0) {
-            error = "Empty JPEG buffer";
-            return false;
-        }
-        return decode_jpeg_bytes(data, size, result, error);
-    }
-
     namespace {
         struct JpegEncodeState {
             jpeg_compress_struct codec{};

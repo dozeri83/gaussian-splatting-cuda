@@ -28,6 +28,10 @@ namespace Rml {
     class Element;
 } // namespace Rml
 
+namespace lfs::vis {
+    class SequencerFrameDemandTest_PropagatesPlaybackStreamAndPreviewDemand_Test;
+} // namespace lfs::vis
+
 namespace lfs::vis::gui {
 
     class GlobalContextMenu;
@@ -107,7 +111,6 @@ namespace lfs::vis::gui {
         [[nodiscard]] const AreaFrame* area(screen::AreaId id) const;
         [[nodiscard]] screen::Rect currentAreaRect(screen::AreaId id);
         [[nodiscard]] screen::AreaId areaAt(float x, float y) const;
-        [[nodiscard]] screen::AreaId viewAt(float x, float y) const;
         [[nodiscard]] std::optional<screen::Rect> viewContent(screen::AreaId id) const;
         [[nodiscard]] const screen::LayoutGeometry& geometry() const { return geometry_; }
 
@@ -126,7 +129,6 @@ namespace lfs::vis::gui {
             overlay_dirty_ = true;
         }
         [[nodiscard]] bool needsAnimationFrame() const;
-        [[nodiscard]] std::string animationDemandDescription() const;
         [[nodiscard]] screen::GestureCursor cursor() const { return cursor_; }
 
         // Panel editors whose visibility follows a flag of their own instead
@@ -148,6 +150,8 @@ namespace lfs::vis::gui {
         void openAreaMenu(screen::AreaId id, float x, float y);
 
     private:
+        friend class lfs::vis::SequencerFrameDemandTest_PropagatesPlaybackStreamAndPreviewDemand_Test;
+
         AreaEditor& editorFor(std::string_view editor);
         void syncPanelEditors();
         void rebuildChrome();
@@ -193,7 +197,7 @@ namespace lfs::vis::gui {
         Rml::DataModelHandle chrome_model_;
         RmlTooltipController chrome_tooltip_;
         std::vector<ChromeArea> chrome_areas_;
-        CachedVulkanContextRender chrome_cache_;
+        CachedUiContextRender chrome_cache_;
         bool chrome_dirty_ = true;
         bool chrome_pointer_inside_ = false;
         struct PendingAction {
@@ -209,7 +213,7 @@ namespace lfs::vis::gui {
         // Overlay (gesture previews and the active-view outline, drawn on top).
         Rml::Context* overlay_context_ = nullptr;
         Rml::ElementDocument* overlay_document_ = nullptr;
-        CachedVulkanContextRender overlay_cache_;
+        CachedUiContextRender overlay_cache_;
         bool overlay_dirty_ = true;
         bool overlay_visible_ = false;
 

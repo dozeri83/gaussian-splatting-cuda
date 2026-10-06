@@ -6,7 +6,6 @@
 #include "core/tensor/backend/gpu_backend_ops.hpp"
 #include "core/tensor_backend.hpp"
 #include <array>
-#include <chrono>
 #include <limits>
 
 #include <gtest/gtest.h>
@@ -32,6 +31,28 @@ TEST(TensorOrderingTest, Float32SortReturnsValuesAndSourceIndices) {
     EXPECT_EQ(descending.cpu().to_vector(), (std::vector<float>{4.0f, 3.0f, 2.0f, 1.0f}));
     EXPECT_EQ(descending_indices.cpu().to_vector_int64(),
               (std::vector<int64_t>{2, 0, 3, 1}));
+}
+
+TEST(TensorOrderingTest, SortKeepsTheOrderOfEqualKeysOnEveryDevice) {
+    // Short lines sort in one block, long ones across blocks.
+    for (const size_t count : {size_t(1000), size_t(200000)}) {
+        std::vector<float> keys(count);
+        for (size_t i = 0; i < count; ++i)
+            keys[i] = static_cast<float>((i * 7919) % 13);
+        for (const auto device : {Device::CPU, Device::GPU}) {
+            for (const bool descending : {false, true}) {
+                const auto order = Tensor::from_vector(keys, {count}, device).sort(0, descending).second.cpu().to_vector_int64();
+                ASSERT_EQ(order.size(), count);
+                for (size_t i = 1; i < count; ++i) {
+                    const float previous = keys[static_cast<size_t>(order[i - 1])];
+                    const float current = keys[static_cast<size_t>(order[i])];
+                    ASSERT_TRUE(descending ? previous >= current : previous <= current) << i;
+                    if (previous == current)
+                        ASSERT_LT(order[i - 1], order[i]) << "count " << count << " position " << i;
+                }
+            }
+        }
+    }
 }
 
 TEST(TensorOrderingTest, CpuSortPreservesInt64IndicesAcrossRanks) {
@@ -188,26 +209,10 @@ TEST(TensorOrderingTest, ArgExtremeKernelMatchesCpu) {
                                             {4, 4}, Device::GPU);
     const auto [max_values, max_indices] = ties.max_with_indices(1);
     const auto [min_values, min_indices] = ties.min_with_indices(1);
-    EXPECT_EQ(max_indices.cpu().to_vector_int64(), (std::vector<int64_t>{0, 2, 0, 1}));
-    EXPECT_EQ(min_indices.cpu().to_vector_int64(), (std::vector<int64_t>{0, 2, 0, 0}));
+    EXPECT_EQ(max_indices.cpu().to_vector_int64(), (std::vector<int64_t>{0, 0, 0, 1}));
+    EXPECT_EQ(min_indices.cpu().to_vector_int64(), (std::vector<int64_t>{0, 0, 0, 0}));
     EXPECT_TRUE(std::signbit(max_values.cpu().to_vector()[0]));
     EXPECT_TRUE(std::signbit(min_values.cpu().to_vector()[0]));
     EXPECT_EQ(ties.argmax().cpu().to_vector_int64(), (std::vector<int64_t>{4}));
     EXPECT_EQ(ties.argmin().cpu().to_vector_int64(), (std::vector<int64_t>{4}));
-}
-
-TEST(TensorOrderingTest, DISABLED_ArgExtremeTiming) {
-    for (const auto& shape : std::vector<std::vector<size_t>>{{65536, 112}, {1, 4194304}, {65536, 448}}) {
-        const Tensor x = Tensor::rand(TensorShape(shape), Device::GPU);
-        auto& backend = internal::backend_ops_for(x);
-        for (int i = 0; i < 3; ++i)
-            (void)x.max_with_indices(1);
-        backend.synchronize_device();
-        const auto start = std::chrono::steady_clock::now();
-        for (int i = 0; i < 20; ++i)
-            (void)x.max_with_indices(1);
-        backend.synchronize_device();
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 20;
-        std::cout << "arg_extreme " << TensorShape(shape).str() << " " << ms << " ms\n";
-    }
 }

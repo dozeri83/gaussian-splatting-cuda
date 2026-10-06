@@ -21,13 +21,16 @@
 #include "core/splat_data.hpp"
 #include "core/tensor_backend.hpp"
 #include "core/tensor_completion.hpp"
+#include "gui/line_renderer.hpp"
 #include "io/loader.hpp"
 #include "operation/undo_history.hpp"
 #include "python/gil.hpp"
 #include "python/python_buffer_analysis.hpp"
 #include "python/python_runtime.hpp"
 #include "python/runner.hpp"
+#include "python_test_support.hpp"
 #include "rendering/coordinate_conventions.hpp"
+#include "rendering/screen_overlay_renderer.hpp"
 #include "tensor_test_support.hpp"
 #include "visualizer/ipc/render_settings_convert.hpp"
 #include "visualizer/ipc/view_context.hpp"
@@ -37,6 +40,8 @@
 #include "visualizer/rendering/rendering_types.hpp"
 #include "visualizer/visualizer.hpp"
 #include "visualizer_impl.hpp"
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include <array>
 #include <atomic>
@@ -57,17 +62,12 @@
 #include <utility>
 #include <vector>
 
-namespace {
-    std::filesystem::path findPythonModuleDir();
-    void prependPythonPath(const std::filesystem::path& path);
-} // namespace
-
 class PythonIntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        const auto module_dir = findPythonModuleDir();
+        const auto module_dir = lfs::test::findPythonModuleDir();
         ASSERT_FALSE(module_dir.empty()) << "Could not locate built lichtfeld module for Python tests";
-        prependPythonPath(module_dir);
+        lfs::test::prependPythonPath(module_dir);
         (void)lfs::python::ensure_initialized();
     }
 
@@ -317,64 +317,6 @@ namespace {
         }
 
         return std::make_shared<lfs::core::Tensor>(std::move(image));
-    }
-
-    bool containsLichtfeldModule(const std::filesystem::path& dir) {
-        std::error_code ec;
-        if (!std::filesystem::exists(dir, ec)) {
-            return false;
-        }
-
-        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
-            std::error_code file_ec;
-            if (!it->is_regular_file(file_ec) || file_ec) {
-                continue;
-            }
-
-            const auto filename = it->path().filename().string();
-            const auto ext = it->path().extension().string();
-            if ((ext == ".so" || ext == ".pyd") && filename.rfind("lichtfeld", 0) == 0) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    std::filesystem::path findPythonModuleDir() {
-        std::error_code ec;
-        const auto cwd = std::filesystem::current_path(ec);
-        const auto project_root = std::filesystem::path(PROJECT_ROOT_PATH);
-
-        for (const auto& candidate : {
-                 cwd / "src" / "python",
-                 cwd.parent_path() / "src" / "python",
-                 project_root / "build" / "src" / "python",
-             }) {
-            if (containsLichtfeldModule(candidate)) {
-                return candidate;
-            }
-        }
-
-        return {};
-    }
-
-    void prependPythonPath(const std::filesystem::path& path) {
-        const auto value = path.string();
-        const char* existing = std::getenv("PYTHONPATH");
-#ifdef _WIN32
-        const char separator = ';';
-#else
-        const char separator = ':';
-#endif
-        const std::string combined =
-            existing && *existing ? value + separator + std::string(existing) : value;
-
-#ifdef _WIN32
-        _putenv_s("PYTHONPATH", combined.c_str());
-#else
-        setenv("PYTHONPATH", combined.c_str(), 1);
-#endif
     }
 
     std::string consumePythonError() {
@@ -714,22 +656,9 @@ TEST_F(PythonIntegrationTest, PythonSyntaxDocumentExtractsSymbolsAndScope) {
     EXPECT_EQ(classes, 1);
     EXPECT_EQ(functions, 2);
     EXPECT_EQ(variables, 1);
-    EXPECT_TRUE(document.structureCurrent());
     EXPECT_FALSE(document.foldRanges().empty());
     EXPECT_FALSE(document.highlights().empty());
     EXPECT_EQ(document.scopeAt(code.find("pass")), "Tool.run");
-
-    const auto block = document.enclosingBlockRange(code.find("pass"));
-    ASSERT_TRUE(block.has_value());
-    EXPECT_NE(code.substr(block->start_byte, block->end_byte - block->start_byte).find("def run"),
-              std::string_view::npos);
-
-    const auto ranges = document.enclosingBlockRanges(code.find("pass"));
-    ASSERT_GE(ranges.size(), 2);
-    EXPECT_NE(code.substr(ranges[0].start_byte, ranges[0].end_byte - ranges[0].start_byte).find("def run"),
-              std::string_view::npos);
-    EXPECT_NE(code.substr(ranges[1].start_byte, ranges[1].end_byte - ranges[1].start_byte).find("class Tool"),
-              std::string_view::npos);
 }
 
 TEST_F(PythonIntegrationTest, PythonSyntaxDocumentAppliesIncrementalEdits) {
@@ -800,13 +729,11 @@ TEST_F(PythonIntegrationTest, PythonSyntaxDocumentKeepsStructureDuringSyntaxErro
     lfs::python::PythonSyntaxDocument document;
     ASSERT_TRUE(document.reset(valid));
     ASSERT_EQ(document.analysis().status, lfs::python::PythonBufferStatus::Clean);
-    ASSERT_TRUE(document.structureCurrent());
     ASSERT_FALSE(document.symbols().empty());
     ASSERT_FALSE(document.foldRanges().empty());
 
     ASSERT_TRUE(document.reset(invalid));
     EXPECT_EQ(document.analysis().status, lfs::python::PythonBufferStatus::SyntaxError);
-    EXPECT_FALSE(document.structureCurrent());
     ASSERT_FALSE(document.symbols().empty());
     ASSERT_FALSE(document.foldRanges().empty());
 
@@ -976,7 +903,7 @@ TEST_F(PythonIntegrationTest, CaptureSplitComparisonPreservesPresentedOrientatio
             }
             const auto image = std::make_shared<lfs::core::Tensor>(lfs::core::Tensor::from_vector(
                 pixels, {3, height, width}, lfs::core::Device::CPU));
-            lfs::vis::VulkanSplitViewParams params;
+            lfs::vis::SplitViewCpuDesc params;
             params.left.image = params.right.image = image;
             params.left.flip_y = params.right.flip_y = flip_y;
             params.content_rect = {0, 0, width, height};
@@ -1409,6 +1336,53 @@ result_values = (
     EXPECT_FLOAT_EQ(result.values[index++], 1.0f);
 }
 
+TEST_F(PythonIntegrationTest, RestoredTensorOperations) {
+    const auto result = runPythonTensorSnippet(R"PY(
+import lichtfeld as lf
+x = lf.Tensor.normal([2, 2], mean=2, std=0, device="gpu")
+assert x.backend in ("cuda", "vulkan", "metal")
+assert x.all_close(lf.Tensor.ones([2, 2], device="gpu") * 2)
+assert x.allclose(x.clone())
+assert lf.Tensor.bernoulli([4], p=1, device="gpu").sum().item() == 4
+weights = lf.Tensor.ones([4], device="gpu")
+assert sorted(lf.Tensor.multinomial(weights, 4, seed=42).tolist()) == [0, 1, 2, 3]
+assert lf.Tensor.diag(weights).sum().item() == 4
+assert x.cdist(x).sum().item() == 0
+assert x.normalize().sum().item() == 0
+assert x.mod(x).sum().item() == 0
+assert x.reduce(lf.ReduceOp.SUM).item() == 8
+assert x.nonzero_split()[0].numel == 4
+assert x.linear(x).sum().item() == 32
+assert x.reshape([1, 2, 1, 2]).conv1x1(x).sum().item() == 32
+x[0, 1] = -3
+assert x[0, 1].item() == -3
+half = x.to("float16")
+assert half.clamp(-1, 1).to("float32").sum().item() == 2
+assert half.clamp_min_(-1) is half
+assert half.clamp_(-1, 1) is half
+assert half.to("float32").sum().item() == 2
+assert x.where_into_(x < 0, 5, x) is x
+assert x[0, 1].item() == 5
+indices = lf.Tensor.zeros([2], device="gpu", dtype="int32")
+assert x.gather_lazy(indices).tolist() == [2, 2]
+assert x.validate()["is_valid"]
+assert x.diff(x.clone())["num_different"] == 0
+assert x.stats()["backend"] == x.backend
+assert x.reserved_allocation_bytes >= 16
+assert lf.nn.softmax(x).sum().item() == 2
+assert lf.nn.silu(x).all_close(x.swish())
+assert lf.nn.rms_norm(x, lf.Tensor.ones([2], device="gpu")).shape == (2, 2)
+assert lf.nn.residual_scale(x, x, lf.Tensor.ones([2], device="gpu")).all_close(x * 2)
+sequence = half.reshape([1, 1, 2, 2])
+windows = lf.nn.window_partition(sequence, 3)
+assert lf.nn.window_unpartition(windows, 3, 2).to("float32").all_close(sequence.to("float32"))
+result_shape = (1,)
+result_values = [1.0]
+)PY");
+    ASSERT_EQ(result.values.size(), 1u);
+    EXPECT_FLOAT_EQ(result.values[0], 1.0F);
+}
+
 TEST_F(PythonIntegrationTest, PyTensorSyncWaitsForItsVulkanBackendWithCudaDefault) {
     using namespace lfs::core;
     if (!gpu_backend_available(GpuBackend::Vulkan))
@@ -1715,4 +1689,89 @@ try:
 finally:
     lf.ui.on_show_load_file_confirmation_with_batch(lambda paths, is_dataset, replace, user_batch: None)
 )PY"));
+}
+
+TEST_F(PythonIntegrationTest, CustomGizmoOverlayDispatchesPerViewAndRetainsInstance) {
+    const lfs::python::GilAcquire gil;
+    std::unique_ptr<PyObject, decltype(&Py_DecRef)> globals(PyDict_New(), Py_DecRef);
+    PyDict_SetItemString(globals.get(), "__builtins__", PyEval_GetBuiltins());
+    const auto run = [&](const char* code) {
+        auto* result = PyRun_String(code, Py_file_input, globals.get(), globals.get());
+        if (!result)
+            ADD_FAILURE() << consumePythonError();
+        const bool success = result != nullptr;
+        Py_XDECREF(result);
+        return success;
+    };
+    ASSERT_TRUE(run(R"PY(
+import lichtfeld as lf
+calls = []
+instances = []
+class CustomOverlay:
+    gizmo_id = "test.custom.overlay"
+    enabled = True
+    def __init__(self):
+        self.frames = 0
+        instances.append(self)
+    @classmethod
+    def poll(cls, ctx):
+        return cls.enabled
+    def draw(self, ctx):
+        self.frames += 1
+        point = ctx.world_to_screen((0, 0, 0))
+        calls.append((self.frames, point, ctx.camera_position, ctx.camera_forward,
+                      ctx.screen_to_world_ray(point)))
+        ctx.draw_line_3d((0, 0, 0), (1, 0, 0), (1, 0, 0, 1), 2)
+        ctx.draw_filled_circle(point, 4, (0, 1, 0, 1))
+lf.register_gizmo(CustomOverlay)
+)PY"));
+    EXPECT_TRUE(lfs::python::has_viewport_draw_handlers());
+    const glm::mat4 proj = glm::perspective(glm::radians(60.0f), 2.0f, 0.1f, 100.0f);
+    const glm::vec2 size(400, 200);
+    lfs::vis::gui::NativeOverlayDrawList draw_list;
+    lfs::rendering::ScreenOverlayRenderer overlay;
+    for (int i = 0; i < 2; ++i) {
+        const glm::vec2 pos(100 + i * 400, 50);
+        const glm::vec3 camera(i == 0 ? 0 : 5, 0, i == 0 ? 5 : 0);
+        const glm::vec3 forward = glm::normalize(-camera);
+        const glm::mat4 view = glm::lookAt(camera, glm::vec3(0), glm::vec3(0, 1, 0));
+        overlay.beginFrame();
+        lfs::python::invoke_viewport_overlay(glm::value_ptr(view), glm::value_ptr(proj),
+                                             glm::value_ptr(pos), glm::value_ptr(size),
+                                             glm::value_ptr(camera), glm::value_ptr(forward),
+                                             &overlay, &draw_list);
+        overlay.endFrame();
+        const auto commands = overlay.consumeCommands();
+        EXPECT_EQ(commands.size(), 2u);
+        for (const auto& command : commands) {
+            EXPECT_NEAR(command.p0.x, pos.x + size.x / 2, 0.001f);
+            EXPECT_NEAR(command.p0.y, pos.y + size.y / 2, 0.001f);
+            EXPECT_TRUE(command.clip.has_value());
+            if (command.clip) {
+                EXPECT_EQ(command.clip->min, pos);
+                EXPECT_EQ(command.clip->max, pos + size);
+            }
+        }
+    }
+    EXPECT_TRUE(run(R"PY(
+assert len(instances) == 1, len(instances)
+assert [c[0] for c in calls] == [1, 2], calls
+for c, point, camera, forward in zip(calls, [(300, 150), (700, 150)],
+                                    [(0, 0, 5), (5, 0, 0)], [(0, 0, -1), (-1, 0, 0)]):
+    for got, want in zip(c[1:], [point, camera, forward, forward]):
+        assert all(abs(a-b) < 0.001 for a, b in zip(got, want)), (got, want)
+)PY"));
+    EXPECT_TRUE(run("CustomOverlay.enabled = False"));
+    const glm::mat4 view(1);
+    const glm::vec2 pos(0);
+    const glm::vec3 camera(0), forward(0, 0, -1);
+    overlay.beginFrame();
+    lfs::python::invoke_viewport_overlay(glm::value_ptr(view), glm::value_ptr(proj),
+                                         glm::value_ptr(pos), glm::value_ptr(size),
+                                         glm::value_ptr(camera), glm::value_ptr(forward),
+                                         &overlay, &draw_list);
+    EXPECT_TRUE(overlay.consumeCommands().empty());
+    EXPECT_TRUE(run("lf.unregister_gizmo(CustomOverlay.gizmo_id)"));
+    EXPECT_FALSE(lfs::python::has_viewport_draw_handlers());
+    overlay.endFrame();
 }

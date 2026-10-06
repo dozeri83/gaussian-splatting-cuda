@@ -314,14 +314,6 @@ namespace lfs::core {
             load_parsed_serialized_tensor(is, tensor, parsed, use_pinned);
         }
 
-        void read_serialized_tensor_pageable_if_large(std::istream& is,
-                                                      Tensor& tensor) {
-            const auto parsed = parse_serialized_tensor_header(is);
-            const bool use_pinned =
-                parsed.payload_bytes < kPageableSerializedHostTensorBytes;
-            load_parsed_serialized_tensor(is, tensor, parsed, use_pinned);
-        }
-
         void read_serialized_tensor_device_from_span_or_host(
             std::istream& is, Tensor& tensor, const cudaStream_t stream) {
             const auto parsed = parse_serialized_tensor_header(is);

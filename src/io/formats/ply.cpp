@@ -48,6 +48,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef __APPLE__
+#include <malloc/malloc.h>
+#endif
+
 // TBB includes
 #include <tbb/parallel_for.h>
 #include <tbb/task_arena.h>
@@ -83,11 +87,7 @@ namespace lfs::io {
         constexpr int MAX_DC_COMPONENTS = 48;
         constexpr int MAX_REST_COMPONENTS = 135;
         constexpr int COLOR_CHANNELS = 3;
-        constexpr int POSITION_DIMS = 3;
-        constexpr int SCALE_DIMS = 3;
-        constexpr int QUATERNION_DIMS = 4;
         constexpr float IDENTITY_QUATERNION_W = 1.0f;
-        constexpr int SH_DEGREE_3_REST_COEFFS = 15;
         constexpr int SH_DEGREE_OFFSET = 1;
 
         // Block sizes for parallel processing
@@ -1480,7 +1480,9 @@ namespace lfs::io {
         float* ptr = nullptr;
         size_t count = 0;
         size_t requested_count = 0;
+        size_t allocated_bytes = 0;
         bool alloc_failed = false;
+        bool mapped = false;
 
         HostBuffer() = default;
         explicit HostBuffer(const size_t element_count, const bool zero_initialize = false)
@@ -1493,18 +1495,49 @@ namespace lfs::io {
                 count = 0;
                 return;
             }
+            allocated_bytes = count * sizeof(float);
+#ifdef __APPLE__
+            (void)zero_initialize;
+            ptr = static_cast<float*>(mmap(nullptr, allocated_bytes,
+                                           PROT_READ | PROT_WRITE,
+                                           MAP_PRIVATE | MAP_ANON, -1, 0));
+            if (ptr == MAP_FAILED)
+                ptr = nullptr;
+            else
+                mapped = true;
+#else
             ptr = static_cast<float*>(zero_initialize
                                           ? std::calloc(count, sizeof(float))
-                                          : std::malloc(count * sizeof(float)));
+                                          : std::malloc(allocated_bytes));
+#endif
             if (!ptr) {
                 alloc_failed = true;
                 count = 0;
+                allocated_bytes = 0;
             }
         }
 
         ~HostBuffer() {
-            if (ptr)
+            reset();
+        }
+
+        void reset() noexcept {
+            if (ptr) {
+#ifdef __APPLE__
+                if (mapped)
+                    munmap(ptr, allocated_bytes);
+                else
+                    std::free(ptr);
+#else
                 std::free(ptr);
+#endif
+            }
+            ptr = nullptr;
+            count = 0;
+            requested_count = 0;
+            allocated_bytes = 0;
+            alloc_failed = false;
+            mapped = false;
         }
 
         HostBuffer(const HostBuffer&) = delete;
@@ -1513,12 +1546,7 @@ namespace lfs::io {
         HostBuffer(HostBuffer&& other) noexcept { swap(other); }
         HostBuffer& operator=(HostBuffer&& other) noexcept {
             if (this != &other) {
-                if (ptr)
-                    std::free(ptr);
-                ptr = nullptr;
-                count = 0;
-                requested_count = 0;
-                alloc_failed = false;
+                reset();
                 swap(other);
             }
             return *this;
@@ -1529,7 +1557,9 @@ namespace lfs::io {
             std::swap(ptr, other.ptr);
             std::swap(count, other.count);
             std::swap(requested_count, other.requested_count);
+            std::swap(allocated_bytes, other.allocated_bytes);
             std::swap(alloc_failed, other.alloc_failed);
+            std::swap(mapped, other.mapped);
         }
     };
 
@@ -1545,14 +1575,30 @@ namespace lfs::io {
             return !means.alloc_failed && !sh0.alloc_failed && !shN_swizzled.alloc_failed &&
                    !opacity.alloc_failed && !scaling.alloc_failed && !rotation.alloc_failed;
         }
+
+        void reset() noexcept {
+            means.reset();
+            sh0.reset();
+            shN_swizzled.reset();
+            opacity.reset();
+            scaling.reset();
+            rotation.reset();
+        }
     };
+
+    void return_ply_staging_to_os() noexcept {
+#ifdef __APPLE__
+        malloc_zone_pressure_relief(nullptr, 0);
+#endif
+    }
 
     [[nodiscard]] PlyImportValidation extract_and_validate_ply_payload(
         const char* const vertex_data,
         const FastPropertyLayout& layout,
         const LoadOptions& options,
         const std::uint32_t layout_coeffs_rest,
-        PlyHostStaging& host) {
+        PlyHostStaging& host,
+        const bool stage_shN) {
         LOG_TIMER_TRACE("PLY fused payload decode");
 
         const size_t stride = layout.vertex_stride;
@@ -1677,15 +1723,17 @@ namespace lfs::io {
                             if (canonical_component >= max_rest_components) {
                                 continue;
                             }
-                            const auto slot = canonical_component / 4u;
-                            const auto component = canonical_component % 4u;
-                            const size_t destination =
-                                static_cast<size_t>(lfs::core::sh_swizzled_index(
-                                    static_cast<std::uint32_t>(row_index), slot,
-                                    layout_coeffs_rest)) *
-                                    4u +
-                                component;
-                            host.shN_swizzled.ptr[destination] = value;
+                            if (stage_shN) {
+                                const auto slot = canonical_component / 4u;
+                                const auto component = canonical_component % 4u;
+                                const size_t destination =
+                                    static_cast<size_t>(lfs::core::sh_swizzled_index(
+                                        static_cast<std::uint32_t>(row_index), slot,
+                                        layout_coeffs_rest)) *
+                                        4u +
+                                    component;
+                                host.shN_swizzled.ptr[destination] = value;
+                            }
                         }
 
                         if (invalid) {
@@ -1712,7 +1760,7 @@ namespace lfs::io {
     }
 
     namespace {
-        constexpr std::size_t kDefaultPlyQ16BandPrims = std::size_t{1} << 20;
+        constexpr std::size_t kDefaultPlyQ16BandPrims = std::size_t{1} << 16;
         // Tensor-program encode rematerializes several band-sized fp32 buffers.
         // Cap Vulkan import bands so peak stays far below a full-N 45-float gather.
         std::atomic<std::size_t> g_ply_q16_band_prims{kDefaultPlyQ16BandPrims};
@@ -1744,6 +1792,66 @@ namespace lfs::io {
                 const Tensor host = Tensor::from_blob(host_shN.ptr + offset, {elements},
                                                       Device::CPU, DataType::Float32);
                 Tensor source = host.gpu();
+                const size_t code_offset = lfs::core::sh_value_quant::sh_value_u16_count(row, rest);
+                const size_t code_count = lfs::core::sh_value_quant::sh_value_u16_count(count, rest);
+                auto code_band = codes.slice(0, code_offset, code_offset + code_count);
+                const size_t bounds_offset = lfs::core::sh_value_quant::n_bounds_for_prims(row) * 2;
+                const size_t bounds_count = lfs::core::sh_value_quant::n_bounds_for_prims(count) * 2;
+                auto bounds_band = bounds.slice(0, bounds_offset, bounds_offset + bounds_count);
+                lfs::core::sh_codec(source, code_band,
+                                    {.destination_format = lfs::core::ShFormat::Q16,
+                                     .source_rows = count,
+                                     .destination_rows = count,
+                                     .count = count,
+                                     .source_rest = rest,
+                                     .destination_rest = rest},
+                                    nullptr, nullptr, &bounds_band);
+                lfs::core::TensorCompletion completion;
+                completion.include(code_band);
+                completion.wait();
+            }
+        }
+
+        void encode_mapped_shN_to_q16_tensor(const char* const vertex_data,
+                                             const FastPropertyLayout& layout,
+                                             Tensor& codes,
+                                             Tensor& bounds,
+                                             const size_t n_prims,
+                                             const std::uint32_t rest,
+                                             const LoadOptions& options) {
+            if (n_prims == 0 || rest == 0)
+                return;
+            const size_t band_prims = ply_q16_band_prims();
+            LFS_ASSERT_MSG(band_prims >= 256 && band_prims % 256 == 0,
+                           "PLY q16 bands must align with quantization groups");
+            for (size_t row = 0; row < n_prims; row += band_prims) {
+                throw_if_load_cancel_requested(options, "PLY load cancelled");
+                const size_t count = std::min(band_prims, n_prims - row);
+                HostBuffer host(lfs::core::sh_swizzled_float_count(count, rest), true);
+                if (host.alloc_failed) {
+                    throw_ply_error(
+                        lfs::ErrorCode::ResourceExhausted,
+                        "Failed to allocate banded PLY SH staging buffer",
+                        lfs::SmallFields{}
+                            .add("band_start", static_cast<std::int64_t>(row))
+                            .add("band_primitives", static_cast<std::int64_t>(count)));
+                }
+                auto band_layout = layout;
+                band_layout.vertex_count = count;
+                extract_sh_coefficients_to_swizzled_host(
+                    vertex_data + row * layout.vertex_stride,
+                    band_layout,
+                    {},
+                    layout.rest_offsets,
+                    layout.rest_count,
+                    ply_constants::COLOR_CHANNELS,
+                    rest,
+                    host.ptr);
+
+                const auto scope = lfs::core::GpuBackendScope(*lfs::core::gpu_backend_of(codes));
+                const Tensor source = Tensor::from_blob(host.ptr, {host.count},
+                                                        Device::CPU, DataType::Float32)
+                                          .gpu();
                 const size_t code_offset = lfs::core::sh_value_quant::sh_value_u16_count(row, rest);
                 const size_t code_count = lfs::core::sh_value_quant::sh_value_u16_count(count, rest);
                 auto code_band = codes.slice(0, code_offset, code_offset + code_count);
@@ -1877,7 +1985,13 @@ namespace lfs::io {
                 return checked_float_count(block_count, slot_floats, "SplatData.shN");
             };
 
-            const auto make_staging = [&](const size_t gaussian_count) {
+            const bool encode_shN_q16 =
+                options.shN_q16 &&
+                static_cast<bool>(options.splat_tensor_allocator) &&
+                layout_rest > 0;
+
+            const auto make_staging = [&](const size_t gaussian_count,
+                                          const bool include_shN) {
                 return PlyHostStaging{
                     .means = HostBuffer(checked_float_count(
                         gaussian_count, 3, "SplatData.means")),
@@ -1887,7 +2001,7 @@ namespace lfs::io {
                                             "SplatData.sh0"),
                         static_cast<size_t>(sh0_dim2),
                         "SplatData.sh0")),
-                    .shN_swizzled = HostBuffer(shN_count_for(gaussian_count), true),
+                    .shN_swizzled = HostBuffer(include_shN ? shN_count_for(gaussian_count) : 0, true),
                     .opacity = HostBuffer(gaussian_count),
                     .scaling = HostBuffer(checked_float_count(
                         gaussian_count, 3, "SplatData.scaling")),
@@ -1915,7 +2029,7 @@ namespace lfs::io {
 
             const auto header_ready_at = std::chrono::steady_clock::now();
             size_t N = layout.vertex_count;
-            PlyHostStaging host = make_staging(N);
+            PlyHostStaging host = make_staging(N, !encode_shN_q16);
             if (!host.valid()) {
                 throw_ply_error(
                     lfs::ErrorCode::ResourceExhausted,
@@ -1925,7 +2039,7 @@ namespace lfs::io {
             }
 
             PlyImportValidation validation = extract_and_validate_ply_payload(
-                vertex_data, layout, options, layout_rest, host);
+                vertex_data, layout, options, layout_rest, host, !encode_shN_q16);
 
             // Clean PLYs take the fused one-pass path above. Invalid rows are rare;
             // preserve their established compaction semantics with the slower indexed
@@ -1956,7 +2070,7 @@ namespace lfs::io {
                 // Do not hold the full-size fused staging allocation while creating
                 // the compact fallback buffers.
                 host = {};
-                host = make_staging(N);
+                host = make_staging(N, true);
                 if (!host.valid()) {
                     throw_ply_error(
                         lfs::ErrorCode::ResourceExhausted,
@@ -2067,12 +2181,6 @@ namespace lfs::io {
 
             Tensor means = allocate_float_tensor(
                 host_span(host.means), {N, 3}, options, "SplatData.means");
-            const bool encode_shN_q16 =
-                options.shN_q16 &&
-                static_cast<bool>(options.splat_tensor_allocator) &&
-                layout_rest > 0 &&
-                host.shN_swizzled.count > 0;
-
             Tensor sh0 = allocate_float_tensor(
                 host_span(host.sh0),
                 {N, static_cast<size_t>(sh0_dim1), static_cast<size_t>(sh0_dim2)},
@@ -2110,21 +2218,30 @@ namespace lfs::io {
             Tensor opacity = allocate_float_tensor(
                 host_span(host.opacity), {N, 1}, options, "SplatData.opacity");
 
-            TensorUploadBatch uploads;
-            uploads.enqueue(means, host_span(host.means), "SplatData.means");
-            uploads.enqueue(sh0, host_span(host.sh0), "SplatData.sh0");
-            if (!encode_shN_q16) {
-                uploads.enqueue(shN, host_span(host.shN_swizzled), "SplatData.shN");
-            }
-            uploads.enqueue(scaling, host_span(host.scaling), "SplatData.scaling");
-            uploads.enqueue(rotation, host_span(host.rotation), "SplatData.rotation");
-            uploads.enqueue(opacity, host_span(host.opacity), "SplatData.opacity");
-            uploads.wait();
-            if (encode_shN_q16) {
-                encode_host_shN_to_q16_tensor(
-                    host.shN_swizzled, shN, shN_bounds, N, layout_rest, options);
+            {
+                TensorUploadBatch uploads;
+                uploads.enqueue(means, host_span(host.means), "SplatData.means");
+                uploads.enqueue(sh0, host_span(host.sh0), "SplatData.sh0");
+                if (!encode_shN_q16) {
+                    uploads.enqueue(shN, host_span(host.shN_swizzled), "SplatData.shN");
+                }
+                uploads.enqueue(scaling, host_span(host.scaling), "SplatData.scaling");
+                uploads.enqueue(rotation, host_span(host.rotation), "SplatData.rotation");
+                uploads.enqueue(opacity, host_span(host.opacity), "SplatData.opacity");
+                uploads.wait();
+                if (encode_shN_q16) {
+                    if (host.shN_swizzled.count > 0) {
+                        encode_host_shN_to_q16_tensor(
+                            host.shN_swizzled, shN, shN_bounds, N, layout_rest, options);
+                    } else {
+                        encode_mapped_shN_to_q16_tensor(
+                            vertex_data, layout, shN, shN_bounds, N, layout_rest, options);
+                    }
+                }
             }
             const auto upload_complete_at = std::chrono::steady_clock::now();
+            host.reset();
+            return_ply_staging_to_os();
 
             // Calculate SH degree
             int sh_degree = static_cast<int>(std::sqrt(shN_dim1 + ply_constants::SH_DEGREE_OFFSET)) - ply_constants::SH_DEGREE_OFFSET;

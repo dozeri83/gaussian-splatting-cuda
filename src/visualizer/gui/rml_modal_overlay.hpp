@@ -70,7 +70,6 @@ namespace lfs::vis::gui {
         void render(int screen_w, int screen_h,
                     float screen_x, float screen_y,
                     float vp_x, float vp_y, float vp_w, float vp_h);
-        void releaseRendererResources();
         void reloadResources();
         void preload();
 
@@ -147,7 +146,7 @@ namespace lfs::vis::gui {
         bool has_theme_signature_ = false;
         int width_ = 0;
         int height_ = 0;
-        CachedVulkanContextRender direct_cache_;
+        CachedUiContextRender direct_cache_;
         bool render_needed_ = true;
         std::optional<std::chrono::steady_clock::time_point> next_update_at_;
         bool dialog_position_valid_ = false;

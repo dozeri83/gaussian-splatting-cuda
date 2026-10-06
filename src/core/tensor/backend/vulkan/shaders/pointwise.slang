@@ -116,15 +116,17 @@ float accurateLog1p(float value)
 
 float accurateAsin(float value)
 {
-    // Clamp rounding overshoot, but keep NaN (clamp would drop it).
-    const float bounded = isnan(value) ? value : clamp(value, -1.0f, 1.0f);
+    if (isnan(value) || abs(value) > 1.0f)
+        return asfloat(0x7fc00000u);
+    const float bounded = value;
     return atan2(bounded, sqrt(max(0.0f, 1.0f - bounded * bounded)));
 }
 
 float accurateAcos(float value)
 {
-    // Clamp rounding overshoot, but keep NaN (clamp would drop it).
-    const float bounded = isnan(value) ? value : clamp(value, -1.0f, 1.0f);
+    if (isnan(value) || abs(value) > 1.0f)
+        return asfloat(0x7fc00000u);
+    const float bounded = value;
     return atan2(sqrt(max(0.0f, 1.0f - bounded * bounded)), bounded);
 }
 
@@ -173,7 +175,7 @@ float floatUnary(float value, float scalar, bool scalarOnRight)
     if (kOp == 17) return value * value;
     if (kOp == 18) return accurateTanh(value);
     if (kOp == 19) return rsqrt(value);
-    if (kOp == 20) return float((value > 0.0f) - (value < 0.0f));
+    if (kOp == 20) return isnan(value) ? value : float((value > 0.0f) - (value < 0.0f));
     if (kOp == 21) return 1.0f / value;
     if (kOp == 22) return floor(value);
     if (kOp == 23) return ceil(value);
@@ -228,7 +230,7 @@ float applyChainOp(float value, ChainOp op, uint index)
     if (op.kind == 17) return value * value;
     if (op.kind == 18) return accurateTanh(value);
     if (op.kind == 19) return rsqrt(value);
-    if (op.kind == 20) return float((value > 0.0f) - (value < 0.0f));
+    if (op.kind == 20) return isnan(value) ? value : float((value > 0.0f) - (value < 0.0f));
     if (op.kind == 21) return 1.0f / value;
     if (op.kind == 22) return floor(value);
     if (op.kind == 23) return ceil(value);
@@ -375,12 +377,12 @@ void evaluateScalar(uint index, uniform Parameters parameters)
     }
     if (kArity == 5)
     {
-        if (kInputDType == kFloat32)
+        if (kInputDType == kFloat32 || kInputDType == kFloat16)
         {
-            const float value = ((Ptr<float, Access.Read>)parameters.lhsAddress)[index];
+            const float value = loadFloat(parameters.lhsAddress, index);
             const float maximum = asfloat(uint(parameters.scalarInt64));
-            ((Ptr<float, Access.ReadWrite>)parameters.outputAddress)[index] =
-                isnan(value) ? value : min(max(value, parameters.scalarFloat), maximum);
+            const float result = isnan(value) ? value : min(max(value, parameters.scalarFloat), maximum);
+            storeFloat(parameters.outputAddress, index, result);
         }
         else
         {

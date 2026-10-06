@@ -13,6 +13,56 @@ endif()
 
 cmake_minimum_required(VERSION 3.30)
 
+# Select the application GPU before vcpkg resolves manifest features. Apple
+# builds are native Metal by default; Vulkan remains the desktop default on
+# Linux and Windows and can still be requested explicitly for reference runs.
+if(CMAKE_HOST_APPLE)
+    set(_lfs_default_graphics_backend Metal)
+else()
+    set(_lfs_default_graphics_backend Vulkan)
+endif()
+set(LFS_GRAPHICS_BACKEND "${_lfs_default_graphics_backend}" CACHE STRING
+    "Desktop graphics backend")
+set_property(CACHE LFS_GRAPHICS_BACKEND PROPERTY STRINGS Vulkan Metal)
+if(NOT LFS_GRAPHICS_BACKEND STREQUAL "Vulkan" AND
+   NOT LFS_GRAPHICS_BACKEND STREQUAL "Metal")
+    message(FATAL_ERROR
+        "LFS_GRAPHICS_BACKEND must be Vulkan or Metal, got '${LFS_GRAPHICS_BACKEND}'")
+endif()
+if(LFS_GRAPHICS_BACKEND STREQUAL "Metal" AND NOT CMAKE_HOST_APPLE)
+    message(FATAL_ERROR "LFS_GRAPHICS_BACKEND=Metal is supported only on Apple platforms")
+endif()
+if(CMAKE_HOST_APPLE AND LFS_GRAPHICS_BACKEND STREQUAL "Metal")
+    set(_lfs_default_tensor_vulkan OFF)
+else()
+    set(_lfs_default_tensor_vulkan ON)
+endif()
+option(LFS_TENSOR_VULKAN "Build the Vulkan tensor backend" "${_lfs_default_tensor_vulkan}")
+# Metal tensor backend, Metal trainer kernels and the native Metal viewer.
+# Apple only. OFF with Vulkan graphics gives the pure-MoltenVK build.
+option(LFS_TENSOR_METAL "Build the Metal tensor backend and native Metal viewer" "${CMAKE_HOST_APPLE}")
+if(LFS_TENSOR_METAL AND NOT CMAKE_HOST_APPLE)
+    message(FATAL_ERROR "LFS_TENSOR_METAL is supported only on Apple platforms")
+endif()
+if(LFS_GRAPHICS_BACKEND STREQUAL "Metal" AND NOT LFS_TENSOR_METAL)
+    message(FATAL_ERROR "LFS_GRAPHICS_BACKEND=Metal composites with Metal tensors; enable LFS_TENSOR_METAL")
+endif()
+if(CMAKE_HOST_APPLE AND NOT LFS_TENSOR_METAL AND NOT LFS_TENSOR_VULKAN)
+    message(FATAL_ERROR "Apple builds need a GPU tensor backend: enable LFS_TENSOR_METAL or LFS_TENSOR_VULKAN")
+endif()
+if(LFS_GRAPHICS_BACKEND STREQUAL "Vulkan" OR LFS_TENSOR_VULKAN)
+    set(LFS_USE_VULKAN ON)
+else()
+    set(LFS_USE_VULKAN OFF)
+endif()
+if(LFS_GRAPHICS_BACKEND STREQUAL "Vulkan")
+    set(LFS_GRAPHICS_VULKAN_BUILD ON)
+else()
+    set(LFS_GRAPHICS_VULKAN_BUILD OFF)
+endif()
+unset(_lfs_default_graphics_backend)
+unset(_lfs_default_tensor_vulkan)
+
 # Manifest-mode vcpkg runs only while CMake configures. Track overlay-port
 # contents explicitly so the usual `cmake --build` regeneration also reruns
 # vcpkg when a portfile, patch or overlay manifest changes.
@@ -23,7 +73,10 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${LFS_VCPKG_OVERL
 # Keep test-only packages out of the application dependency graph. Command-line
 # cache values are visible before project(), when the vcpkg toolchain resolves
 # manifest features.
-list(REMOVE_ITEM VCPKG_MANIFEST_FEATURES tests vulkan-validation)
+list(REMOVE_ITEM VCPKG_MANIFEST_FEATURES tests vulkan vulkan-validation)
+if(LFS_USE_VULKAN)
+    list(APPEND VCPKG_MANIFEST_FEATURES vulkan)
+endif()
 if(BUILD_TESTS OR BUILD_UNICODE_TEST_ONLY OR BUILD_FORMAT_TESTS OR BUILD_TEMPORAL_CPU_TESTS OR BUILD_PANEL_LAYOUT_TESTS OR BUILD_VISUALIZER_TESTS)
     list(APPEND VCPKG_MANIFEST_FEATURES tests)
 endif()
@@ -34,7 +87,7 @@ if(DEFINED LFS_ENABLE_VULKAN_VALIDATION)
 elseif(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE MATCHES "^(Debug|RelWithDebInfo)$")
     set(_lfs_vulkan_validation_feature ON)
 endif()
-if(_lfs_vulkan_validation_feature)
+if(_lfs_vulkan_validation_feature AND LFS_USE_VULKAN)
     list(APPEND VCPKG_MANIFEST_FEATURES vulkan-validation)
 endif()
 list(REMOVE_DUPLICATES VCPKG_MANIFEST_FEATURES)
@@ -207,6 +260,12 @@ add_custom_target(lfs_git_version ALL
 
 include(CMakeDependentOption)
 option(LFS_BUILD_TRAINER "Include training in the full LichtFeld Studio application" ON)
+message(STATUS "Graphics backend selection: ${LFS_GRAPHICS_BACKEND}")
+if(LFS_GRAPHICS_BACKEND STREQUAL "Metal")
+    add_compile_definitions(LFS_GRAPHICS_METAL=1)
+else()
+    add_compile_definitions(LFS_GRAPHICS_VULKAN=1)
+endif()
 option(BUILD_TESTS "Build tests" OFF)
 option(BUILD_PANEL_LAYOUT_TESTS "Build focused panel layout and registry tests" OFF)
 option(BUILD_VISUALIZER_TESTS "Build CPU-only visualizer tests without LibTorch" OFF)
@@ -251,6 +310,9 @@ option(BUILD_CUDA_PTX_ONLY "Build PTX-only (JIT at runtime, ~5-15s first startup
 # Portable: PTX-only + bundled libs, no tests
 option(BUILD_PORTABLE "Build portable distribution" OFF)
 if(BUILD_PORTABLE)
+    # Run before subdirectory install rules; a reused prefix may contain a
+    # separately installed plugin which must never enter the primary package.
+    install(SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyPrimaryPackage.cmake")
     if(NOT APPLE)
         set(BUILD_CUDA_PTX_ONLY ON CACHE BOOL "" FORCE)
     endif()
@@ -262,6 +324,10 @@ if(BUILD_PORTABLE)
 endif()
 
 option(LFS_MACOS_PORTABLE_APP "Install the macOS portable build as a relocatable .app" OFF)
+option(LFS_ENABLE_APPLE_REFRAME "Include experimental private Apple photo-to-splat APIs (not for App Store builds)" OFF)
+if(LFS_ENABLE_APPLE_REFRAME AND (NOT CMAKE_HOST_APPLE OR NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
+    message(FATAL_ERROR "LFS_ENABLE_APPLE_REFRAME is supported only on macOS")
+endif()
 if(LFS_MACOS_PORTABLE_APP)
     if(NOT APPLE OR NOT BUILD_PORTABLE)
         message(FATAL_ERROR "LFS_MACOS_PORTABLE_APP requires macOS and BUILD_PORTABLE=ON")
@@ -535,11 +601,14 @@ endif()
 # Find packages
 find_package(TBB REQUIRED)
 find_package(Threads REQUIRED)
-find_package(Vulkan REQUIRED)
-find_package(VulkanMemoryAllocator CONFIG REQUIRED)
-find_package(volk CONFIG REQUIRED)
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SetupNvidiaDlss.cmake")
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SetupAmdFsr3.cmake")
+if(LFS_USE_VULKAN)
+    find_package(Vulkan REQUIRED)
+    find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+    find_package(volk CONFIG REQUIRED)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SetupAmdFsr3.cmake")
+else()
+    set(LFS_AMD_FSR3_AVAILABLE OFF CACHE INTERNAL "FSR3 requires Vulkan" FORCE)
+endif()
 find_package(SDL3 REQUIRED)
 lfs_validate_linux_sdl_video_backends()
 find_package(glm REQUIRED)
@@ -674,9 +743,6 @@ add_subdirectory(src/rendering)  # Rendering module (lfs::rendering namespace)
 add_subdirectory(src/sequencer)  # Sequencer module (lfs::sequencer namespace)
 add_subdirectory(src/preprocessing) # CLI preprocessing module (ONNXRuntime)
 add_subdirectory(src/visualizer) # Visualizer module (lfs::vis namespace)
-if(LFS_NVIDIA_DLSS_AVAILABLE)
-    add_subdirectory(src/scene_upscalers/nvidia_dlss)
-endif()
 if(LFS_AMD_FSR3_AVAILABLE)
     add_subdirectory(src/scene_upscalers/amd_fsr3)
 endif()
@@ -731,9 +797,6 @@ add_executable(${PROJECT_NAME}
     resources/lichtfeld-studio.rc
     resources/lichtfeld-studio.manifest
 )
-if(TARGET lfs_scene_upscaler_nvidia_dlss)
-    add_dependencies(${PROJECT_NAME} lfs_scene_upscaler_nvidia_dlss)
-endif()
 if(TARGET lfs_scene_upscaler_amd_fsr3)
     add_dependencies(${PROJECT_NAME} lfs_scene_upscaler_amd_fsr3)
 endif()
@@ -826,11 +889,12 @@ if(APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE lfs_python_embed)
 endif()
 
-target_link_libraries(${PROJECT_NAME}
-        PRIVATE
+if(LFS_USE_VULKAN)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
         Vulkan::Vulkan
         GPUOpen::VulkanMemoryAllocator
         volk::volk_headers)
+endif()
 
 if(BUILD_PORTABLE AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     get_filename_component(_lfs_vulkan_loader_realpath "${Vulkan_LIBRARY}" REALPATH)
@@ -1097,7 +1161,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMENT "Creating resource directory structure"
 )
 
-if(TARGET lfs_vulkan_rasterizer AND NOT APPLE)
+if(TARGET lfs_vulkan_rasterizer AND NOT LFS_TENSOR_METAL)
     get_target_property(_LFS_VULKAN_RASTERIZER_SPV_DIR
         lfs_vulkan_rasterizer
         LFS_VULKAN_RASTERIZER_SPV_DIR)
@@ -1229,7 +1293,7 @@ if(WIN32 AND _exe_is_multi_config)
 endif()
 
 # Platform-specific settings
-if(UNIX)
+if(UNIX AND LFS_USE_VULKAN)
     if(APPLE)
         set(_lichtfeld_origin "@executable_path")
     else()
@@ -1391,8 +1455,10 @@ message(STATUS "===========================================")
 message(STATUS "Build Configuration:")
 message(STATUS "  CUDA Version: ${CUDAToolkit_VERSION}")
 message(STATUS "  CUDA Archs: ${CMAKE_CUDA_ARCHITECTURES}")
-message(STATUS "  Vulkan Found: ${Vulkan_FOUND}")
-message(STATUS "  Vulkan Include Dirs: ${Vulkan_INCLUDE_DIRS}")
+message(STATUS "  Vulkan enabled: ${LFS_USE_VULKAN}")
+if(LFS_USE_VULKAN)
+    message(STATUS "  Vulkan Include Dirs: ${Vulkan_INCLUDE_DIRS}")
+endif()
 message(STATUS "  FreeType Found: ${FREETYPE_FOUND}")
 message(STATUS "  WebP Found: ${WebP_FOUND}")
 message(STATUS "  LibArchive Found: ${LibArchive_FOUND}")
@@ -1463,6 +1529,7 @@ if(LFS_MACOS_PORTABLE_APP)
     install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/lichtfeld-icon.icns"
         DESTINATION "${_lfs_macos_contents}/Resources")
 
+    if(LFS_USE_VULKAN)
     set(_lfs_moltenvk_prefixes /opt/homebrew /usr/local)
     if(DEFINED ENV{HOMEBREW_PREFIX})
         list(PREPEND _lfs_moltenvk_prefixes "$ENV{HOMEBREW_PREFIX}")
@@ -1496,6 +1563,7 @@ if(LFS_MACOS_PORTABLE_APP)
         DESTINATION "${CMAKE_INSTALL_DATADIR}/vulkan/icd.d")
     install(FILES "${_lfs_moltenvk_package}/LICENSE"
         DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/MoltenVK")
+    endif()
 else()
     install(FILES "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ".")
 endif()

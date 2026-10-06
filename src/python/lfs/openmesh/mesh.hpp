@@ -31,7 +31,7 @@ namespace OM = OpenMesh;
 namespace lfs::python::openmesh_bindings {
 
     template <class T>
-    using np_array = nb::ndarray<nb::numpy, T, nb::c_contig>;
+    using np_array = nb::ndarray<nb::numpy, nb::device::cpu, T, nb::c_contig>;
 
     template <class Mesh, class OtherMesh>
     void assign_connectivity(Mesh& _self, const OtherMesh& _other) {

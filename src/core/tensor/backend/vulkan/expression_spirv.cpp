@@ -402,7 +402,7 @@ namespace lfs::core::internal {
                 case ExprOp::Square: result = mul(x, x); break;
                 case ExprOp::Tanh: result = tanh(x); break;
                 case ExprOp::Rsqrt: result = ext(GLSLstd450InverseSqrt, {x}); break;
-                case ExprOp::Sign: result = instruction(spv::OpConvertSToF, float_, {as_int(u(spv::OpISub, boolean(cmp(spv::OpFOrdGreaterThan, x, f(0))), boolean(cmp(spv::OpFOrdLessThan, x, f(0)))))}); break;
+                case ExprOp::Sign: result = choose(instruction(spv::OpIsNan, bool_, {x}), x, instruction(spv::OpConvertSToF, float_, {as_int(u(spv::OpISub, boolean(cmp(spv::OpFOrdGreaterThan, x, f(0))), boolean(cmp(spv::OpFOrdLessThan, x, f(0)))))}), float_); break;
                 case ExprOp::Reciprocal: result = div(f(1), x); break;
                 case ExprOp::Floor: result = ext(GLSLstd450Floor, {x}); break;
                 case ExprOp::Ceil: result = ext(GLSLstd450Ceil, {x}); break;
@@ -416,10 +416,11 @@ namespace lfs::core::internal {
                 case ExprOp::Tan: result = ext(GLSLstd450Tan, {x}); break;
                 case ExprOp::Asin:
                 case ExprOp::Acos: {
-                    // Clamp rounding overshoot, but keep NaN.
-                    auto bounded = choose(instruction(spv::OpIsNan, bool_, {x}), x, ext(GLSLstd450FClamp, {x, f(-1), f(1)}), float_);
+                    const auto bounded = x;
                     auto root = ext(GLSLstd450Sqrt, {ext(GLSLstd450FMax, {f(0), sub(f(1), mul(bounded, bounded))})});
                     result = op == ExprOp::Asin ? ext(GLSLstd450Atan2, {bounded, root}) : ext(GLSLstd450Atan2, {root, bounded});
+                    result = choose(instruction(spv::OpLogicalOr, bool_, {instruction(spv::OpIsNan, bool_, {x}), cmp(spv::OpFOrdGreaterThan, ext(GLSLstd450FAbs, {x}), f(1))}),
+                                    f(std::numeric_limits<float>::quiet_NaN()), result, float_);
                     break;
                 }
                 case ExprOp::Atan: result = ext(GLSLstd450Atan, {x}); break;

@@ -1,9 +1,9 @@
 /* SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "core/tensor_backend.hpp"
 #include "backend/tensor_completion.hpp"
 #include "backend/tensor_vulkan_interop.hpp"
+#include "core/tensor_backend_vulkan.hpp"
 #include "core/tensor_completion.hpp"
 
 #if LFS_HAS_CUDA
@@ -30,17 +30,17 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #endif
+#include "backend/gpu_backend_ops.hpp"
 #include <exception>
 #include <format>
 #include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
-#ifdef LFS_TENSOR_VULKAN
-#include "backend/gpu_backend_ops.hpp"
 #ifdef LFS_TENSOR_METAL
 #include "backend/metal/metal_context.hpp"
 #endif
+#ifdef LFS_TENSOR_VULKAN
 #include "backend/vulkan/vk_context.hpp"
 #if LFS_HAS_CUDA
 #include "backend/vulkan/vk_cuda_bridge.hpp"
@@ -102,8 +102,24 @@ namespace lfs::core {
     }
 
     std::optional<size_t> reserved_allocation_bytes(const Tensor& tensor) {
-        (void)tensor;
-        return std::nullopt;
+        if (!tensor.is_valid() || tensor.is_external_storage())
+            return std::nullopt;
+        if (tensor.device() == Device::CPU) {
+            if (!tensor.owns_memory())
+                return tensor.is_empty() && !tensor.is_view() ? std::optional<size_t>{0} : std::nullopt;
+            const auto rows = tensor.ndim() == 0 ? size_t{1} : tensor.shape()[0];
+            const auto capacity = std::max(rows, tensor.capacity());
+            if (capacity == 0)
+                return size_t{0};
+            size_t row_bytes = dtype_size(tensor.dtype());
+            for (size_t axis = 1; axis < tensor.ndim(); ++axis)
+                row_bytes *= tensor.shape()[axis];
+            return row_bytes * capacity;
+        }
+        const auto storage = internal::storage_ref(tensor);
+        if (storage.meta && storage.meta->gpu_descriptor.byte_size != 0)
+            return static_cast<size_t>(storage.meta->gpu_descriptor.byte_size);
+        return tensor.is_empty() ? std::optional<size_t>{0} : std::nullopt;
     }
 
     size_t gpu_allocation_bytes(const GpuBackend backend, const size_t bytes) {
@@ -288,16 +304,36 @@ namespace lfs::core {
 
     void where_into(Tensor& output, const Tensor& condition, float value, const Tensor& source) {
         const auto backend = gpu_backend_of(output);
-        if (!output.is_valid() || !source.is_valid() || !condition.is_valid() || !backend ||
-            gpu_backend_of(source) != backend || gpu_backend_of(condition) != backend ||
-            !output.is_contiguous() || !source.is_contiguous() || !condition.is_contiguous() ||
-            output.shape() != source.shape() || output.numel() != condition.numel() ||
-            output.dtype() != source.dtype() || condition.dtype() != DataType::Bool ||
-            (output.dtype() != DataType::Float32 && output.dtype() != DataType::Float16))
-            throw TensorError("where_into requires matching contiguous Float32/Float16 GPU tensors and a Bool mask");
+        LFS_ASSERT_MSG(output.is_valid() && source.is_valid() && condition.is_valid() &&
+                           output.device() == source.device() && output.device() == condition.device() &&
+                           gpu_backend_of(source) == backend && gpu_backend_of(condition) == backend &&
+                           output.is_contiguous() && source.is_contiguous() && condition.is_contiguous() &&
+                           output.shape() == source.shape() && output.numel() == condition.numel() &&
+                           output.dtype() == source.dtype() && condition.dtype() == DataType::Bool &&
+                           (output.dtype() == DataType::Float32 || output.dtype() == DataType::Float16),
+                       "where_into requires matching contiguous Float32/Float16 tensors and a Bool mask");
         internal::preserve_lazy_snapshots_before_write(output);
         if (output.numel() == 0)
             return;
+        if (output.device() == Device::CPU) {
+            const auto* mask = condition.ptr<unsigned char>();
+            if (output.dtype() == DataType::Float32) {
+                const auto values = source.clone();
+                for (size_t i = 0; i < output.numel(); ++i)
+                    output.ptr<float>()[i] = mask[i] ? value : values.ptr<float>()[i];
+            } else {
+                const auto values = source.clone();
+                const auto scalar = detail::tensor_float_to_half(value);
+                for (size_t i = 0; i < output.numel(); ++i)
+                    output.ptr<detail::tensor_half_t>()[i] = mask[i] ? scalar : values.ptr<detail::tensor_half_t>()[i];
+            }
+            return;
+        }
+        if (output.storage_ptr() == source.storage_ptr() && output.data_ptr() != source.data_ptr()) {
+            const auto snapshot = source.clone();
+            where_into(output, condition, value, snapshot);
+            return;
+        }
         if (*backend == GpuBackend::CUDA) {
 #if LFS_HAS_CUDA
             internal::cuda_where_into(output, condition, value, source);
@@ -351,7 +387,13 @@ namespace lfs::core {
             if (internal::metal_backend_available())
                 return GpuBackend::Metal;
 #endif
+#ifdef LFS_TENSOR_VULKAN
             return GpuBackend::Vulkan;
+#elif defined(LFS_TENSOR_METAL)
+            return GpuBackend::Metal;
+#else
+            return GpuBackend::CUDA;
+#endif
         }
 
         GpuBackend backend_of_state(const int state) {
@@ -426,7 +468,8 @@ namespace lfs::core {
     }
 
     lfs::Status set_default_gpu_backend(const GpuBackend backend) {
-        if (std::ranges::find(kGpuBackends, backend) == kGpuBackends.end()) {
+        if (std::ranges::find(kCompiledGpuBackends, backend) ==
+            kCompiledGpuBackends.end()) {
             return lfs::Status::failure(lfs::make_error(lfs::ErrorInit{
                 .code = lfs::ErrorCode::InvalidArgument,
                 .domain = lfs::ErrorDomain::Core,
@@ -1229,20 +1272,6 @@ namespace lfs::core {
     }
 
     namespace internal {
-
-        void order_legacy_after_home(const Tensor& tensor) {
-            if (tensor.device() != Device::GPU || tensor.stream() == nullptr) {
-                return;
-            }
-            backend_ops_for(tensor).bridge(ExecContext{tensor.stream()}, ExecContext{nullptr});
-        }
-
-        void order_home_after_legacy(const Tensor& tensor) {
-            if (tensor.device() != Device::GPU || tensor.stream() == nullptr) {
-                return;
-            }
-            backend_ops_for(tensor).bridge(ExecContext{nullptr}, ExecContext{tensor.stream()});
-        }
 
         void trim_live_gpu_backends() {
             for (const GpuBackend backend : kGpuBackends) {

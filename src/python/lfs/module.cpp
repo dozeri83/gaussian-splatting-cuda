@@ -2,6 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "io/apple_reframe.hpp"
 #include "preferences.hpp"
 #include <algorithm>
 #include <cmath>
@@ -106,7 +107,7 @@
 #include "visualizer/scene/scene_manager.hpp"
 #include "visualizer/scene_coordinate_utils.hpp"
 #include "visualizer/visualizer.hpp"
-#include "visualizer/window/vulkan_context.hpp"
+#include "visualizer/window/graphics_context.hpp"
 #include "visualizer/window/window_manager.hpp"
 
 #include <atomic>
@@ -1950,6 +1951,26 @@ NB_MODULE(lichtfeld, m) {
         "Switch from training to edit mode");
 
     m.def(
+        "apple_reframe_available", [] {
+            nb::gil_scoped_release release;
+            return lfs::io::appleReframeAvailable();
+        },
+        "Whether Apple photo reconstruction is ready on this Mac");
+#if defined(LFS_HAS_APPLE_REFRAME)
+    m.def(
+        "create_splat_from_photo", [](const std::string& path) {
+            nb::gil_scoped_release release;
+            const auto photo = python_utf8_path(path);
+            if (!std::filesystem::is_regular_file(photo))
+                throw std::invalid_argument("Photo does not exist");
+            emit_project_cmd_marshaled("python.create_splat_from_photo", [photo] {
+                lfs::core::events::cmd::CreateSplatFromPhoto{.path = photo}.emit();
+            });
+        },
+        nb::arg("path"), "Create editable Gaussian splats from a photo with Apple Reframe");
+#endif
+
+    m.def(
         "load_file",
         [](const std::string& path, const bool is_dataset,
            const std::string& output_path, const std::string& init_path,
@@ -2402,6 +2423,29 @@ NB_MODULE(lichtfeld, m) {
             for (std::size_t i = 0; i < names.size(); ++i)
                 unexplained[names[i].data()] = owners.unattributed_roots[i];
             result["unattributed_roots"] = unexplained;
+            nb::dict metal;
+            metal["valid"] = snapshot.process.metal_memory_valid;
+            metal["device_allocated_bytes"] = snapshot.process.metal_device_allocated_bytes;
+            metal["tensor_requested_bytes"] = snapshot.process.metal_tensor_requested_bytes;
+            metal["tensor_capacity_bytes"] = snapshot.process.metal_tensor_capacity_bytes;
+            metal["tensor_rounding_slack_bytes"] = snapshot.process.metal_tensor_rounding_slack_bytes;
+            metal["allocator_cached_bytes"] = snapshot.process.metal_allocator_cached_bytes;
+            metal["other_device_bytes"] = snapshot.process.metal_other_device_bytes;
+            metal["tensor_peak_capacity_bytes"] = snapshot.process.metal_tensor_peak_capacity_bytes;
+            metal["allocator_peak_reserved_bytes"] = snapshot.process.metal_allocator_peak_reserved_bytes;
+            nb::list rows;
+            for (const auto& row : snapshot.rows) {
+                if (!row.scope.starts_with("metal.") || row.live_bytes == 0)
+                    continue;
+                nb::dict item;
+                item["scope"] = row.scope;
+                item["label"] = row.label;
+                item["live_bytes"] = row.live_bytes;
+                item["peak_bytes"] = row.peak_bytes;
+                rows.append(std::move(item));
+            }
+            metal["rows"] = std::move(rows);
+            result["metal"] = std::move(metal);
             return result;
         },
         "Return a sampled process VRAM breakdown by owner category");
@@ -2982,18 +3026,29 @@ NB_MODULE(lichtfeld, m) {
             return wm ? wm->isFullscreen() : false;
         },
         "Check if the window is in fullscreen mode");
-    m.def(
-        "get_vulkan_capabilities", []() {
-            nb::dict capabilities;
-            const auto* const window = lfs::vis::services().windowOrNull();
-            const auto* const context = window != nullptr ? window->getVulkanContext() : nullptr;
-            capabilities["mesh_wireframe"] =
-                context != nullptr && context->hasFillModeNonSolid();
-            capabilities["wide_lines"] =
-                context != nullptr && context->hasWideLines();
-            return capabilities;
-        },
-        "Return Vulkan device capabilities used to gate rendering controls");
+    const auto get_graphics_capabilities = []() {
+        nb::dict capabilities;
+        const auto* const window = lfs::vis::services().windowOrNull();
+        const auto* const context = window != nullptr ? window->getGraphicsContext() : nullptr;
+        const auto caps = context != nullptr ? context->capabilities()
+                                             : lfs::vis::GraphicsCapabilities{};
+        capabilities["backend"] = caps.native_metal ? "metal" : "vulkan";
+        capabilities["mesh_rendering"] = caps.mesh_rendering;
+        capabilities["mesh_wireframe"] = caps.wireframe;
+        capabilities["wide_lines"] = caps.wide_lines;
+        capabilities["environment_map"] = caps.environment_map;
+        capabilities["split_view"] = caps.split_view;
+        capabilities["temporal_upscaling"] = caps.temporal_upscaling;
+        capabilities["mesh2splat"] = caps.mesh2splat;
+        capabilities["hdr_libplacebo"] = caps.hdr_libplacebo;
+        capabilities["external_memory_interop"] = caps.external_memory_interop;
+        capabilities["external_semaphore_interop"] = caps.external_semaphore_interop;
+        return capabilities;
+    };
+    m.def("get_graphics_capabilities", get_graphics_capabilities,
+          "Return graphics capabilities used to gate rendering controls");
+    m.def("get_vulkan_capabilities", get_graphics_capabilities,
+          "Deprecated alias for get_graphics_capabilities");
     m.def(
         "toggle_ui", []() { lfs::core::events::ui::ToggleUI{}.emit(); },
         "Toggle UI overlay visibility");

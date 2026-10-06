@@ -18,7 +18,7 @@
 #include "core/training_manager.hpp"
 #include "scene_renderer.hpp"
 #include "visualizer/scene_coordinate_utils.hpp"
-#include "window/vulkan_context.hpp"
+#include "window/graphics_context.hpp"
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -129,8 +129,7 @@ namespace lfs::vis {
             0.0f,
             0.0f,
             static_cast<float>(viewport_width),
-            static_cast<float>(viewport_height),
-            false};
+            static_cast<float>(viewport_height)};
 
         if (viewState(view).split_view_service_.isGTComparisonActive(settingsForView(viewState(view).id))) {
             glm::ivec2 content_dims{0, 0};
@@ -166,7 +165,6 @@ namespace lfs::vis {
                 bounds.x = static_cast<float>(std::max((viewport_width - content_width) / 2, 0));
                 bounds.y = 0.0f;
             }
-            bounds.letterboxed = true;
         }
         return bounds;
     }
@@ -287,34 +285,7 @@ namespace lfs::vis {
             return this->state().viewport_artifact_service_.resolveLazyCapture();
         }
 
-        if (auto image = getViewportImageIfAvailable()) {
-            return image;
-        }
-
-        if (!engine_ || !this->state().viewport_artifact_service_.hasGpuFrame()) {
-            return {};
-        }
-
-        std::optional<std::shared_lock<std::shared_mutex>> render_lock;
-#if LFS_BUILD_TRAINER
-        if (const auto* tm =
-                this->state().viewport_interaction_context_.scene_manager
-                    ? this->state().viewport_interaction_context_.scene_manager->getTrainerManager()
-                    : nullptr) {
-            if (const auto* trainer = tm->getTrainer()) {
-                render_lock.emplace(trainer->getRenderMutex());
-            }
-        }
-#endif
-
-        auto readback_result = engine_->readbackGpuFrameColor(*this->state().viewport_artifact_service_.gpuFrame());
-        if (!readback_result) {
-            LOG_ERROR("Failed to capture viewport image from GPU frame: {}", readback_result.error());
-            return {};
-        }
-
-        this->state().viewport_artifact_service_.storeCapturedImage(*readback_result);
-        return this->state().viewport_artifact_service_.getCapturedImageIfCurrent();
+        return getViewportImageIfAvailable();
     }
 
     int RenderingManager::pickCameraFrustum(ViewId view, const glm::vec2& mouse_pos) {
@@ -467,7 +438,7 @@ namespace lfs::vis {
         if (width <= 0 || height <= 0) {
             return std::unexpected("invalid preview depth render dimensions");
         }
-        if (!last_vulkan_context_) {
+        if (!last_graphics_context_) {
             return std::unexpected("no Vulkan context is available");
         }
         if (!hasRenderableGaussians(&model)) {
@@ -484,7 +455,7 @@ namespace lfs::vis {
         // force the legacy per-pixel chain for the depth-capture render so the
         // readback matches the image resolution.
         if (!scene_renderer_) {
-            scene_renderer_ = createSceneRenderer(*last_vulkan_context_);
+            scene_renderer_ = createSceneRenderer(*last_graphics_context_);
         }
         scene_renderer_->setDepthCaptureMode(true, expected_depth);
         struct DepthCaptureModeGuard {
@@ -759,53 +730,6 @@ namespace lfs::vis {
             PreviewImageReadback::FloatRgb);
     }
 
-    std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImageRgb8(const lfs::core::SplatData& model,
-                                                                                SceneRenderState scene_state,
-                                                                                const glm::mat3& rotation,
-                                                                                const glm::vec3& position,
-                                                                                const float focal_length_mm,
-                                                                                const int width,
-                                                                                const int height,
-                                                                                std::optional<glm::vec3> background_color_override,
-                                                                                std::optional<bool> orthographic_override,
-                                                                                std::optional<float> ortho_scale_override) {
-        if (width <= 0 || height <= 0) {
-            return {};
-        }
-        if (previewRenderNeedsTiling(width, height)) {
-            return renderPreviewImageTiledWithState(
-                nullptr,
-                model,
-                std::move(scene_state),
-                rotation,
-                position,
-                focal_length_mm,
-                width,
-                height,
-                false,
-                background_color_override,
-                orthographic_override,
-                ortho_scale_override,
-                PreviewImageReadback::UInt8Rgb);
-        }
-
-        return renderPreviewImageWithState(
-            nullptr,
-            model,
-            std::move(scene_state),
-            rotation,
-            position,
-            focal_length_mm,
-            width,
-            height,
-            false,
-            std::nullopt,
-            orthographic_override,
-            ortho_scale_override,
-            background_color_override,
-            PreviewImageReadback::UInt8Rgb);
-    }
-
     std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImageRgba8(const lfs::core::SplatData& model,
                                                                                  SceneRenderState scene_state,
                                                                                  const glm::mat3& rotation,
@@ -890,8 +814,8 @@ namespace lfs::vis {
                                          request.orthographic_override,
                                          request.ortho_scale_override,
                                          request.reference_height);
-        if (last_vulkan_context_ &&
-            last_vulkan_context_->rendererTerminalState() != RendererTerminalState::Running) {
+        if (last_graphics_context_ &&
+            last_graphics_context_->terminalState() != RendererTerminalState::Running) {
             return std::unexpected("renderer is unavailable after a GPU failure; restart LichtFeld Studio");
         }
         releasePreviewImageResources();
@@ -1032,10 +956,10 @@ namespace lfs::vis {
         if (width <= 0 || height <= 0) {
             return std::unexpected("invalid preview render dimensions");
         }
-        if (!last_vulkan_context_) {
+        if (!last_graphics_context_) {
             return std::unexpected("no Vulkan context is available");
         }
-        if (last_vulkan_context_->rendererTerminalState() != RendererTerminalState::Running) {
+        if (last_graphics_context_->terminalState() != RendererTerminalState::Running) {
             return std::unexpected("renderer is unavailable after a GPU failure; restart LichtFeld Studio");
         }
         if (!hasRenderableGaussians(&model)) {
@@ -1103,7 +1027,7 @@ namespace lfs::vis {
         }
 
         if (!scene_renderer_) {
-            scene_renderer_ = createSceneRenderer(*last_vulkan_context_);
+            scene_renderer_ = createSceneRenderer(*last_graphics_context_);
         }
 
         // Preview/export uses the renderer's exact two-batch count gate; one
@@ -1267,7 +1191,7 @@ namespace lfs::vis {
             return cached_depth;
         }
 
-        if (!scene_renderer_ || !last_vulkan_context_) {
+        if (!scene_renderer_ || !last_graphics_context_) {
             return -1.0f;
         }
 

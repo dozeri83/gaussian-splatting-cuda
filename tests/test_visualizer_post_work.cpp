@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "python/python_compat.hpp"
 #include "test_view_targets.hpp"
 #include <SDL3/SDL.h>
 
@@ -24,6 +25,8 @@
 #include "core/user_paths.hpp"
 #include "cuda_backend_test.hpp"
 #include "gui/import_error.hpp"
+#include "gui/rmlui/rmlui_manager.hpp"
+#include "gui/scene_panel_native.hpp"
 #include "gui/scene_tree_session.hpp"
 #include "gui/string_keys.hpp"
 #include "input/input_controller.hpp"
@@ -38,9 +41,13 @@
 #include "io/splat_chapter.hpp"
 #include "licht_test_support.hpp"
 #include "operation/undo_history.hpp"
+#include "python/gil.hpp"
 #include "python/python_runtime.hpp"
+#include "python/runner.hpp"
+#include "python_test_support.hpp"
 #include "rendering/coordinate_conventions.hpp"
 #include "rendering/passes/vulkan_viewport_pass.hpp"
+#include "rendering/vulkan_view_render_state.hpp"
 #include "scene/viewer_splat_quantize.hpp"
 #include "tools/unified_tool_registry.hpp"
 #include "training/checkpoint.hpp"
@@ -58,6 +65,7 @@
 #include "visualizer/project/session_state.hpp"
 #include "visualizer/visualizer_impl.hpp"
 #include "window/vulkan_context.hpp"
+#include "window/vulkan_graphics_context.hpp"
 #include "window/vulkan_result.hpp"
 #include <vk_mem_alloc.h>
 
@@ -1511,6 +1519,197 @@ namespace {
 } // namespace
 
 namespace lfs::vis {
+
+    class SequencerFrameDemandTest : public VisualizerImplResetTest {
+    protected:
+        static void SetUpTestSuite() {
+            ASSERT_TRUE(lfs::event::LocalizationManager::getInstance().initialize(
+                (std::filesystem::path(PROJECT_ROOT_PATH) / "src/visualizer/gui/resources/locales").string()));
+        }
+        static void TearDownTestSuite() {
+            lfs::event::LocalizationManager::getInstance().reset();
+        }
+    };
+
+    TEST_F(SequencerFrameDemandTest, PropagatesPlaybackStreamAndPreviewDemand) {
+        VisualizerImpl viewer(projectOptions());
+        auto& gui = *viewer.getGuiManager();
+        auto& sequencer = gui.sequencerUI();
+        auto& controller = sequencer.controller();
+        gui.startup_overlay_.dismiss();
+        gui.ui_layout_settle_frames_ = 0;
+        gui.rml_viewport_overlay_.render_needed_ = false;
+        gui.rml_viewport_overlay_.document_sync_dirty_ = false;
+        // The windowless fixture has no screen chrome render to settle its initial dirtiness.
+        gui.screen_host_.chrome_dirty_ = false;
+        gui.screen_host_.overlay_dirty_ = false;
+        // An unopened panel has pending localization, but must not keep us awake.
+        gui.setSequencerVisible(false);
+        ASSERT_TRUE(sequencer.ui_state_.show_pip_preview);
+        ASSERT_FALSE(gui.needsAnimationFrame());
+        ASSERT_FALSE(lfs::python::has_frame_callback());
+        ASSERT_FALSE(lfs::python::has_scene_time_callback());
+
+        const auto expect_demand = [&](const bool expected) {
+            EXPECT_EQ(sequencer.needsAnimationFrame(), expected);
+            EXPECT_EQ(gui.needsAnimationFrame(), expected);
+            const auto demand = viewer.collectFrameDemand(false, false);
+            EXPECT_EQ(demand.gui_animation, expected);
+            EXPECT_FALSE(demand.python_animation);
+            EXPECT_FALSE(demand.input_event);
+            // Isolate the GUI contribution from initial scene dirtiness in this
+            // windowless fixture. Both scheduler gates must follow it alone.
+            VisualizerImpl::FrameDemand settled;
+            settled.gui_animation = demand.gui_animation;
+            EXPECT_EQ(settled.shouldRenderFrame(), expected);
+            EXPECT_EQ(settled.needsContinuousLoop(), expected);
+        };
+
+        controller.setPlySequence(temporary_.path, "sequence",
+                                  {temporary_.path / "frame_0.ply", temporary_.path / "frame_1.ply"},
+                                  {"frame_0", "frame_1"}, 1.0f);
+        ASSERT_EQ(controller.timeline().realKeyframeCount(), 0);
+        sequencer.ply_stream_states_.assign(2, gui::SequencerUIManager::PlyStreamFrameState::Resident);
+        sequencer.last_ply_sequence_frame_ = 0;
+        controller.play();
+        expect_demand(true);
+        const auto first_frame = controller.plySequenceFrameIndex(controller.playhead());
+        // Use the scheduler's real eligibility decision to reach another tick,
+        // without pointer input, callbacks, or crossing a displayed-frame boundary.
+        VisualizerImpl::FrameDemand settled;
+        settled.gui_animation = viewer.collectFrameDemand(false, false).gui_animation;
+        if (settled.needsContinuousLoop()) {
+            sequencer.last_playback_tick_time_ = std::chrono::steady_clock::now() - std::chrono::milliseconds(10);
+            sequencer.tickPlaybackBeforeSceneRender();
+        }
+        EXPECT_GT(controller.playhead(), 0.0f);
+        EXPECT_EQ(controller.plySequenceFrameIndex(controller.playhead()), first_frame);
+        EXPECT_EQ(sequencer.last_ply_sequence_frame_, first_frame);
+        expect_demand(true);
+        controller.pause();
+        expect_demand(false);
+
+        // Stage worker handoff states deterministically, without filesystem timing.
+        sequencer.ply_stream_inflight_ = true;
+        expect_demand(true);
+        sequencer.ply_stream_inflight_ = false;
+        sequencer.ply_stream_completed_.push_back({.generation = sequencer.ply_stream_generation_.load() + 1});
+        expect_demand(true);
+        sequencer.drainPlySequenceStream();
+        expect_demand(false);
+        sequencer.ply_stream_requests_.push_back(0);
+        expect_demand(true);
+        sequencer.ply_stream_requests_.clear();
+        expect_demand(false);
+
+        // Remove unrelated pending panel localization while probing PiP alone.
+        auto panel = std::move(sequencer.panel_);
+        gui.setSequencerVisible(true);
+        sequencer.ui_state_.show_pip_preview = true;
+        sequencer.pip_needs_update_ = false;
+        sequencer.pip_last_key_ = sequencer.currentPipPreviewKey();
+        expect_demand(false);
+        controller.seek(0.5f);
+        // The pending key survives the real PiP rate-limit early return.
+        sequencer.pip_last_render_time_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        gui::UIContext context{};
+        context.viewer = &viewer;
+        sequencer.renderKeyframePreview(context);
+        expect_demand(true);
+        sequencer.pip_last_key_ = sequencer.currentPipPreviewKey();
+        expect_demand(false);
+        sequencer.ui_state_.show_pip_preview = false;
+        sequencer.panel_ = std::move(panel);
+        gui.setSequencerVisible(false);
+        controller.clearPlySequence();
+        controller.addKeyframeAtTime({}, 0.0f);
+        controller.addKeyframeAtTime({}, 1.0f);
+        controller.play();
+        sequencer.tickPlaybackBeforeSceneRender();
+        expect_demand(true);
+        controller.pause();
+        controller.beginScrub();
+        expect_demand(true);
+        controller.endScrub();
+        expect_demand(false);
+        gui.setSequencerVisible(true);
+        expect_demand(true);
+        gui.ui_hidden_ = true;
+        EXPECT_FALSE(gui.needsAnimationFrame());
+        controller.play();
+        EXPECT_TRUE(gui.needsAnimationFrame());
+        controller.pause();
+        EXPECT_FALSE(gui.needsAnimationFrame());
+        gui.ui_hidden_ = false;
+        gui.setSequencerVisible(false);
+        expect_demand(false);
+
+        // Pointer dragging remains an independent redraw source.
+        viewer.window_manager_ = std::make_unique<WindowManager>("Demand test", 640, 480);
+        auto& input = const_cast<FrameInputBuffer&>(viewer.window_manager_->frameInput());
+        input.had_event = true;
+        input.mouse_moved = true;
+        input.mouse_down[0] = true;
+        EXPECT_TRUE(viewer.inputFrameRequestsRender());
+        EXPECT_TRUE(viewer.collectFrameDemand(false, false).input_event);
+        input.beginFrame();
+        EXPECT_FALSE(viewer.inputFrameRequestsRender());
+    }
+
+    class SelectionSubmodeTest : public VisualizerImplResetTest {};
+
+    TEST_F(SelectionSubmodeTest, PublishesNativeEventDragAndNewViewerModes) {
+        const auto assert_mirror = [](gui::GizmoManager& gizmo) {
+            const int expected = static_cast<int>(gizmo.getSelectionSubMode());
+            EXPECT_EQ(lfs::python::get_selection_submode(), expected);
+            lfs::python::set_context({});
+            EXPECT_EQ(lfs::python::context().selection_submode, expected);
+        };
+        {
+            VisualizerImpl viewer(projectOptions());
+            auto& gizmo = viewer.getGuiManager()->gizmo();
+            for (int value = 0; value < 8; ++value) {
+                const auto mode = static_cast<SelectionSubMode>(value);
+                gizmo.setSelectionSubMode(mode);
+                EXPECT_EQ(gizmo.getSelectionSubMode(), mode);
+                assert_mirror(gizmo);
+                const auto next = static_cast<SelectionSubMode>((value + 1) % 8);
+                lfs::core::events::tools::SetSelectionSubMode{
+                    .selection_mode = static_cast<int>(next)}
+                    .emit();
+                EXPECT_EQ(gizmo.getSelectionSubMode(), next);
+                assert_mirror(gizmo);
+            }
+            for (const auto mode : {SelectionSubMode::Box, SelectionSubMode::Sphere}) {
+                gizmo.setSelectionVolumeFromDrag(mode, SelectionMode::Replace, 0,
+                                                 glm::vec3(0.0f), 1.0f);
+                EXPECT_EQ(gizmo.getSelectionSubMode(), mode);
+                assert_mirror(gizmo);
+            }
+        }
+        // A replacement viewer must not inherit the previous viewer's Sphere mirror.
+        VisualizerImpl replacement(projectOptions());
+        EXPECT_EQ(replacement.getGuiManager()->gizmo().getSelectionSubMode(), SelectionSubMode::Centers);
+        assert_mirror(replacement.getGuiManager()->gizmo());
+    }
+
+    TEST_F(SelectionSubmodeTest, PublicPythonGetterAndContextFollowNativeMode) {
+        const auto module_dir = lfs::test::findPythonModuleDir();
+        ASSERT_FALSE(module_dir.empty()) << "Could not locate built lichtfeld module for Python tests";
+        lfs::test::prependPythonPath(module_dir);
+        ASSERT_TRUE(lfs::python::ensure_initialized());
+        VisualizerImpl viewer(projectOptions());
+        const lfs::python::GilAcquire gil;
+        const auto script = std::format(R"PY(
+import runpy
+import lichtfeld as lf
+contract = runpy.run_path(r"{}/tests/python/test_ui_api_completeness.py")
+contract["test_selection_submode_follows_native_mode"](lf)
+)PY",
+                                        PROJECT_ROOT_PATH);
+        const int result = PyRun_SimpleString(script.c_str());
+        EXPECT_EQ(result, 0);
+    }
 
     std::filesystem::path make_real_dataset_subset(
         const std::filesystem::path& destination,
@@ -5172,6 +5371,83 @@ namespace lfs::vis {
         EXPECT_EQ(viewer.getScene().getNode("gallery-group"), nullptr);
     }
 
+    // Catches the startup dataset import dropping --add-splat, which trained the viewer's model
+    // without the added splats while headless training kept them.
+    TEST_F(VisualizerImplResetTest, DatasetImportKeepsAddedSplatSettings) {
+        VisualizerImpl viewer(projectOptions());
+        auto& tasks = viewer.getGuiManager()->asyncTasks();
+        const auto splat = makeSplatFixture("added-splat");
+        const auto dataset = temporary_.path / "added-splat-dataset";
+        write_minimal_transforms_dataset(dataset);
+        core::events::cmd::LoadFile{
+            .path = dataset,
+            .is_dataset = true,
+            .add_splat_paths = {splat},
+            .add_splat_freeze = {true},
+            .freeze_lr_scale = 0.05f,
+            .exclude_frozen_add_splats_from_export = true,
+            .discard_changes = true}
+            .emit();
+        ASSERT_TRUE(waitUntil([&] { tasks.pollImportCompletion(); return !tasks.isImporting(); }));
+
+        const auto& params = viewer.getDataLoader()->getParameters();
+        EXPECT_EQ(params.add_splat_paths, std::vector<std::filesystem::path>{splat});
+        EXPECT_EQ(params.add_splat_freeze, std::vector<bool>{true});
+        EXPECT_FLOAT_EQ(params.freeze_lr_scale, 0.05f);
+        EXPECT_TRUE(params.exclude_frozen_add_splats_from_export);
+    }
+
+    // Catches the viewer sizing its shared training storage before --add-splat is appended: training
+    // failed to start once the added splats outgrew the headroom of the initial model.
+    TEST_F(VisualizerImplResetTest, TrainingStartFitsAddedSplatsInSharedStorage) {
+        if (!core::gpu_backend_available(core::default_gpu_backend()))
+            GTEST_SKIP() << "Selected tensor backend unavailable";
+        VisualizerImpl viewer(projectOptions());
+        ASSERT_TRUE(viewer.getParameterManager()->ensureLoaded());
+        ASSERT_TRUE(viewer.getWindowManager()->init());
+        const auto* const context = viewer.getWindowManager()->getGraphicsContext();
+        if (core::default_gpu_backend() == core::GpuBackend::CUDA &&
+            (!context || !context->capabilities().external_memory_interop))
+            GTEST_SKIP() << "External memory interop unavailable";
+
+        const auto init = makeSplatFixture("training-init");
+        const auto added = temporary_.path / "training-added.ply";
+        ASSERT_TRUE(lfs::io::save_ply(*lfs::test::licht::make_splat(64),
+                                      {.output_path = added, .binary = true, .async = false}));
+        const auto dataset = temporary_.path / "training-added-dataset";
+        write_minimal_transforms_dataset(dataset);
+        auto& tasks = viewer.getGuiManager()->asyncTasks();
+        core::events::cmd::LoadFile{
+            .path = dataset,
+            .is_dataset = true,
+            .init_path = init,
+            .add_splat_paths = {added},
+            .discard_changes = true}
+            .emit();
+        ASSERT_TRUE(waitUntil([&] { tasks.pollImportCompletion(); return !tasks.isImporting(); }));
+
+        auto* const manager = viewer.getTrainerManager();
+        ASSERT_TRUE(manager->startTraining());
+        ASSERT_TRUE(waitUntil(
+            [&] {
+                viewer.pumpPostedWorkForProjectWrite();
+                return manager->getState() == TrainingState::Running ||
+                       manager->getState() == TrainingState::Finished;
+            },
+            std::chrono::seconds(60)));
+        EXPECT_EQ(manager->getState(), TrainingState::Running);
+        ASSERT_NE(viewer.getScene().getTrainingModel(), nullptr);
+        EXPECT_EQ(viewer.getScene().getTrainingModel()->size(), 66);
+
+        manager->stopTraining();
+        ASSERT_TRUE(waitUntil(
+            [&] {
+                viewer.pumpPostedWorkForProjectWrite();
+                return manager->getState() == TrainingState::Finished && !manager->isCompletionPending();
+            },
+            std::chrono::seconds(60)));
+    }
+
     TEST(ImportComparisonTest, ProvisionalThirdUsesItsOwnSlotWithoutChangingDisplayedPair) {
         const size_t displayed_offset = 0;
         const auto validation_offset = plyComparisonImportOffset(3, displayed_offset, 2);
@@ -5186,7 +5462,7 @@ namespace lfs::vis {
             GTEST_SKIP() << "CUDA device unavailable";
         VisualizerImpl viewer(projectOptions());
         ASSERT_TRUE(viewer.getWindowManager()->init());
-        auto* context = viewer.getWindowManager()->getVulkanContext();
+        auto* context = vulkanContextOrNull(viewer.getWindowManager()->getGraphicsContext());
         core::MeshData mesh(
             core::Tensor::zeros({1000000, 3}, core::Device::CPU),
             core::Tensor::zeros({1000000, 3}, core::Device::CPU, core::DataType::Int32));
@@ -5252,19 +5528,21 @@ namespace lfs::vis {
         rendering->updateSettings(settings);
         Viewport viewport(640, 480);
         viewport.frameBufferSize = {640, 480};
-        auto* context = viewer.getWindowManager()->getVulkanContext();
+        auto* graphics = viewer.getWindowManager()->getGraphicsContext();
         const RenderingManager::RenderContext displayed{
             .view = rendering->activeViewId(),
             .viewport = viewport,
             .settings = settings,
             .scene_manager = viewer.getSceneManager(),
-            .vulkan_context = context,
+            .graphics_context = graphics,
             .preparing_import = false};
         rendering->markDirty(DirtyFlag::ALL, FrameReason::SceneChange);
-        static_cast<void>(rendering->renderVulkanFrame(displayed));
+        static_cast<void>(rendering->renderFrame(displayed));
         const auto info = rendering->getSplitViewInfo();
         ASSERT_TRUE(info.enabled);
-        const auto frame = rendering->viewState(rendering->activeViewId()).vulkan_mesh_frame_;
+        const auto frame = vulkanViewRenderState(
+                               rendering->viewState(rendering->activeViewId()))
+                               .mesh_frame;
         ASSERT_NE(frame.split_view.left.external_image_view, VK_NULL_HANDLE);
         const auto image = rendering->captureViewportImage();
         ASSERT_TRUE(image);
@@ -5283,7 +5561,7 @@ namespace lfs::vis {
             .viewport = viewport,
             .settings = settings,
             .scene_manager = viewer.getSceneManager(),
-            .vulkan_context = context,
+            .graphics_context = graphics,
             .provisional_import_node = uuid};
         const auto result = rendering->pollImportRenderCheck(validation, [&] {
             EXPECT_EQ(rendering->getSplitViewInfo().right_name, "provisional-large");
@@ -5291,7 +5569,9 @@ namespace lfs::vis {
         ASSERT_TRUE(result.has_value());
         ASSERT_TRUE(result->empty()) << *result;
         EXPECT_EQ(rendering->getSplitViewInfo(), info);
-        const auto restored = rendering->viewState(rendering->activeViewId()).vulkan_mesh_frame_;
+        const auto restored = vulkanViewRenderState(
+                                  rendering->viewState(rendering->activeViewId()))
+                                  .mesh_frame;
         EXPECT_EQ(restored.split_view.left.external_image_view, frame.split_view.left.external_image_view);
         EXPECT_EQ(restored.split_view.right.external_image_view, frame.split_view.right.external_image_view);
         const auto capture = rendering->captureViewportImage();
@@ -5304,7 +5584,7 @@ namespace lfs::vis {
         ASSERT_EQ(cudaMemGetInfo(&free_after, &total), cudaSuccess);
         // Driver pipeline bookkeeping may remain; model-sized render scratch must not.
         EXPECT_LE(free_before > free_after ? free_before - free_after : 0, 16u * 1024 * 1024);
-        static_cast<void>(rendering->renderVulkanFrame(validation));
+        static_cast<void>(rendering->renderFrame(validation));
         EXPECT_EQ(rendering->getSplitViewInfo(), info);
     }
 
@@ -5379,10 +5659,10 @@ namespace lfs::vis {
     TEST(ImportErrorTest, CapturesVulkanErrorsWithoutInterruptingCleanup) {
         std::string outer;
         {
-            VulkanImportErrorScope validation(outer);
+            GraphicsImportErrorScope validation(outer);
             std::string inner;
             {
-                VulkanImportErrorScope upload(inner);
+                GraphicsImportErrorScope upload(inner);
                 EXPECT_FALSE(vk_try_bool(VK_ERROR_OUT_OF_DEVICE_MEMORY, "allocate", "test upload"));
                 EXPECT_TRUE(gui::isImportOutOfMemory(inner));
             }
@@ -5390,7 +5670,7 @@ namespace lfs::vis {
         }
         EXPECT_TRUE(gui::isImportOutOfMemory(outer));
         std::string direct;
-        VulkanImportErrorScope validation(direct);
+        GraphicsImportErrorScope validation(direct);
         const auto message = formatVkCheckFailure("allocate", VK_ERROR_OUT_OF_DEVICE_MEMORY, "direct log");
         EXPECT_EQ(direct, message);
     }
@@ -8172,7 +8452,7 @@ namespace lfs::vis {
     // Catches background maintenance grabbing the master writer lock while a
     // stopping trainer still owes its terminal append (lost training generation).
     TEST_F(VisualizerImplResetTest,
-           StoppingTrainerBlocksIdleCompactionAndAutosave) {
+           StoppingTrainerBlocksAutosave) {
         LFS_CUDA_BACKEND_OR_RETURN();
         const auto& temporary = temporary_.path;
         const auto project_path =
@@ -8250,8 +8530,6 @@ namespace lfs::vis {
                         std::chrono::steady_clock::
                             now() +
                         std::chrono::hours(1);
-                    lifecycle->settings_
-                        .compaction_idle_seconds = 1;
                     lifecycle->last_mutation_at_ =
                         std::chrono::steady_clock::
                             now() -
@@ -8271,24 +8549,6 @@ namespace lfs::vis {
                         std::chrono::hours(1);
                 };
 
-            // Idle compaction would take the master
-            // writer lock the terminal append needs.
-            lifecycle->compaction_suggested_ = true;
-            lifecycle->scene_dirty_.store(
-                false, std::memory_order_release);
-            lifecycle->payload_dirty_.store(
-                false, std::memory_order_release);
-            prime_maintenance();
-            lifecycle->updateMaintenance();
-            EXPECT_FALSE(viewer.jobs().anyRunning(
-                JobType::ProjectWrite));
-            EXPECT_FALSE(
-                lifecycle->project_write_job_
-                    .has_value());
-
-            // Hard dirt blocks compaction, so this leg
-            // proves the autosave path stays parked too.
-            lifecycle->compaction_suggested_ = false;
             ASSERT_NE(
                 scene.addGroup("Hard dirt"),
                 lfs::core::NULL_NODE);
@@ -8306,6 +8566,45 @@ namespace lfs::vis {
 
             viewer.getTrainerManager()
                 ->clearTrainer();
+        }
+    }
+
+    // Catches idle maintenance compacting the project, which keeps only the current save and
+    // removes every save the Contents list offers to restore.
+    TEST_F(VisualizerImplResetTest, IdleMaintenanceKeepsEverySave) {
+        const auto project_path = temporary_.path / "idle-saves.licht";
+        write_empty_project(project_path);
+        const auto save_count = [&] {
+            return lfs::test::licht::require_result(
+                       lfs::io::project::inspect_project_details(project_path))
+                .save_history.size();
+        };
+        {
+            VisualizerImpl viewer(projectOptions());
+            ASSERT_TRUE(viewer.getParameterManager()->ensureLoaded());
+            ASSERT_TRUE(viewer.projectOpen(project_path, ProjectSwitchDisposition::DiscardChanges));
+            const auto writes_finished = [&] {
+                return pumpUntil(viewer.work_queue_mutex_, viewer.work_queue_,
+                                 [&] { return !viewer.jobs().anyRunning(JobType::ProjectWrite); });
+            };
+            auto& scene = viewer.getScene();
+            for (const char* name : {"First edit", "Second edit"}) {
+                ASSERT_NE(scene.addGroup(name), lfs::core::NULL_NODE);
+                ASSERT_TRUE(viewer.projectSave(false));
+                ASSERT_TRUE(writes_finished());
+            }
+            const auto saves = save_count();
+            ASSERT_GE(saves, 2u);
+
+            auto* const lifecycle = viewer.project_lifecycle_.get();
+            ASSERT_NE(lifecycle, nullptr);
+            ASSERT_FALSE(lifecycle->hasDirtyProject());
+            lifecycle->compaction_suggested_ = true;
+            lifecycle->next_storage_check_at_ = std::chrono::steady_clock::now() + std::chrono::hours(1);
+            lifecycle->last_mutation_at_ = std::chrono::steady_clock::now() - std::chrono::hours(1);
+            lifecycle->updateMaintenance();
+            ASSERT_TRUE(writes_finished());
+            EXPECT_EQ(save_count(), saves);
         }
     }
 
@@ -9229,7 +9528,7 @@ namespace lfs::vis {
         }
     }
 
-    TEST_F(VisualizerImplResetTest, ResetTrainingPreservesExplicitInitPath) {
+    TEST_F(VisualizerImplResetTest, ResetTrainingPreservesInitPathAndAddedSplats) {
         ViewerOptions options;
         options.show_startup_overlay = false;
 
@@ -9242,12 +9541,21 @@ namespace lfs::vis {
 
         lfs::core::param::TrainingParameters params;
         params.init_path = "seed_points.ply";
+        params.add_splat_paths = {"background.ply"};
+        params.add_splat_freeze = {true};
+        params.freeze_lr_scale = 0.05f;
+        params.exclude_frozen_add_splats_from_export = true;
         viewer.getDataLoader()->setParameters(params);
 
         lfs::core::events::cmd::ResetTraining{}.emit();
 
-        ASSERT_TRUE(viewer.getDataLoader()->getParameters().init_path.has_value());
-        EXPECT_EQ(*viewer.getDataLoader()->getParameters().init_path, "seed_points.ply");
+        const auto& reset = viewer.getDataLoader()->getParameters();
+        ASSERT_TRUE(reset.init_path.has_value());
+        EXPECT_EQ(*reset.init_path, "seed_points.ply");
+        EXPECT_EQ(reset.add_splat_paths, params.add_splat_paths);
+        EXPECT_EQ(reset.add_splat_freeze, params.add_splat_freeze);
+        EXPECT_FLOAT_EQ(reset.freeze_lr_scale, 0.05f);
+        EXPECT_TRUE(reset.exclude_frozen_add_splats_from_export);
 
         std::error_code ec;
         std::filesystem::remove_all(dataset_path, ec);
@@ -13721,8 +14029,6 @@ namespace lfs::vis {
             ASSERT_NE(gui, nullptr);
             gui->requestExitConfirmation(false);
             EXPECT_FALSE(gui->isExitConfirmationPending());
-            EXPECT_FALSE(
-                lfs::python::is_exit_popup_open());
         }
     }
 
@@ -16823,3 +17129,25 @@ namespace lfs::vis {
         EXPECT_EQ(viewer.frame_state_.state(), FrameStateMachine::State::RendererDead);
     }
 } // namespace lfs::vis
+
+TEST(ScenePanelLogDemandTest, BackgroundLogsWakeOnlyTheActiveLogTab) {
+    auto& logger = lfs::core::Logger::get();
+    // The CPU-only visualizer test binary runs gtest's own main, which leaves the logger uninitialized.
+    if (!logger.is_ready())
+        logger.init(lfs::core::LogLevel::Info);
+    // The panel's RML host requires a manager; an uninitialised one is never driven.
+    lfs::vis::gui::RmlUIManager manager;
+    lfs::vis::gui::NativeScenePanel panel(&manager);
+    const auto previous_level = logger.level();
+    logger.set_level(lfs::core::LogLevel::Info);
+    panel.setProjectActiveTab("logging");
+    lfs::python::consume_redraw_request();
+    LOG_INFO("GUI log demand check");
+    EXPECT_FALSE(lfs::python::has_redraw_request());
+    std::thread([] { LOG_INFO("Background log demand check"); }).join();
+    EXPECT_TRUE(lfs::python::consume_redraw_request());
+    panel.setProjectActiveTab("scene");
+    std::thread([] { LOG_INFO("Inactive log demand check"); }).join();
+    EXPECT_FALSE(lfs::python::consume_redraw_request());
+    logger.set_level(previous_level);
+}

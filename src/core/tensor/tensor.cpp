@@ -352,18 +352,6 @@ namespace lfs::core {
         return storage_accounting_state().vulkan_external.live_bytes.load(std::memory_order_relaxed);
     }
 
-    void Tensor::log_storage_memory() {
-        log_storage_memory({});
-    }
-
-    void Tensor::log_storage_memory(const std::string_view label) {
-        if (label.empty()) {
-            LOG_INFO("{}", storage_memory_summary());
-        } else {
-            LOG_INFO("{} - {}", label, storage_memory_summary());
-        }
-    }
-
     // TensorLeaf implementation
     TensorLeaf::TensorLeaf(Tensor tensor)
         : tensor_ptr_(std::make_shared<Tensor>(std::move(tensor))) {}
@@ -605,6 +593,8 @@ namespace lfs::core {
             storage_bytes);
 
         const size_t preserved_id = id_;
+        // Sibling handles share TensorState; publish its fields under the gate their materializations share.
+        std::unique_lock<std::mutex> publish_lock(lazy->gate);
         ensure_state();
         const bool preserved_tracked = state_->tracked;
         const std::string preserved_name = state_->name;
@@ -662,6 +652,7 @@ namespace lfs::core {
         if (state_.use_count() <= 1) {
             state_->lazy.reset();
         }
+        publish_lock.unlock();
 
         id_ = preserved_id;
         compute_alignment();
@@ -941,7 +932,14 @@ namespace lfs::core {
             return;
         }
         try {
-            lfs::diagnostics::VramProfiler::instance().relabelAllocation(data_, state_->name);
+            // Every region of the packed training block has the same allocation
+            // base. Attribute that physical allocation to the block instead of
+            // whichever parameter view happened to receive a name last.
+            const std::string_view label =
+                storage_meta_ && storage_meta_->external_kind == "splat.exportable"
+                    ? std::string_view{"splat.exportable"}
+                    : std::string_view{state_->name};
+            lfs::diagnostics::VramProfiler::instance().relabelAllocation(data_, label);
         } catch (...) {
             // Diagnostics must never throw out of tensor operations.
         }
@@ -1100,8 +1098,10 @@ namespace lfs::core {
 
 #if LFS_HAS_CUDA
         constexpr GpuBackend storage_less_backend = GpuBackend::CUDA;
-#else
+#elif defined(LFS_TENSOR_VULKAN)
         constexpr GpuBackend storage_less_backend = GpuBackend::Vulkan;
+#else
+        constexpr GpuBackend storage_less_backend = GpuBackend::Metal;
 #endif
         const GpuBackend backend = device_ == Device::GPU && storage_meta_
                                        ? storage_meta_->backend
@@ -2425,8 +2425,8 @@ namespace lfs::core {
         preserve_lazy_snapshots_before_write();
         LFS_ASSERT_MSG(is_valid(),
                        "clamp_ requires a valid tensor");
-        LFS_ASSERT_MSG(dtype_ == DataType::Float32 || dtype_ == DataType::Int32,
-                       "clamp_ currently supports only Float32 and Int32");
+        LFS_ASSERT_MSG(dtype_ == DataType::Float32 || dtype_ == DataType::Float16 || dtype_ == DataType::Int32,
+                       "clamp_ currently supports Float32, Float16 and Int32");
         LFS_ASSERT_MSG(!std::isnan(min_val) && !std::isnan(max_val) && min_val <= max_val,
                        "clamp_ bounds must not be NaN and must be ordered");
         if (dtype_ == DataType::Int32) {
@@ -2450,7 +2450,7 @@ namespace lfs::core {
         }
 
         if (device_ == Device::GPU) {
-            if (dtype_ == DataType::Float32) {
+            if (dtype_ == DataType::Float32 || dtype_ == DataType::Float16) {
                 internal::backend_ops_for(*this).clamp_scalar(
                     internal::storage_ref(*this), internal::scalar_operand(min_val),
                     internal::scalar_operand(max_val), numel(),
@@ -2468,6 +2468,15 @@ namespace lfs::core {
                     internal::ExecContext{stream()});
             }
         } else {
+            if (dtype_ == DataType::Float16) {
+                const auto* src = ptr<detail::tensor_half_t>();
+                auto* dst = (*this).ptr<detail::tensor_half_t>();
+                for (size_t i = 0; i < numel(); ++i) {
+                    const float value = detail::tensor_half_to_float(src[i]);
+                    dst[i] = detail::tensor_float_to_half(std::isnan(value) ? value : std::clamp(value, min_val, max_val));
+                }
+                return *this;
+            }
             if (dtype_ == DataType::Float32) {
                 float* data = ptr<float>();
                 for (size_t i = 0; i < numel(); ++i) {
@@ -2495,13 +2504,13 @@ namespace lfs::core {
     Tensor& Tensor::clamp_min_(float min) {
 
         preserve_lazy_snapshots_before_write();
-        return clamp_(min, std::numeric_limits<float>::max());
+        return clamp_(min, std::numeric_limits<float>::infinity());
     }
 
     Tensor& Tensor::clamp_max_(float max) {
 
         preserve_lazy_snapshots_before_write();
-        return clamp_(std::numeric_limits<float>::lowest(), max);
+        return clamp_(-std::numeric_limits<float>::infinity(), max);
     }
 
     // ============= Cumulative sum =============
@@ -2618,14 +2627,18 @@ namespace lfs::core {
             return;
         }
 
-        if (shape_.rank() == 1) {
+        if (numel() == 0) {
+            std::println("  []");
+        } else if (shape_.rank() <= 1) {
             print_1d(max_per_dim);
         } else if (shape_.rank() == 2) {
             print_2d(max_per_dim);
         } else {
             std::println("  [Higher dimensional tensor - showing first slice]");
-            auto first_slice = slice(0, 0, 1);
-            first_slice.squeeze().print_2d(max_per_dim);
+            Tensor first_slice = *this;
+            while (first_slice.ndim() > 2)
+                first_slice = first_slice.slice(0, 0, 1).squeeze(0);
+            first_slice.print_2d(max_per_dim);
         }
     }
 
@@ -2655,14 +2668,14 @@ namespace lfs::core {
         size_t rows = std::min(max_per_dim, shape_[0]);
         size_t cols = std::min(max_per_dim, shape_[1]);
 
-        auto values = debug_values(shape_[0] * shape_[1]);
+        auto values = slice(0, 0, rows).slice(1, 0, cols).debug_values(rows * cols);
 
         for (size_t i = 0; i < rows; ++i) {
             std::print("  [");
             for (size_t j = 0; j < cols; ++j) {
                 if (j > 0)
                     std::print(", ");
-                size_t idx = i * shape_[1] + j;
+                size_t idx = i * cols + j;
                 std::print("{:8.4f}", values[idx]);
             }
             if (shape_[1] > cols) {
@@ -2678,43 +2691,6 @@ namespace lfs::core {
     }
 
     // ============= Utility Functions =============
-
-    std::optional<Tensor> Tensor::try_reshape(TensorShape shape) const {
-        if (!is_valid()) {
-            return std::nullopt;
-        }
-
-        if (shape.elements() != numel()) {
-            return std::nullopt;
-        }
-
-        return reshape(shape);
-    }
-
-    std::vector<Tensor> Tensor::split_batch(const Tensor& tensor, size_t batch_size) {
-        std::vector<Tensor> batches;
-        LFS_ASSERT_MSG(tensor.is_valid(),
-                       "split_batch requires a valid tensor");
-        LFS_ASSERT_MSG(tensor.shape().rank() > 0,
-                       "split_batch requires at least one tensor dimension");
-        LFS_ASSERT_MSG(batch_size > 0,
-                       "split_batch batch size must be positive");
-
-        size_t total_size = tensor.shape()[0];
-        if (total_size == 0) {
-            batches.push_back(tensor);
-            return batches;
-        }
-        size_t num_batches = (total_size + batch_size - 1) / batch_size;
-
-        for (size_t i = 0; i < num_batches; ++i) {
-            size_t start = i * batch_size;
-            size_t end = std::min(start + batch_size, total_size);
-            batches.push_back(tensor.slice(0, start, end));
-        }
-
-        return batches;
-    }
 
     float Tensor::item() const {
         materialize_if_deferred();
@@ -3086,53 +3062,6 @@ namespace lfs::core {
 
     // ============= Validation & Assertions =============
 
-    Tensor& Tensor::assert_shape(TensorShape expected) {
-        return assert_shape(std::move(expected), {});
-    }
-
-    Tensor& Tensor::assert_shape(TensorShape expected, const std::string& msg) {
-        if (!is_valid()) {
-            std::string error_msg = "Cannot assert shape on invalid tensor";
-            throw TensorError(error_msg, this);
-        }
-
-        if (shape_ != expected) {
-            std::string error_msg = msg.empty() ? "Shape assertion failed: expected " + expected.str() + " but got " + shape_.str() : msg;
-            throw TensorError(error_msg, this);
-        }
-        return *this;
-    }
-
-    Tensor& Tensor::assert_device(Device expected) {
-        if (!is_valid()) {
-            std::string error_msg = "Cannot assert device on invalid tensor";
-            throw TensorError(error_msg, this);
-        }
-
-        if (device_ != expected) {
-            std::string error_msg = "Device assertion failed: expected " +
-                                    std::string(device_name(expected)) + " but got " +
-                                    std::string(device_name(device_));
-            throw TensorError(error_msg, this);
-        }
-        return *this;
-    }
-
-    Tensor& Tensor::assert_dtype(DataType expected) {
-        if (!is_valid()) {
-            std::string error_msg = "Cannot assert dtype on invalid tensor";
-            throw TensorError(error_msg, this);
-        }
-
-        if (dtype_ != expected) {
-            std::string error_msg = "DataType assertion failed: expected " +
-                                    std::string(dtype_name(expected)) + " but got " +
-                                    std::string(dtype_name(dtype_));
-            throw TensorError(error_msg, this);
-        }
-        return *this;
-    }
-
     Tensor& Tensor::assert_finite() {
         if (!is_valid()) {
             std::string error_msg = "Cannot assert finite on invalid tensor";
@@ -3214,6 +3143,7 @@ namespace lfs::core {
         LFS_ASSERT_MSG(std::isfinite(rtol) && std::isfinite(atol) &&
                            rtol >= 0.0f && atol >= 0.0f,
                        "all_close tolerances must be finite and non-negative");
+        LFS_ASSERT_MSG(device_ == other.device_, "all_close operands must share a device");
         internal::require_same_gpu_backend(*this, other, "all_close");
 
         if (shape_ != other.shape_ || dtype_ != other.dtype_) {
@@ -3424,6 +3354,8 @@ namespace lfs::core {
             const size_t copy_bytes =
                 checked_product(numel(), element_size, "reserve copy byte count");
             if (device_ == Device::GPU) {
+                // On the tensor's own stream: a legacy-stream copy does not wait for writes still queued on a
+                // non-blocking stream, and would copy what the storage held before them.
                 internal::backend_ops_for(*this).copy_device_to_device(
                     internal::CopyRequest{
                         .src = internal::storage_ref(
@@ -3431,7 +3363,7 @@ namespace lfs::core {
                         .dst = new_gpu_storage,
                         .bytes = copy_bytes,
                         .synchronous = true,
-                        .context = internal::ExecContext{nullptr},
+                        .context = internal::ExecContext{stream()},
                     });
             } else {
                 std::memcpy(new_data, old_data, copy_bytes);

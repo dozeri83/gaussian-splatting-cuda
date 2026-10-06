@@ -60,6 +60,7 @@ size_t VulkanGSPipelineBuffers::getTotalOwnedAllocSize() const {
     ADD_OWNED(visible_dispatch);
     ADD_OWNED(macro_partials);
     ADD_OWNED(macro_active_mask);
+    ADD_OWNED(exact_depth_sample_mask);
     ADD_OWNED(macro_wave_args);
     ADD_OWNED(index_buffer_offset);
     ADD_OWNED(sorting_keys_1);
@@ -142,6 +143,7 @@ std::map<std::string, size_t> VulkanGSPipelineBuffers::getOwnedVramBreakdown() c
     ADD_OWNED(visible_dispatch);
     ADD_OWNED(macro_partials);
     ADD_OWNED(macro_active_mask);
+    ADD_OWNED(exact_depth_sample_mask);
     ADD_OWNED(macro_wave_args);
     ADD_OWNED(index_buffer_offset);
     ADD_OWNED(sorting_keys_1);
@@ -745,19 +747,6 @@ void VulkanGSPipelineBuffers::undoReorderSH(Buffer<T>& coeffs, size_t num_splats
     }
 
     coeffs.resize(4 * SH_DIM * num_splats);
-}
-
-void VulkanGSPipelineBuffers::assignScalesOpacs(
-    Buffer<float>& scales_opacs,
-    size_t n, const float* scales, const float* opacs) {
-    scales_opacs.resize(4 * n);
-    for (size_t i = 0; i < n; i++) {
-        float* so = &scales_opacs[4 * i];
-        so[0] = scales[3 * i];
-        so[1] = scales[3 * i + 1];
-        so[2] = scales[3 * i + 2];
-        so[3] = opacs[i];
-    }
 }
 
 #define _INSTANTIATE_BUFFER(dtype)                                                                                           \

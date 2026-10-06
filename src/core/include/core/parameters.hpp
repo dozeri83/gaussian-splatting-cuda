@@ -226,8 +226,9 @@ namespace lfs::core {
             bool enable_eval = false;                          // Only evaluate when explicitly enabled
             bool eval_all = false;                             // Train on every image and evaluate all of them
             EvalSpace eval_space = EvalSpace::Distorted;       // Reference image space used for evaluation
-            std::string eval_mask = "";                        // Absolute evaluation mesh path; empty disables
-            bool eval_mask_invert = false;                     // Evaluate pixels outside the mesh coverage
+            std::string eval_mask = "";                        // Mesh path, bbox:..., cropbox, masks:<folder>, depth:near,far, points:radius,close or points:<file>; empty disables
+            bool eval_mask_invert = false;                     // Score the pixels outside the evaluation mask instead
+            float eval_mask_opacity = 0.85f;                   // Rendered opacity a pixel needs to count as covered by a splat mask
             bool enable_save_eval_images = true;               // Save during evaluation images
             bool headless = false;                             // Disable visualization during training
             bool auto_train = false;                           // Start training immediately on startup
@@ -323,14 +324,6 @@ namespace lfs::core {
             // Fraction of MRNF growth budget spent splitting over-cap splats. 0 disables.
             float oversize_split_fraction = 0.15f;
             bool use_edge_map = true;
-            bool background_improvements = false;
-            float far_scene_min_fraction = 0.01f; // min deep-far splat fraction that activates far-field (0 = always on); mrnf_defaults() overrides to 0.0
-            bool growth_ratio_rank = false;       // rank growth by err/vis^growth_ratio_pow; mrnf_defaults() overrides to true
-            float growth_ratio_pow = 0.75f;
-            size_t fill_pacing_iter = 0; // pace cap fill until this iteration (0 = off); mrnf_defaults() overrides to 15000
-            size_t far_seed_dose = 0;    // far seeds per refine window (0 = starvation default); mrnf_defaults() overrides to 2000
-            // Config-file / C++ only (no registry, GUI, locale, or CLI).
-            bool explore_starvation_weighting = true;
 
             // Random initialization parameters
             bool random = false;        // Use random initialization instead of SfM
@@ -385,8 +378,25 @@ namespace lfs::core {
             static OptimizationParameters defaults_for_strategy(std::string_view strategy);
         };
 
-        [[nodiscard]] LFS_CORE_API std::string normalize_eval_mask_path(
-            std::string_view path);
+        // eval_mask is a mesh path, "bbox:x0,y0,z0,x1,y1,z1" (a world-space box), "cropbox"
+        // (the training model's crop box when training starts), "masks:<folder>" (one mask per image),
+        // "depth:near,far" (rendered pixels whose expected depth lies in the range), "points:radius,close"
+        // (the initial point cloud splatted with a pixel radius and closed by `close` pixels) or "points:<file>"
+        // (the positions of a splat or point cloud PLY, with the default radius and closing).
+        [[nodiscard]] LFS_CORE_API bool is_eval_mask_box(std::string_view spec);
+        [[nodiscard]] LFS_CORE_API bool is_eval_mask_cropbox(std::string_view spec);
+        [[nodiscard]] LFS_CORE_API bool is_eval_mask_folder(std::string_view spec);
+        [[nodiscard]] LFS_CORE_API std::string_view eval_mask_folder(std::string_view spec);
+        [[nodiscard]] LFS_CORE_API bool is_eval_mask_depth(std::string_view spec);
+        [[nodiscard]] LFS_CORE_API std::optional<std::array<float, 2>> parse_eval_mask_depth(std::string_view spec);
+        [[nodiscard]] LFS_CORE_API bool is_eval_mask_points(std::string_view spec);
+        [[nodiscard]] LFS_CORE_API std::optional<std::array<int, 2>> parse_eval_mask_points(std::string_view spec);
+        // The PLY of a points:<file> spec, whose positions replace the initial point cloud.
+        [[nodiscard]] LFS_CORE_API std::optional<std::string_view> eval_mask_points_file(std::string_view spec);
+        // The PLY of a splat:<file> spec, whose rendered coverage selects the evaluated pixels.
+        [[nodiscard]] LFS_CORE_API std::optional<std::string_view> eval_mask_splat_file(std::string_view spec);
+        [[nodiscard]] LFS_CORE_API std::optional<std::array<float, 6>> parse_eval_mask_box(std::string_view spec);
+        [[nodiscard]] LFS_CORE_API std::string normalize_eval_mask(std::string_view spec);
 
         struct LFS_CORE_API LoadingParams {
             bool use_cpu_memory = true;

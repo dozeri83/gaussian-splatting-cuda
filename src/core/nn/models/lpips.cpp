@@ -200,7 +200,7 @@ namespace lfs::core::nn::models {
         return tile;
     }
 
-    std::size_t Lpips::estimated_peak_bytes(const int height, const int width) const {
+    std::size_t Lpips::estimated_peak_bytes(const int height, const int width, const bool masked) const {
         const auto tile = tile_size_for(height, width);
         if (tile == 0)
             return 0;
@@ -208,8 +208,21 @@ namespace lfs::core::nn::models {
         const std::size_t tile_w = std::min<std::size_t>(static_cast<std::size_t>(width), tile);
         const std::size_t crop_h = std::min<std::size_t>(static_cast<std::size_t>(height), tile_h + 2 * kTileHalo);
         const std::size_t crop_w = std::min<std::size_t>(static_cast<std::size_t>(width), tile_w + 2 * kTileHalo);
+        // Include the float mask, full-resolution weights and pooled block masks.
+        const auto allocation_size = [this](const std::size_t bytes) {
+            return gpu_backend_of(weights_.begin()->second) == GpuBackend::CUDA
+                       ? cuda_allocation_size(bytes)
+                       : bytes;
+        };
+        std::size_t mask_bytes = 0;
+        if (masked) {
+            mask_bytes = 2 * allocation_size(static_cast<std::size_t>(height) * width * sizeof(float));
+            for (int block = 1; block < kBlocks; ++block)
+                mask_bytes += allocation_size(static_cast<std::size_t>(height >> block) *
+                                              static_cast<std::size_t>(width >> block) * sizeof(float));
+        }
         if (compute_ == DataType::Float32 || gpu_backend_of(weights_.begin()->second) != GpuBackend::CUDA) {
-            std::size_t bytes = crop_h * crop_w * kExactBytesPerPixel;
+            std::size_t bytes = crop_h * crop_w * kExactBytesPerPixel + mask_bytes;
             if (compute_ == DataType::Float16 && dispatch_ &&
                 gpu_backend_of(weights_.begin()->second) == GpuBackend::Vulkan && !fast_weight_taps_.is_valid()) {
                 for (std::size_t i = 1; i < kLayers.size(); ++i)
@@ -222,7 +235,7 @@ namespace lfs::core::nn::models {
         // Count new allocations, including pool rounding. Existing buffers are
         // already reflected in cudaMemGetInfo; they need no second reservation.
         constexpr std::size_t driver_reserve = 64ULL * 1024 * 1024;
-        std::size_t bytes = driver_reserve;
+        std::size_t bytes = driver_reserve + mask_bytes;
         const auto feature_elems = 64 * crop_h * crop_w;
         for (const auto& buffer : fast_features_) {
             if (!buffer.is_valid() || buffer.numel() < feature_elems)
@@ -840,15 +853,30 @@ namespace lfs::core::nn::models {
                 const auto pred_tile = crop(pred, cy0, cy1, cx0, cx1);
 
                 LpipsTaps target_taps;
-                auto target_result = run_untiled(target_tile, target_tile, scaling, &target_taps, nullptr);
-                if (!target_result)
-                    return std::move(target_result.error());
-                release_activations();
                 LpipsTaps pred_taps;
-                auto pred_result = run_untiled(pred_tile, pred_tile, scaling, &pred_taps, nullptr);
-                if (!pred_result)
-                    return std::move(pred_result.error());
-                release_activations();
+                // Without the CUDA activation arena, extract each tile's features
+                // once instead of running the paired network on (tile, tile).
+                if (gpu_backend_of(pred) != GpuBackend::CUDA) {
+                    auto target_features = extract_normalized_features(target_tile, scaling);
+                    if (!target_features)
+                        return std::move(target_features.error());
+                    target_taps.normalized_features = std::move(*target_features);
+                    auto pred_features = extract_normalized_features(pred_tile, scaling);
+                    if (!pred_features)
+                        return std::move(pred_features.error());
+                    pred_taps.normalized_features = std::move(*pred_features);
+                } else {
+                    auto target_result = run_untiled(
+                        target_tile, target_tile, scaling, &target_taps, nullptr);
+                    if (!target_result)
+                        return std::move(target_result.error());
+                    release_activations();
+                    auto pred_result = run_untiled(
+                        pred_tile, pred_tile, scaling, &pred_taps, nullptr);
+                    if (!pred_result)
+                        return std::move(pred_result.error());
+                    release_activations();
+                }
                 for (int block = 0; block < kBlocks; ++block) {
                     const int factor = 1 << block;
                     const int feature_h = full_dim(height, block);
@@ -906,6 +934,49 @@ namespace lfs::core::nn::models {
                      (mask ? mask->sums[static_cast<std::size_t>(block)] : static_cast<double>(denominator));
         }
         return static_cast<float>(total);
+    }
+
+    lfs::Result<std::array<Tensor, kBlocks>> Lpips::extract_normalized_features(
+        const Tensor& input, const InputScaling scaling) {
+        if (auto error = validate_pair(input, input))
+            return std::move(*error);
+
+        Tensor feature = scaling == InputScaling::Normalize
+                             ? as_batch(input)
+                                   .mul(2.0f)
+                                   .sub(1.0f)
+                                   .sub(w("scaling.shift"))
+                                   .div(w("scaling.scale"))
+                                   .contiguous()
+                             : as_batch(input)
+                                   .sub(w("scaling.shift"))
+                                   .div(w("scaling.scale"))
+                                   .contiguous();
+        if (compute_ != DataType::Float32)
+            feature = cast(feature, compute_);
+        bind_weights_to_stream(nullptr);
+
+        std::array<Tensor, kBlocks> features;
+        int layer = 0;
+        for (int i = 0; i <= 30; ++i) {
+            if (i == 1 || i == 3 || i == 6 || i == 8 || i == 11 || i == 13 || i == 15 ||
+                i == 18 || i == 20 || i == 22 || i == 25 || i == 27 || i == 29) {
+                feature = relu(feature);
+            } else if (i == 4 || i == 9 || i == 16 || i == 23 || i == 30) {
+                features[static_cast<std::size_t>(layer++)] =
+                    normalize_feature(feature).to(DataType::Float32);
+            }
+            if (i == 4 || i == 9 || i == 16 || i == 23 || i == 30) {
+                if (i != 30)
+                    feature = max_pool2d(feature, 2, 2, 2, 2, 0, 0);
+            } else if (i == 0 || i == 2 || i == 5 || i == 7 || i == 10 || i == 12 ||
+                       i == 14 || i == 17 || i == 19 || i == 21 || i == 24 || i == 26 ||
+                       i == 28) {
+                feature = conv(feature, std::format("vgg.features.{}.weight", i),
+                               std::format("vgg.features.{}.bias", i));
+            }
+        }
+        return features;
     }
 
     lfs::Result<float> Lpips::run_untiled(const Tensor& pred, const Tensor& target,

@@ -59,7 +59,7 @@ namespace lfs::core::nn::models {
         [[nodiscard]] std::size_t activation_budget_bytes() const { return activation_budget_bytes_; }
         [[nodiscard]] std::size_t tile_size_for(int height, int width) const;
         // Extra free VRAM needed for the next call; includes allocator rounding.
-        [[nodiscard]] std::size_t estimated_peak_bytes(int height, int width) const;
+        [[nodiscard]] std::size_t estimated_peak_bytes(int height, int width, bool masked = false) const;
         [[nodiscard]] bool prefers_independent_queue() const {
             return dispatch_ && dispatch_->prefer_independent_queue;
         }
@@ -80,6 +80,8 @@ namespace lfs::core::nn::models {
                                        const MaskWeights* mask);
         lfs::Result<float> run_tiled(const Tensor& pred, const Tensor& target,
                                      InputScaling scaling, const MaskWeights* mask);
+        lfs::Result<std::array<Tensor, 5>> extract_normalized_features(
+            const Tensor& input, InputScaling scaling);
         // Fast mode without taps: fused kernels writing ping-pong feature buffers,
         // no activation arena, no intermediate copies.
         lfs::Result<float> run_fast(const Tensor& pred, const Tensor& target,

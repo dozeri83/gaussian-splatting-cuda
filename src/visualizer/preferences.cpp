@@ -668,6 +668,18 @@ namespace lfs::vis {
         impl_->saveLocked();
     }
 
+    TensorPreferenceState UserPreferences::sanitizeTensorBackend() {
+        auto state = tensorBackend();
+        if (state.backend && std::find(core::kCompiledGpuBackends.begin(),
+                                       core::kCompiledGpuBackends.end(), *state.backend) ==
+                                 core::kCompiledGpuBackends.end()) {
+            LOG_WARN("Saved tensor backend {} is not compiled in this build; ignoring the preference for this run and selecting automatically",
+                     core::gpu_backend_name(*state.backend));
+            state.backend.reset();
+        }
+        return state;
+    }
+
     TensorPreferenceState UserPreferences::tensorBackend() {
         std::scoped_lock lock(impl_->mutex);
         impl_->loadLocked();

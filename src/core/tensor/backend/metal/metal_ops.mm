@@ -13,6 +13,7 @@
 
 #include "core/assert.hpp"
 #include "core/detail/fused_pointwise.hpp"
+#include "core/error.hpp"
 #include "core/logger.hpp"
 #include "core/tensor_environment.hpp"
 #include "core/tensor_image.hpp"
@@ -483,9 +484,9 @@ namespace lfs::core::internal {
             const bool integer = input.dtype == DataType::Int32;
             LFS_ASSERT_MSG(input.dtype == output.dtype &&
                                ((integer && minimum.kind == ScalarKind::Int32 && maximum.kind == ScalarKind::Int32) ||
-                                (input.dtype == DataType::Float32 && minimum.kind == ScalarKind::Float &&
+                                ((input.dtype == DataType::Float32 || input.dtype == DataType::Float16) && minimum.kind == ScalarKind::Float &&
                                  maximum.kind == ScalarKind::Float)),
-                           "Metal clamp requires matching Float32 or Int32 operands");
+                           "Metal clamp requires matching Float32, Float16 or Int32 operands");
             struct ClampParams {
                 uint64_t input_offset;
                 uint64_t output_offset;
@@ -2162,10 +2163,19 @@ namespace lfs::core::internal {
             return;
         LFS_ASSERT_MSG(weights.dtype == DataType::Float32 && output.dtype == DataType::Int64,
                        "Metal multinomial requires Float32 weights and Int64 samples");
-        const auto context = acquire_context();
         const uint32_t categories = checked_u32(program.count, "Metal multinomial category count exceeds uint32");
         const uint32_t samples = checked_u32(program.sample_count, "Metal multinomial sample count exceeds uint32");
-        // The weights are validated on the host, like the CUDA path.
+        const size_t sum_blocks = (program.count + kSumBlock - 1) / kSumBlock;
+        if (program.count > size_t{std::numeric_limits<uint32_t>::max()} - sum_blocks) {
+            throw lfs::Exception(lfs::make_error({
+                .code = lfs::ErrorCode::BoundsViolation,
+                .domain = lfs::ErrorDomain::Tensor,
+                .user_message = "Metal multinomial category count exceeds safe indexing range",
+                .detection = LFS_SOURCE_SITE_CURRENT(),
+            }));
+        }
+        const auto context = acquire_context();
+        // Validate on the device and read back only the two summary values.
         struct WeightStatistics {
             float maximum;
             uint32_t invalid;
@@ -2184,7 +2194,7 @@ namespace lfs::core::internal {
             // Running sums within blocks, the blocks' offsets, then a binary
             // search per draw. The weights are scaled so their maximum sits
             // near 2^0, which keeps the sums finite.
-            const uint32_t blocks = (categories + kSumBlock - 1) / kSumBlock;
+            const uint32_t blocks = static_cast<uint32_t>(sum_blocks);
             const Scratch sums(*context, (program.count + blocks + 1) * sizeof(float));
             const RandomParams params{.seed = program.seed, .count = categories, .sample_count = samples, .first = multinomial_scale(statistics.maximum)};
             encode_random(*context, kRunningSums, {}, weights, sums.storage, params, thread_groups(blocks));
@@ -2213,9 +2223,10 @@ namespace lfs::core::internal {
                              const StorageRef next, const StorageRef output, const size_t count,
                              const size_t buckets, const float radius, const bool exclude_self,
                              const std::optional<StorageRef> queries, const int32_t max_count, const bool spacing = false,
-                             const std::optional<StorageRef> values = std::nullopt) {
+                             const std::optional<StorageRef> values = std::nullopt,
+                             const std::optional<StorageRef> radii = std::nullopt) {
         struct RadiusParams {
-            uint64_t points, references, heads, next, output, queries, values;
+            uint64_t points, references, heads, next, output, queries, values, radii;
             uint32_t count, bucket_mask;
             float radius;
             uint32_t exclude_self;
@@ -2230,6 +2241,7 @@ namespace lfs::core::internal {
             .output = address_of(*context, output),
             .queries = queries ? address_of(*context, *queries) : 0,
             .values = values ? address_of(*context, *values) : 0,
+            .radii = radii ? address_of(*context, *radii) : 0,
             .count = checked_u32(count, "Metal radius query count exceeds uint32"),
             .bucket_mask = checked_u32(buckets - 1, "Metal radius bucket count exceeds uint32"),
             .radius = radius,
@@ -2240,6 +2252,8 @@ namespace lfs::core::internal {
             uses.push_back(*queries);
         if (values)
             uses.push_back(*values);
+        if (radii)
+            uses.push_back(*radii);
         const size_t batch = exclude_self && !max_count ? 8192 : count;
         for (size_t begin = 0; begin < count; begin += batch) {
             params.query_begin = static_cast<uint32_t>(begin);
@@ -2318,10 +2332,10 @@ namespace lfs::core::internal {
                                               const StorageRef references, const StorageRef heads,
                                               const StorageRef next, const StorageRef output,
                                               const size_t count, const size_t buckets, const float radius,
-                                              ExecContext) {
+                                              const std::optional<StorageRef> radii, ExecContext) {
         LFS_FACADE_TRACE(radius_neighbor_min);
         radius_query(points, references, heads, next, output, count, buckets, radius, false,
-                     std::nullopt, 0, false, values);
+                     std::nullopt, 0, false, values, radii);
     }
 
     void MetalBackendOps::rasterize_points(const PointRasterProgram& program, ExecContext) {

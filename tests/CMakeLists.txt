@@ -3,7 +3,15 @@
 
 # Testing module - comprehensive tests for all components
 
-if(BUILD_TESTS OR BUILD_FORMAT_TESTS OR BUILD_VISUALIZER_TESTS)
+if(BUILD_TESTS OR BUILD_FORMAT_TESTS)
+    add_executable(apple_reframe_conversion_tests test_apple_reframe_conversion.cpp)
+    target_include_directories(apple_reframe_conversion_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_features(apple_reframe_conversion_tests PRIVATE cxx_std_23)
+    add_test(NAME AppleReframeConversion COMMAND apple_reframe_conversion_tests)
+endif()
+
+if((BUILD_TESTS OR BUILD_FORMAT_TESTS OR BUILD_VISUALIZER_TESTS) AND
+   (NOT APPLE OR (LFS_GRAPHICS_VULKAN_BUILD AND LFS_TENSOR_METAL)))
     add_subdirectory(metal_viewer)
 endif()
 
@@ -51,9 +59,176 @@ endif()
 # Find GTest
 find_package(GTest CONFIG REQUIRED)
 
+
+if((BUILD_TESTS OR BUILD_VISUALIZER_TESTS) AND LFS_TENSOR_METAL AND NOT LFS_GRAPHICS_VULKAN_BUILD)
+    add_executable(metal_scene_upscaler_contracts
+        test_metal_scene_upscaler.cpp
+        test_temporal_frame_tracker.cpp
+        test_scene_temporal_coordinator.cpp
+        test_scene_upscaler_registry.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_upscaler_registry.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_upscaler_plugin_unavailable.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/tensor_scene_temporal_pipeline.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/metal_scene_upscaler.mm
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_coordinator.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_plan.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_resolve.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_frame_setup.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/temporal_frame_tracker.cpp)
+    target_include_directories(metal_scene_upscaler_contracts PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/visualizer
+        ${CMAKE_SOURCE_DIR}/src/rendering/include
+        ${CMAKE_SOURCE_DIR}/src/rendering/rasterizer/tensor)
+    target_compile_features(metal_scene_upscaler_contracts PRIVATE cxx_std_23)
+    set_target_properties(metal_scene_upscaler_contracts PROPERTIES OBJCXX_STANDARD 23 OBJCXX_STANDARD_REQUIRED YES)
+    target_compile_options(metal_scene_upscaler_contracts PRIVATE
+        "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
+    target_link_libraries(metal_scene_upscaler_contracts PRIVATE
+        lfs_tensor_rasterizer GTest::gtest_main "-framework MetalFX" "-framework Metal" "-framework Foundation")
+    add_test(NAME MetalSceneUpscalerContracts COMMAND metal_scene_upscaler_contracts)
+    set_tests_properties(MetalSceneUpscalerContracts PROPERTIES LABELS "viewer;metal;gpu;upscaler" TIMEOUT 180
+        ENVIRONMENT "MTL_DEBUG_LAYER=1")
+endif()
+
+# The tensor HDR tonemapper against libplacebo, on clips ffmpeg encodes.
+if(LFS_TENSOR_METAL AND BUILD_TESTS)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(HDR_TEST_FFMPEG REQUIRED libavcodec libavformat libavutil)
+    find_program(LFS_HDR_TEST_FFMPEG NAMES ffmpeg)
+    add_executable(hdr_tonemap_contracts test_hdr_tonemap_tensor.cpp)
+    target_compile_features(hdr_tonemap_contracts PRIVATE cxx_std_23)
+    # FFmpeg links through lfs_video; a second link merges "-framework X" pairs.
+    target_include_directories(hdr_tonemap_contracts PRIVATE ${CMAKE_SOURCE_DIR}/src/io)
+    target_include_directories(hdr_tonemap_contracts SYSTEM PRIVATE ${HDR_TEST_FFMPEG_INCLUDE_DIRS})
+    target_compile_definitions(hdr_tonemap_contracts PRIVATE LFS_HDR_TEST_FFMPEG="${LFS_HDR_TEST_FFMPEG}"
+        $<$<BOOL:${LFS_USE_VULKAN}>:LFS_USE_VULKAN>)
+    target_link_libraries(hdr_tonemap_contracts PRIVATE lfs_video lfs_core GTest::gtest_main)
+    add_test(NAME HdrTonemapContracts COMMAND hdr_tonemap_contracts)
+    # libplacebo is the precise-math reference; MoltenVK defaults to fast math.
+    set_tests_properties(HdrTonemapContracts PROPERTIES ENVIRONMENT "MVK_CONFIG_FAST_MATH_ENABLED=0"
+        LABELS "tensor;gpu;video" TIMEOUT 300)
+endif()
+
+# Standalone tensor/training proofs must not pull in the Vulkan window or its
+# test harness when the core Vulkan backend is disabled.
+if(LFS_TENSOR_METAL AND BUILD_TESTS AND NOT LFS_TENSOR_VULKAN)
+    add_executable(metal_tensor_contracts test_tensor_metal.cpp test_tensor_restored.cpp)
+    target_compile_features(metal_tensor_contracts PRIVATE cxx_std_23)
+    target_compile_definitions(metal_tensor_contracts PRIVATE LFS_TENSOR_PRIVATE_ACCESS)
+    target_include_directories(metal_tensor_contracts PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(metal_tensor_contracts PRIVATE lfs_core GTest::gtest_main)
+    add_test(NAME MetalTensorNoVulkanContracts COMMAND metal_tensor_contracts)
+    if(LFS_BUILD_TRAINER)
+        add_executable(metal_training_contracts
+            test_training_ops_metal_losses.cpp
+            test_training_ops_metal_densify.cpp
+            test_training_ops_metal_appearance.cpp
+            test_training_ops_metal_gsplat.cpp)
+        target_compile_features(metal_training_contracts PRIVATE cxx_std_23)
+        target_link_libraries(metal_training_contracts PRIVATE lfs_training lfs_python_embed GTest::gtest_main)
+        find_package(Python REQUIRED COMPONENTS Development.Embed)
+        target_link_options(metal_training_contracts PRIVATE "LINKER:-force_load,$<TARGET_LINKER_FILE:Python::Python>")
+        add_test(NAME MetalTrainingNoVulkanContracts COMMAND metal_training_contracts)
+    endif()
+endif()
+
+if(BUILD_TESTS)
+    if(LFS_TENSOR_METAL)
+        add_executable(tensor_mesh_offscreen_contracts test_tensor_mesh_offscreen.cpp)
+        target_compile_features(tensor_mesh_offscreen_contracts PRIVATE cxx_std_23)
+        target_compile_definitions(tensor_mesh_offscreen_contracts PRIVATE
+            LFS_TEST_VULKAN_MESH_REFERENCE=$<BOOL:${LFS_GRAPHICS_VULKAN_BUILD}>)
+        target_include_directories(tensor_mesh_offscreen_contracts PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/visualizer
+            ${CMAKE_SOURCE_DIR}/src/rendering/include)
+        target_link_libraries(tensor_mesh_offscreen_contracts PRIVATE
+            lfs_visualizer lfs_core GTest::gtest_main)
+        add_test(NAME TensorMeshOffscreenContracts COMMAND tensor_mesh_offscreen_contracts)
+        set_tests_properties(TensorMeshOffscreenContracts PROPERTIES
+            LABELS "tensor;gpu;rendering" TIMEOUT 180)
+
+        add_executable(tensor_frosted_glass_contracts test_tensor_frosted_glass.cpp)
+        target_compile_features(tensor_frosted_glass_contracts PRIVATE cxx_std_23)
+        target_include_directories(tensor_frosted_glass_contracts PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/visualizer)
+        target_link_libraries(tensor_frosted_glass_contracts PRIVATE
+            lfs_visualizer lfs_core GTest::gtest_main)
+        add_test(NAME TensorFrostedGlassContracts COMMAND tensor_frosted_glass_contracts)
+        set_tests_properties(TensorFrostedGlassContracts PROPERTIES
+            LABELS "tensor;gpu;ui" TIMEOUT 120)
+        if(APPLE)
+            find_package(Python REQUIRED COMPONENTS Development.Embed)
+            target_link_options(tensor_mesh_offscreen_contracts PRIVATE
+                "LINKER:-force_load,$<TARGET_LINKER_FILE:Python::Python>")
+            target_link_options(tensor_frosted_glass_contracts PRIVATE
+                "LINKER:-force_load,$<TARGET_LINKER_FILE:Python::Python>")
+            target_link_libraries(tensor_mesh_offscreen_contracts PRIVATE lfs_python_embed)
+            target_link_libraries(tensor_frosted_glass_contracts PRIVATE lfs_python_embed)
+        endif()
+    endif()
+    add_executable(mesh2splat_tensor_contracts test_mesh2splat_tensor.cpp)
+    target_compile_features(mesh2splat_tensor_contracts PRIVATE cxx_std_23)
+    target_link_libraries(mesh2splat_tensor_contracts PRIVATE
+        lfs_rendering_tensor lfs_core GTest::gtest_main)
+    if(LFS_USE_VULKAN AND NOT APPLE)
+        target_compile_definitions(mesh2splat_tensor_contracts PRIVATE
+            LFS_MESH2SPLAT_VULKAN_REFERENCE)
+    endif()
+    add_test(NAME Mesh2SplatTensorContracts COMMAND mesh2splat_tensor_contracts)
+    set_tests_properties(Mesh2SplatTensorContracts PROPERTIES
+        LABELS "tensor;gpu" TIMEOUT 180
+        ENVIRONMENT "MVK_CONFIG_FAST_MATH_ENABLED=0")
+    if(LFS_TENSOR_VULKAN)
+        add_executable(ui_texture_tensor_contracts test_ui_texture_tensor.cpp)
+        target_compile_features(ui_texture_tensor_contracts PRIVATE cxx_std_23)
+        target_include_directories(ui_texture_tensor_contracts PRIVATE ${CMAKE_SOURCE_DIR}/src/visualizer)
+        target_link_libraries(ui_texture_tensor_contracts PRIVATE lfs_visualizer lfs_core GTest::gtest_main lfs_python_embed)
+        if(APPLE)
+            target_link_options(ui_texture_tensor_contracts PRIVATE "LINKER:-force_load,$<TARGET_LINKER_FILE:Python::Python>")
+        endif()
+        add_test(NAME UiTextureTensorContracts COMMAND ui_texture_tensor_contracts)
+        set_tests_properties(UiTextureTensorContracts PROPERTIES LABELS "gpu;ui" TIMEOUT 120)
+    endif()
+    add_executable(gpu_program_contracts test_gpu_program.cpp test_gpu_bookkeeping.cpp)
+    target_include_directories(gpu_program_contracts PRIVATE ${CMAKE_SOURCE_DIR}/src/visualizer)
+    target_link_libraries(gpu_program_contracts PRIVATE lfs_core GTest::gtest_main)
+    target_compile_features(gpu_program_contracts PRIVATE cxx_std_23)
+    lfs_add_gpu_program(gpu_program_contracts program_contract SOURCE shaders/program_contract.slang
+        COMPUTE transform VERTEX vertexMain FRAGMENT fragmentMain)
+    lfs_add_gpu_program(gpu_program_contracts program_features SOURCE shaders/program_features.slang
+        COMPUTE waveOps sharedReduce atomics narrowAndWide prepareIndirect markIndirect optionalInput variant)
+    lfs_add_gpu_program(gpu_program_contracts program_features_variant SOURCE shaders/program_features.slang
+        COMPUTE variant DEFINES LFS_FEATURE_VARIANT=5)
+    add_test(NAME GpuProgramContracts COMMAND gpu_program_contracts)
+    set_tests_properties(GpuProgramContracts PROPERTIES LABELS "tensor;gpu" TIMEOUT 120)
+    if(TARGET lfs_tensor_rasterizer)
+        add_executable(tensor_rasterizer_contracts
+            test_splat_point_renderer.cpp
+            test_splat_tile_binner.cpp
+            test_splat_rasterizer.cpp
+            test_splat_lod_selector.cpp
+            test_splat_raster_contracts.cpp
+            test_splat_projection_contracts.cpp
+            test_splat_spark_gut_contracts.cpp
+            test_splat_rad_contracts.cpp
+            test_tensor_scene_temporal.cpp
+            ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_resolve.cpp)
+        target_include_directories(tensor_rasterizer_contracts PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/src/visualizer)
+        target_link_libraries(tensor_rasterizer_contracts PRIVATE lfs_tensor_rasterizer GTest::gtest_main)
+        target_compile_features(tensor_rasterizer_contracts PRIVATE cxx_std_23)
+        add_test(NAME TensorRasterizerContracts COMMAND tensor_rasterizer_contracts)
+        # The contracts check precise-math oracles; MoltenVK compiles its MSL
+        # with fast math unless told otherwise.
+        set_tests_properties(TensorRasterizerContracts PROPERTIES ENVIRONMENT "MVK_CONFIG_FAST_MATH_ENABLED=0")
+        set_tests_properties(TensorRasterizerContracts PROPERTIES LABELS "tensor;gpu" TIMEOUT 180)
+    endif()
+endif()
+
 if(APPLE AND (BUILD_VISUALIZER_TESTS OR BUILD_TESTS))
     # Cocoa delivers SDL drag events; this contract exercises the bridge without a GPU.
-    add_executable(mac_native_drag_drop_contracts EXCLUDE_FROM_ALL
+    add_executable(mac_native_drag_drop_contracts
         test_mac_native_drag_drop.cpp
         ${CMAKE_SOURCE_DIR}/src/visualizer/gui/utils/drag_drop_native.cpp)
     target_compile_features(mac_native_drag_drop_contracts PRIVATE cxx_std_23)
@@ -104,7 +279,7 @@ if(BUILD_VISUALIZER_TESTS OR BUILD_TESTS)
             test_rml_static_style_boundaries.cpp
             test_viewer_gpu_memory.cpp)
     endif()
-    add_executable(lichtfeld_visualizer_tests EXCLUDE_FROM_ALL
+    add_executable(lichtfeld_visualizer_tests
         ${LICHTFELD_VISUALIZER_TEST_SOURCES}
     )
     target_compile_features(lichtfeld_visualizer_tests PRIVATE cxx_std_23)
@@ -259,6 +434,7 @@ if(BUILD_TEMPORAL_CPU_TESTS)
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_coordinator.cpp
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_plan.cpp
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_resolve.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/scene_temporal_frame_setup.cpp
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/temporal_frame_tracker.cpp
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/passes/vulkan_scene_plugin_pipeline_contract.cpp
         ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/passes/vulkan_scene_temporal_pipeline_contract.cpp
@@ -453,6 +629,7 @@ set_tests_properties(lichtfeld_format_tests PROPERTIES
 
 add_executable(lichtfeld_frame_tests
     test_frame_demand_ledger.cpp
+    test_frustum_depth_coverage.cpp
     test_framerate_controller.cpp
     ${CMAKE_SOURCE_DIR}/src/visualizer/rendering/framerate_controller.cpp)
 
@@ -519,8 +696,7 @@ set_source_files_properties(test_tensor_expression_cuda.cu PROPERTIES
 function(lfs_tensor_private_access)
     set(_prefixes
         test_main test_tensor_ tensor_ bench_tensor_ test_allocator_ test_cuda_ test_stale_stream_
-        test_zero_stride_ test_strided_reduce_ expression_reference cuda_backend_test test_alloc_counter
-        test_zip_gather)
+        test_zero_stride_ test_strided_reduce_ expression_reference cuda_backend_test test_alloc_counter)
     foreach(_src IN LISTS ARGN)
         get_filename_component(_name "${_src}" NAME)
         foreach(_prefix IN LISTS _prefixes)
@@ -535,17 +711,9 @@ endfunction()
 if(NOT LFS_HAS_CUDA)
     set(TEST_SOURCES
         test_main.cpp
-        test_tensor_queue_readback.cpp
-        test_tensor_vulkan_runtime.cpp
-        test_tensor_vulkan_allocation_padding.cpp
-        test_tensor_vulkan_adoption.cpp
-        test_tensor_vulkan_pointwise.cpp
-        test_tensor_vulkan_reduce.cpp
-        test_tensor_vulkan_index.cpp
-        test_tensor_vulkan_matrix_nn.cpp
-        test_tensor_vulkan_random.cpp
-        test_tensor_vulkan_buffer.cpp
         test_tensor_backend_semantics.cpp
+        test_error_bus.cpp
+        test_tensor_restored.cpp
         test_nodes_core.cpp
         test_nodes_scene.cpp
         test_nodes_modifier_manager.cpp
@@ -553,21 +721,31 @@ if(NOT LFS_HAS_CUDA)
         test_node_canvas_interaction.cpp
         test_mcp_node_tools.cpp
         test_mcp_screen_tools.cpp
+        test_viewport.cpp
         test_tensor_metal.cpp
         test_camera_priors_portable.cpp
         test_pipelined_loader_backends.cpp
         test_viewer_no_cuda.cpp
     )
+    if(LFS_TENSOR_VULKAN)
+        list(APPEND TEST_SOURCES
+            test_tensor_queue_readback.cpp
+            test_tensor_vulkan_runtime.cpp
+            test_tensor_vulkan_allocation_padding.cpp
+            test_tensor_vulkan_adoption.cpp
+            test_tensor_vulkan_pointwise.cpp
+            test_tensor_vulkan_reduce.cpp
+            test_tensor_vulkan_index.cpp
+            test_tensor_vulkan_matrix_nn.cpp
+            test_tensor_vulkan_random.cpp
+            test_tensor_vulkan_buffer.cpp)
+    endif()
     if(LFS_BUILD_TRAINER)
         list(APPEND TEST_SOURCES
-            test_vulkan_trainer_start.cpp
             test_session_loader_storage.cpp
             test_training_command_masks.cpp
             test_mesh_mask_kernels.cpp
             test_training_ops_parity.cpp
-            test_training_ops_vulkan_gsplat.cpp
-            test_tensor_vulkan_training_fault.cpp
-            test_training_pair_sort.cpp
             test_training_ops_metal_densify.cpp
             test_training_ops_metal_appearance.cpp
             test_training_ops_metal_gsplat.cpp
@@ -576,6 +754,13 @@ if(NOT LFS_HAS_CUDA)
             test_training_ops_metal_fast.cpp
             test_training_snapshot_service.cpp
             test_ppisp_regularizer_portable.cpp)
+        if(LFS_TENSOR_VULKAN)
+            list(APPEND TEST_SOURCES
+                test_vulkan_trainer_start.cpp
+                test_training_ops_vulkan_gsplat.cpp
+                test_tensor_vulkan_training_fault.cpp
+                test_training_pair_sort.cpp)
+        endif()
     endif()
     if(APPLE)
         list(APPEND TEST_SOURCES test_video_videotoolbox.cpp test_mcp_render_capture_utils.cpp)
@@ -618,8 +803,10 @@ if(NOT LFS_HAS_CUDA)
         lfs_io
         lfs_visualizer
         GTest::gtest
-        Vulkan::Vulkan
     )
+    if(LFS_TENSOR_VULKAN)
+        target_link_libraries(lichtfeld_tests PRIVATE Vulkan::Vulkan)
+    endif()
     if(LFS_BUILD_TRAINER)
         target_link_libraries(lichtfeld_tests PRIVATE lfs_training)
         if(APPLE)
@@ -631,11 +818,15 @@ if(NOT LFS_HAS_CUDA)
             target_link_libraries(lichtfeld_tests PRIVATE lfs_python_embed)
         endif()
     endif()
-    add_test(NAME lichtfeld_tests COMMAND lichtfeld_tests --tensor-backend=vulkan)
+    if(LFS_TENSOR_VULKAN)
+        add_test(NAME lichtfeld_tests COMMAND lichtfeld_tests --tensor-backend=vulkan)
+    else()
+        add_test(NAME lichtfeld_tests COMMAND lichtfeld_tests --tensor-backend=metal)
+    endif()
     set_tests_properties(lichtfeld_tests PROPERTIES TIMEOUT 300)
 
     # Metal vs Vulkan tensor benchmark, built on demand and not registered with ctest.
-    if(APPLE)
+    if(LFS_TENSOR_METAL AND LFS_TENSOR_VULKAN)
         add_executable(bench_tensor_metal_vulkan EXCLUDE_FROM_ALL bench_tensor_metal_vulkan.cpp)
         target_compile_features(bench_tensor_metal_vulkan PRIVATE cxx_std_23)
         target_include_directories(bench_tensor_metal_vulkan PRIVATE ${LFS_CORE_ABI_INCLUDE_DIR})
@@ -672,6 +863,7 @@ set(TEST_FILES
     device_fault_cuda_utils.cu
     test_selection_ops.cpp
     test_tensor_point_ops.cpp
+    test_tensor_restored.cpp
     test_tensor_expression.cpp
     test_tensor_expression_cuda.cu
     test_tensor_warp_reduce.cpp
@@ -725,6 +917,7 @@ set(TEST_FILES
     test_fused_noise_injection.cpp
     test_densification_info_zero.cpp
     test_densify_events_4x.cpp
+    test_median_selection_perf.cu
     test_training_state_ledger.cpp
     test_vram_ledger_model.cpp
     test_vram_owner_timeline.cpp
@@ -762,7 +955,6 @@ set(TEST_FILES
     test_tensor_masking.cpp
     test_strided_tensor_ops.cpp
     test_tensor_lazy_gather.cpp
-    test_zip_gather.cpp
     test_tensor_ordering_distance.cpp
     test_tensor_kmeans_workflow.cpp
     test_tensor_masked_select_rows.cpp
@@ -1000,7 +1192,6 @@ set(TEST_FILES
     test_mesh_data.cpp
     test_mesh_offscreen_renderer.cpp
     test_align_transform.cpp
-    test_openmesh_bridge.cpp
     test_mesh_loader.cpp
     test_colmap_image_layout.cpp
     test_missing_dataset_images.cpp
@@ -1014,6 +1205,8 @@ set(TEST_FILES
     test_rml_im_mode_layout.cpp
     test_rml_python_listener_lifetime.cpp
     test_status_bar_fit.cpp
+    test_gallery_file_panel_layout.cpp
+    test_rmlui_preview_decode.cpp
     test_training_progress_publisher.cpp
     test_startup_overlay_geometry.cpp
     test_vram_hud_geometry.cpp
@@ -1060,6 +1253,7 @@ if(LFS_TENSOR_VULKAN)
         test_tensor_vulkan_cuda_bridge.cpp
         test_tensor_backend_parity.cpp
         test_tensor_backend_semantics.cpp
+        test_tensor_restored.cpp
         test_ply_vulkan_q16_bands.cpp
         test_viewer_vulkan_load.cpp
         test_headless_vulkan_device_selection.cpp
@@ -1109,10 +1303,14 @@ list(APPEND TEST_FILES test_rad_meta_sidecar.cpp)
 # instead of silently dropping coverage from the executable.
 set(TEST_SOURCES test_main.cpp ${TEST_FILES})
 
-# Also exercise the portable appearance references in Linux CUDA/Vulkan builds.
+# Also exercise the portable backend references in Linux CUDA/Vulkan builds.
 # Their _Float16 CPU oracle requires GCC or Clang.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    list(APPEND TEST_SOURCES test_training_ops_metal_appearance.cpp)
+    list(APPEND TEST_SOURCES
+        test_training_ops_metal_appearance.cpp
+        test_training_ops_metal_adam_sh.cpp
+        test_training_ops_metal_densify.cpp
+        test_training_ops_metal_fast.cpp)
 endif()
 
 # PyModalRegistry and its native-modal dispatch path for regression tests.
@@ -1559,6 +1757,13 @@ set(LFS_PYTHON_FAST_TESTS
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_store.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_store_subscriptions.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_arg_extrema_nan.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_empty_slices.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_sign_nan.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_inverse_trig_domain.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_global_keepdim.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_row_mask_assignment.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_repeat_regression.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_property.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tool_registry_activation.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_training_manager_regressions.py
@@ -1661,6 +1866,13 @@ add_test(NAME lichtfeld.python.gpu
     COMMAND ${Python_EXECUTABLE} -m pytest -q
         -m gpu
         ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_arg_extrema_nan.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_empty_slices.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_sign_nan.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_inverse_trig_domain.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_global_keepdim.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_row_mask_assignment.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_repeat_regression.py
         ${CMAKE_CURRENT_SOURCE_DIR}/python/test_tensor_property.py
         ${CMAKE_CURRENT_SOURCE_DIR}/python/test_nn_sam2.py
 )

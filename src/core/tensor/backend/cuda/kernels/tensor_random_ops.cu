@@ -66,18 +66,6 @@ namespace lfs::core::tensor_ops {
         }
     }
 
-    // Normal random generation
-    __global__ void normal_kernel(float* data, size_t n, float mean, float std,
-                                  unsigned long long seed) {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (idx < n) {
-            curandState state;
-            curand_init(seed, idx, 0, &state);
-            data[idx] = curand_normal(&state) * std + mean;
-        }
-    }
-
     // Bernoulli random generation
     __global__ void bernoulli_kernel(float* data, size_t n, float p,
                                      unsigned long long seed) {
@@ -147,11 +135,11 @@ namespace lfs::core::tensor_ops {
         float u = curand_uniform(&state);
 
         u = fmaxf(u, 1e-10f);
-        u = fminf(u, 1.0f - 1e-10f);
+        u = fminf(u, 0.9999999403953552f);
 
         float gumbel = -logf(-logf(u));
 
-        float log_weight = logf(fmaxf(weights[idx], 1e-10f));
+        float log_weight = (weights[idx] > 0.0f ? logf(weights[idx]) : -INFINITY);
         keys[idx] = log_weight + gumbel;
     }
 
@@ -166,17 +154,6 @@ namespace lfs::core::tensor_ops {
         int grid_size = (n + block_size - 1) / block_size;
         uniform_kernel<<<grid_size, block_size, 0, stream>>>(data, n, low, high, seed);
         LFS_CUDA_LAUNCH_CHECK(stream, "tensor.random.uniform");
-    }
-
-    void launch_normal(float* data, size_t n, float mean, float std,
-                       unsigned long long seed, cudaStream_t stream) {
-        if (n == 0)
-            return;
-
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-        normal_kernel<<<grid_size, block_size, 0, stream>>>(data, n, mean, std, seed);
-        LFS_CUDA_LAUNCH_CHECK(stream, "tensor.random.normal");
     }
 
     void launch_bernoulli(float* data, size_t n, float p,

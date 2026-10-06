@@ -605,10 +605,6 @@ namespace lfs::python {
         }
     } // namespace
 
-    void set_render_scene_context(core::Scene* scene) {
-        set_scene_for_python(scene);
-    }
-
     core::Scene* get_render_scene() {
         if (auto* app_scene = get_application_scene()) {
             return app_scene;

@@ -277,12 +277,6 @@ namespace lfs::core::tensor_ops {
         }
     }
 
-    __global__ void init_scalar_int_kernel(int* __restrict__ ptr, int value) {
-        if (threadIdx.x == 0 && blockIdx.x == 0) {
-            *ptr = value;
-        }
-    }
-
     __global__ void init_scalar_int64_kernel(int64_t* __restrict__ ptr, int64_t value) {
         if (threadIdx.x == 0 && blockIdx.x == 0) {
             *ptr = value;
@@ -293,11 +287,6 @@ namespace lfs::core::tensor_ops {
     inline void init_scalar_gpu(float* d_ptr, float value, cudaStream_t stream = nullptr) {
         init_scalar_float_kernel<<<1, 1, 0, stream>>>(d_ptr, value);
         LFS_CUDA_LAUNCH_CHECK(stream, "tensor.ops.init_scalar_f32");
-    }
-
-    inline void init_scalar_gpu(int* d_ptr, int value, cudaStream_t stream = nullptr) {
-        init_scalar_int_kernel<<<1, 1, 0, stream>>>(d_ptr, value);
-        LFS_CUDA_LAUNCH_CHECK(stream, "tensor.ops.init_scalar_i32");
     }
 
     inline void init_scalar_gpu(int64_t* d_ptr, int64_t value, cudaStream_t stream = nullptr) {
@@ -361,21 +350,6 @@ namespace lfs::core::tensor_ops {
             const float v = __half2float(src[i]);
             dst[i] = __float2half(clamp_preserving_nan(v, min_val, max_val));
         }
-    }
-
-    void launch_clamp_scalar_half(__half* data, float min_val, float max_val, size_t n,
-                                  cudaStream_t stream) {
-        if (n == 0)
-            return;
-        constexpr int BLOCK = 256;
-        int grid = static_cast<int>((n + BLOCK - 1) / BLOCK);
-        const int optimal = GPUConfig::get().optimal_grid_size(BLOCK);
-        if (grid > optimal)
-            grid = optimal;
-        if (grid < 1)
-            grid = 1;
-        clamp_half_kernel<<<grid, BLOCK, 0, stream>>>(data, data, min_val, max_val, n);
-        LFS_CUDA_LAUNCH_CHECK(stream, "tensor.ops.clamp_half");
     }
 
     void launch_clamp_fused_half(const __half* src, __half* dst, float min_val, float max_val,
@@ -2172,7 +2146,7 @@ namespace lfs::core::tensor_ops {
         for (size_t d = 0; d < D; ++d) {
             float diff = fabsf(a[i * D + d] - b[j * D + d]);
             if (p == 0.0f) {
-                dist += diff != 0.0f ? 1.0f : 0.0f;
+                dist += a[i * D + d] != b[j * D + d] ? 1.0f : 0.0f;
             } else if (isinf(p)) {
                 dist = ops::maximum_op{}(dist, diff);
             } else {
@@ -2243,21 +2217,22 @@ namespace lfs::core::tensor_ops {
             thrust::sequence(policy, indices_ptr, indices_ptr + n);
         });
 
+        // Stable, as on the other backends: equal keys keep their order.
         if (stream) {
             if (descending) {
-                thrust::sort_by_key(thrust::cuda::par_nosync.on(stream), values_ptr, values_ptr + n,
-                                    indices_ptr, ops::sort_greater_op{});
+                thrust::stable_sort_by_key(thrust::cuda::par_nosync.on(stream), values_ptr, values_ptr + n,
+                                           indices_ptr, ops::sort_greater_op{});
             } else {
-                thrust::sort_by_key(thrust::cuda::par_nosync.on(stream), values_ptr, values_ptr + n,
-                                    indices_ptr, ops::sort_less_op{});
+                thrust::stable_sort_by_key(thrust::cuda::par_nosync.on(stream), values_ptr, values_ptr + n,
+                                           indices_ptr, ops::sort_less_op{});
             }
         } else {
             if (descending) {
-                thrust::sort_by_key(thrust::cuda::par_nosync, values_ptr, values_ptr + n,
-                                    indices_ptr, ops::sort_greater_op{});
+                thrust::stable_sort_by_key(thrust::cuda::par_nosync, values_ptr, values_ptr + n,
+                                           indices_ptr, ops::sort_greater_op{});
             } else {
-                thrust::sort_by_key(thrust::cuda::par_nosync, values_ptr, values_ptr + n,
-                                    indices_ptr, ops::sort_less_op{});
+                thrust::stable_sort_by_key(thrust::cuda::par_nosync, values_ptr, values_ptr + n,
+                                           indices_ptr, ops::sort_less_op{});
             }
         }
     }

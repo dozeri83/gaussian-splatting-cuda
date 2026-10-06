@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -239,16 +240,11 @@ namespace lfs::io {
 
         void prefetch(const std::vector<ImageRequest>& requests);
         void prefetch(size_t sequence_id, const std::filesystem::path& path, const LoadParams& params);
-        // Canonicalize a run's source set before normal training consumption.
-        // The encoded results remain available only in this loader's run cache.
-        void canonicalize(const std::vector<ImageRequest>& requests);
 
         ReadyImage get();
-        std::optional<ReadyImage> try_get();
         std::optional<ReadyImage> try_get_for(std::chrono::milliseconds timeout);
 
         [[nodiscard]] lfs::Result<LoaderCompletion> get_completion();
-        [[nodiscard]] std::optional<LoaderCompletion> try_get_completion();
         [[nodiscard]] std::optional<LoaderCompletion> try_get_completion_for(
             std::chrono::milliseconds timeout);
 
@@ -258,6 +254,9 @@ namespace lfs::io {
 
         lfs::core::Tensor load_image_immediate(
             const std::filesystem::path& path, const LoadParams& params);
+        // Decodes `path` on a CPU thread for the next load_image_immediate with these parameters, so that call only
+        // uploads it. One image waits in host memory; nothing is allocated on the device ahead of that call.
+        void decode_ahead(const std::filesystem::path& path, const LoadParams& params);
 
         size_t ready_count() const;
         size_t in_flight_count() const;
@@ -450,6 +449,29 @@ namespace lfs::io {
         std::shared_ptr<std::vector<uint8_t>> load_cached_jpeg_blob(const std::string& cache_key);
         lfs::core::Tensor decode_file_on_cpu(const std::filesystem::path& path,
                                              const LoadParams& params) const;
+
+        enum class HostDecodeKind : uint8_t {
+            UInt8,
+            UInt16,
+            Float32
+        };
+        struct HostPixels {
+            std::unique_ptr<void, void (*)(void*)> data{nullptr, nullptr};
+            int width = 0;
+            int height = 0;
+            int channels = 0;
+        };
+        struct DecodeAhead {
+            std::filesystem::path path;
+            HostDecodeKind kind = HostDecodeKind::UInt8;
+            std::future<HostPixels> pixels;
+        };
+        lfs::core::Tensor load_rgb_decoded_ahead(const std::filesystem::path&, const LoadParams&, bool) const;
+
+        // The host decode load_image_immediate would run for these parameters, if any.
+        std::optional<HostDecodeKind> host_decode_kind(const std::filesystem::path& path, const LoadParams& params);
+        static HostPixels decode_on_host(const std::filesystem::path& path, HostDecodeKind kind);
+        std::optional<HostPixels> take_decoded_ahead(const std::filesystem::path& path, HostDecodeKind kind) const;
         void write_derived_cache(NvCodecImageLoader& nvcodec,
                                  const lfs::core::Tensor& tensor,
                                  const std::string& cache_key,
@@ -475,7 +497,6 @@ namespace lfs::io {
 
         std::shared_ptr<std::vector<uint8_t>> get_from_jpeg_cache(const std::string& cache_key);
         void put_in_jpeg_cache(const std::string& cache_key, std::shared_ptr<std::vector<uint8_t>> data);
-        void put_in_jpeg_cache(const std::string& cache_key, std::vector<uint8_t>&& data);
         void invalidate_cache_entry(const std::string& cache_key);
         void evict_jpeg_cache_if_needed(size_t required_bytes);
         size_t spill_least_recent_until_locked(size_t cached_bytes_target);
@@ -545,6 +566,8 @@ namespace lfs::io {
         bool nvcodec_hot_path_ = false;
         lfs::core::Tensor (PipelinedImageLoader::*cuda_immediate_)(
             const std::filesystem::path&, const LoadParams&) = nullptr;
+        mutable std::mutex decode_ahead_mutex_;
+        mutable std::optional<DecodeAhead> decode_ahead_;
 
         ThreadSafeQueue<ImageRequest> prefetch_queue_;
         ThreadSafeQueue<PrefetchedImage> hot_queue_;

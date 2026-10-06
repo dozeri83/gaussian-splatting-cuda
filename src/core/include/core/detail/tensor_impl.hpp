@@ -102,6 +102,7 @@ namespace lfs::core {
     class TensorIndexer;
     class MaskedTensorProxy;
     class TensorRowProxy;
+    class TensorElementProxy;
 
     // ============================================================================
     // Type Promotion System
@@ -514,13 +515,6 @@ namespace lfs::core {
 
     namespace internal {
         // Synchronous host copies run on the legacy default stream, which a
-        // non-blocking home stream neither waits for nor is waited on by. A
-        // download must follow the home stream's producer; an upload from
-        // pageable memory returns while its DMA is still in flight, so the home
-        // stream must wait for it. Both orderings are event edges; the host
-        // never waits on the home stream, so a gated stream cannot deadlock.
-        LFS_LOCAL_SYMBOL void order_legacy_after_home(const Tensor& tensor);
-        LFS_LOCAL_SYMBOL void order_home_after_legacy(const Tensor& tensor);
         LFS_LOCAL_SYMBOL GpuBackend resolve_new_gpu_storage_backend();
         // Cache trimming for every GPU backend that has a live context; a
         // backend that was never initialized is not brought up to be trimmed.
@@ -636,6 +630,10 @@ namespace lfs::core {
             std::shared_ptr<void> exportable_control;
             std::uint32_t exportable_region = 0;
             std::uint64_t exportable_bound_generation = 0;
+
+            // Storage supplied by the active viewer allocator and directly
+            // consumable by its renderer without a migration copy.
+            bool renderer_storage = false;
         };
 
         void* data_ = nullptr;
@@ -811,8 +809,6 @@ namespace lfs::core {
         // Generic functor-based in-place binary operation (zero enum overhead)
         template <typename SrcT = float, typename Op>
         Tensor& binary_op_inplace_generic(const Tensor& other, Op op);
-
-        std::pair<Tensor, Tensor> _broadcasted(const Tensor& other, bool match_dtype = true) const;
 
         int resolve_dim(int dim) const {
             if (!is_valid())
@@ -1038,13 +1034,6 @@ namespace lfs::core {
                                           DataType dtype,
                                           std::shared_ptr<void> owner,
                                           size_t capacity,
-                                          cudaStream_t stream);
-        static Tensor from_external_owner(void* data,
-                                          TensorShape shape,
-                                          Device device,
-                                          DataType dtype,
-                                          std::shared_ptr<void> owner,
-                                          size_t capacity,
                                           cudaStream_t stream,
                                           std::string external_kind);
         // View of one byte range of `backing`. Shares the allocation and its
@@ -1161,8 +1150,6 @@ namespace lfs::core {
         static void shutdown_memory_pool();
         static void set_memory_pool_iteration(int iteration);
 
-        void set_bool(std::initializer_list<size_t> indices, bool value);
-        bool get_bool(std::initializer_list<size_t> indices) const;
         void set_bool(std::span<const size_t> indices, bool value);
         bool get_bool(std::span<const size_t> indices) const;
 
@@ -1255,6 +1242,13 @@ namespace lfs::core {
         bool is_view() const { return is_view_; }
         bool is_external_storage() const {
             return storage_meta_ && static_cast<bool>(storage_meta_->external_owner);
+        }
+        void mark_renderer_storage() {
+            ensure_state();
+            state_->renderer_storage = true;
+        }
+        [[nodiscard]] bool is_renderer_storage() const noexcept {
+            return state_ && state_->renderer_storage;
         }
         bool is_empty() const { return !is_valid() || numel() == 0; }
         // Local deferred flag only — never takes the global IR mutex. Eager IR
@@ -1391,8 +1385,6 @@ namespace lfs::core {
         static std::string storage_memory_summary();
         static std::size_t cuda_direct_storage_live_bytes();
         static std::size_t vulkan_external_storage_live_bytes();
-        static void log_storage_memory();
-        static void log_storage_memory(std::string_view label);
 
         // reserve() pre-allocates memory for future growth along dimension 0
         // Supports multi-dimensional tensors: [N, D1, D2, ...] reserves N "rows"
@@ -1903,14 +1895,11 @@ namespace lfs::core {
         Tensor clamp(float min_val, float max_val) const;
 
         Tensor clamp_min(float min) const {
-            return clamp(min, dtype_ == DataType::Int32 ? std::numeric_limits<float>::infinity()
-                                                        : std::numeric_limits<float>::max());
+            return clamp(min, std::numeric_limits<float>::infinity());
         }
 
         Tensor clamp_max(float max) const {
-            return clamp(dtype_ == DataType::Int32 ? -std::numeric_limits<float>::infinity()
-                                                   : std::numeric_limits<float>::lowest(),
-                         max);
+            return clamp(-std::numeric_limits<float>::infinity(), max);
         }
 
         Tensor& clamp_(float min_val, float max_val);
@@ -2042,7 +2031,7 @@ namespace lfs::core {
         TensorIndexer operator[](const std::vector<Tensor>& indices);
         MaskedTensorProxy operator[](const Tensor& mask) const;
 
-        float& at(std::initializer_list<size_t> indices);
+        TensorElementProxy at(std::initializer_list<size_t> indices);
         float at(std::initializer_list<size_t> indices) const;
 
         // ============= ADVANCED OPERATIONS =============
@@ -2076,7 +2065,6 @@ namespace lfs::core {
         std::pair<Tensor, Tensor> sort(int dim = -1, bool descending = false) const;
 
         // Scalar boolean reductions
-        bool any_scalar() const;
 
         // ============= OPERATOR OVERLOADS (Template-based) =============
 
@@ -2140,10 +2128,6 @@ namespace lfs::core {
         Tensor& uniform_(float low = 0.0f, float high = 1.0f);
         Tensor& normal_(float mean = 0.0f, float std = 1.0f);
 
-        std::optional<Tensor> try_reshape(TensorShape shape) const;
-
-        static std::vector<Tensor> split_batch(const Tensor& tensor, size_t batch_size);
-
         // Utility template methods
         template <typename Func>
         Tensor& inplace(Func&& func) {
@@ -2171,10 +2155,6 @@ namespace lfs::core {
         }
 
         // Validation & assertions
-        Tensor& assert_shape(TensorShape expected);
-        Tensor& assert_shape(TensorShape expected, const std::string& msg);
-        Tensor& assert_device(Device expected);
-        Tensor& assert_dtype(DataType expected);
         Tensor& assert_finite();
 
         // Comparison operations
@@ -2259,6 +2239,25 @@ namespace lfs::core {
         }
         return internal::tensor_lazy_expr_id(*this);
     }
+
+    // A mutable scalar view. Reads transfer one value; writes and arithmetic
+    // execute on the tensor backend and retain the storage's lifetime.
+    class LFS_CORE_API TensorElementProxy {
+    public:
+        TensorElementProxy(const TensorElementProxy&) = default;
+        operator float() const;
+        TensorElementProxy& operator=(float value);
+        TensorElementProxy& operator=(const TensorElementProxy& other);
+        TensorElementProxy& operator+=(float value);
+        TensorElementProxy& operator-=(float value);
+        TensorElementProxy& operator*=(float value);
+        TensorElementProxy& operator/=(float value);
+
+    private:
+        friend class Tensor;
+        explicit TensorElementProxy(Tensor element);
+        Tensor element_;
+    };
 
     // ============= TensorRowProxy for operator[] =============
     // Implementations in tensor_row_proxy.cpp (except template methods)
@@ -2368,13 +2367,6 @@ namespace lfs::core {
 
         // Unary Operations
         Tensor operator-() const;
-        Tensor pow(float exponent) const;
-        Tensor sqrt() const;
-        Tensor abs() const;
-        Tensor neg() const;
-        Tensor sum() const;
-        Tensor mean() const;
-        Tensor square() const;
     };
 
     // Implementation of Tensor::operator[]
@@ -2551,9 +2543,6 @@ namespace lfs::core {
         size_t pool_reserved_high = 0;
 
         static MemoryInfo cuda();
-        static MemoryInfo cpu();
-
-        void log() const;
     };
 
     // ========================================================================

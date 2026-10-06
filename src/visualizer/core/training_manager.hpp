@@ -49,7 +49,7 @@ namespace lfs::vis {
     // Forward declarations
     class VisualizerImpl;
     class ParameterManager;
-    class VulkanExternalTensorStorage;
+    class GraphicsExternalTensorStorage;
     class VisualizerImplResetTest_ForceExitWhileStoppingArmsWatcher_Test;
     class VisualizerImplResetTest_NewProjectWhileCompletionPendingStillErrors_Test;
     class VisualizerImplResetTest_SaveWhilePausedTrainingRoutesThroughLiveTrainer_Test;
@@ -139,6 +139,9 @@ namespace lfs::vis {
         [[nodiscard]] bool isPaused() const { return state_machine_.isInState(TrainingState::Paused); }
         [[nodiscard]] bool isFinished() const { return state_machine_.isInState(TrainingState::Finished); }
         [[nodiscard]] bool isTrainingActive() const { return state_machine_.isActive(); }
+        // Whether the training loop may still change the model: running, or paused or stopping before the
+        // loop has reached the iteration boundary where it honours the request.
+        [[nodiscard]] bool isModelChanging() const;
         [[nodiscard]] bool canStart() const { return canPerform(TrainingAction::Start); }
         [[nodiscard]] bool canPause() const { return canPerform(TrainingAction::Pause); }
         [[nodiscard]] bool canResume() const { return canPerform(TrainingAction::Resume); }
@@ -230,7 +233,6 @@ namespace lfs::vis {
         }
 
         // Camera access
-        std::vector<std::shared_ptr<lfs::core::Camera>> getAllCamList() const;
         std::expected<lfs::training::CameraMetricsSnapshot, std::string> computeCameraMetricsForCameraId(
             int camera_id,
             bool include_ssim,
@@ -339,7 +341,7 @@ namespace lfs::vis {
         core::Scene* scene_ = nullptr;
         std::function<bool(std::function<void()>, std::function<void()>)> test_scene_owner_poster_;
         std::optional<lfs::core::SplatExportableStorage> splat_storage_;
-        std::shared_ptr<VulkanExternalTensorStorage> splat_interop_parent_;
+        std::shared_ptr<GraphicsExternalTensorStorage> splat_interop_parent_;
         lfs::core::SplatTensorAllocator splat_interop_allocator_;
         // Nesting depth for densify-window Vulkan exclusion.
         int exportable_densify_barrier_depth_ = 0;

@@ -5,6 +5,10 @@
 
 #include "image_codecs.hpp"
 
+#if LFS_HAS_CUDA
+#include "core/cuda/image_quantize.hpp"
+#endif
+#include "core/gpu_backend_fwd.hpp"
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
 #include <algorithm>
@@ -24,6 +28,8 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -204,6 +210,13 @@ namespace {
         return std::nullopt;
     }
 
+    // Equals static_cast<T>(std::lround(value)) for value in [0, max of T], without a libm call per sample.
+    template <typename T>
+    T round_half_up(const double value) {
+        const auto whole = static_cast<std::uint32_t>(value);
+        return static_cast<T>(whole + (value - static_cast<double>(whole) >= 0.5 ? 1u : 0u));
+    }
+
     template <typename T>
     T* downscale_resample_nch(const T* src,
                               int w, int h, int nw, int nh,
@@ -212,29 +225,32 @@ namespace {
         auto* out = static_cast<T*>(std::malloc(outbytes));
         if (!out)
             throw std::bad_alloc();
-        for (int y = 0; y < nh; ++y) {
-            const float sy = (static_cast<float>(y) + 0.5f) * static_cast<float>(h) / nh - 0.5f;
-            const int y0 = std::clamp(static_cast<int>(std::floor(sy)), 0, h - 1);
-            const int y1 = std::min(y0 + 1, h - 1);
-            const float fy = sy - std::floor(sy);
-            for (int x = 0; x < nw; ++x) {
-                const float sx = (static_cast<float>(x) + 0.5f) * static_cast<float>(w) / nw - 0.5f;
-                const int x0 = std::clamp(static_cast<int>(std::floor(sx)), 0, w - 1);
-                const int x1 = std::min(x0 + 1, w - 1);
-                const float fx = sx - std::floor(sx);
-                for (int c = 0; c < channels; ++c) {
-                    const float top = static_cast<float>(src[(static_cast<size_t>(y0) * w + x0) * channels + c]) * (1.0f - fx) +
-                                      static_cast<float>(src[(static_cast<size_t>(y0) * w + x1) * channels + c]) * fx;
-                    const float bottom = static_cast<float>(src[(static_cast<size_t>(y1) * w + x0) * channels + c]) * (1.0f - fx) +
-                                         static_cast<float>(src[(static_cast<size_t>(y1) * w + x1) * channels + c]) * fx;
-                    const float value = top * (1.0f - fy) + bottom * fy;
-                    if constexpr (std::is_floating_point_v<T>)
-                        out[(static_cast<size_t>(y) * nw + x) * channels + c] = static_cast<T>(value);
-                    else
-                        out[(static_cast<size_t>(y) * nw + x) * channels + c] = static_cast<T>(std::clamp(std::lround(value), 0l, static_cast<long>(std::numeric_limits<T>::max())));
+        tbb::parallel_for(tbb::blocked_range<int>(0, nh), [&](const tbb::blocked_range<int>& rows) {
+            for (int y = rows.begin(); y < rows.end(); ++y) {
+                const float sy = (static_cast<float>(y) + 0.5f) * static_cast<float>(h) / nh - 0.5f;
+                const int y0 = std::clamp(static_cast<int>(std::floor(sy)), 0, h - 1);
+                const int y1 = std::min(y0 + 1, h - 1);
+                const float fy = sy - std::floor(sy);
+                for (int x = 0; x < nw; ++x) {
+                    const float sx = (static_cast<float>(x) + 0.5f) * static_cast<float>(w) / nw - 0.5f;
+                    const int x0 = std::clamp(static_cast<int>(std::floor(sx)), 0, w - 1);
+                    const int x1 = std::min(x0 + 1, w - 1);
+                    const float fx = sx - std::floor(sx);
+                    for (int c = 0; c < channels; ++c) {
+                        const float top = static_cast<float>(src[(static_cast<size_t>(y0) * w + x0) * channels + c]) * (1.0f - fx) +
+                                          static_cast<float>(src[(static_cast<size_t>(y0) * w + x1) * channels + c]) * fx;
+                        const float bottom = static_cast<float>(src[(static_cast<size_t>(y1) * w + x0) * channels + c]) * (1.0f - fx) +
+                                             static_cast<float>(src[(static_cast<size_t>(y1) * w + x1) * channels + c]) * fx;
+                        const float value = top * (1.0f - fy) + bottom * fy;
+                        if constexpr (std::is_floating_point_v<T>)
+                            out[(static_cast<size_t>(y) * nw + x) * channels + c] = static_cast<T>(value);
+                        else
+                            out[(static_cast<size_t>(y) * nw + x) * channels + c] = round_half_up<T>(
+                                std::clamp(value, 0.0f, static_cast<float>(std::numeric_limits<T>::max())));
+                    }
                 }
             }
-        }
+        });
         return out;
     }
 
@@ -265,6 +281,14 @@ namespace {
     }
 
     lfs::core::Tensor prepare_image_for_write(lfs::core::Tensor image) {
+        if (image.ndim() == 4)
+            image = image.squeeze(0); // [B,C,H,W] -> [C,H,W]
+#if LFS_HAS_CUDA
+        // A CUDA image is quantized where it lives and downloads as bytes.
+        if (lfs::core::gpu_backend_of(image) == lfs::core::GpuBackend::CUDA && image.dtype() == lfs::core::DataType::Float32 &&
+            image.ndim() == 3 && image.shape()[0] <= 4)
+            return lfs::core::cuda::quantize_to_interleaved_bytes(image).to(lfs::core::Device::CPU);
+#endif
         auto normalized = normalize_image_for_save(std::move(image));
         return (normalized.clamp(0, 1) * 255.0f + 0.5f)
             .to(lfs::core::DataType::UInt8)
@@ -386,15 +410,17 @@ namespace {
             } else {
                 const auto* source = reinterpret_cast<const float*>(decoded.data.data());
                 const auto convert = [&](const size_t index) {
-                    return static_cast<uint8_t>(std::lround(std::clamp(static_cast<double>(source[index]), 0.0, 1.0) * 255.0));
+                    return round_half_up<uint8_t>(std::clamp(static_cast<double>(source[index]), 0.0, 1.0) * 255.0);
                 };
-                for (size_t pixel = 0; pixel < pixels; ++pixel) {
-                    const size_t index = pixel * decoded.channels;
-                    const T first = convert(index);
-                    expand_pixel_to_rgb(base + pixel * 3, decoded.channels, first,
-                                        decoded.channels > 1 ? convert(index + 1) : first,
-                                        decoded.channels > 2 ? convert(index + 2) : first);
-                }
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, pixels), [&](const tbb::blocked_range<size_t>& range) {
+                    for (size_t pixel = range.begin(); pixel < range.end(); ++pixel) {
+                        const size_t index = pixel * decoded.channels;
+                        const T first = convert(index);
+                        expand_pixel_to_rgb(base + pixel * 3, decoded.channels, first,
+                                            decoded.channels > 1 ? convert(index + 1) : first,
+                                            decoded.channels > 2 ? convert(index + 2) : first);
+                    }
+                });
             }
         } else {
             if (decoded.sample_type == image_codecs::SampleType::UInt16) {
@@ -424,15 +450,17 @@ namespace {
             } else {
                 const auto* source = reinterpret_cast<const float*>(decoded.data.data());
                 const auto convert = [&](const size_t index) {
-                    return static_cast<uint16_t>(std::lround(std::clamp(static_cast<double>(source[index]), 0.0, 1.0) * 65535.0));
+                    return round_half_up<uint16_t>(std::clamp(static_cast<double>(source[index]), 0.0, 1.0) * 65535.0);
                 };
-                for (size_t pixel = 0; pixel < pixels; ++pixel) {
-                    const size_t index = pixel * decoded.channels;
-                    const T first = convert(index);
-                    expand_pixel_to_rgb(base + pixel * 3, decoded.channels, first,
-                                        decoded.channels > 1 ? convert(index + 1) : first,
-                                        decoded.channels > 2 ? convert(index + 2) : first);
-                }
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, pixels), [&](const tbb::blocked_range<size_t>& range) {
+                    for (size_t pixel = range.begin(); pixel < range.end(); ++pixel) {
+                        const size_t index = pixel * decoded.channels;
+                        const T first = convert(index);
+                        expand_pixel_to_rgb(base + pixel * 3, decoded.channels, first,
+                                            decoded.channels > 1 ? convert(index + 1) : first,
+                                            decoded.channels > 2 ? convert(index + 2) : first);
+                    }
+                });
             }
         }
         return base;
@@ -938,19 +966,8 @@ namespace lfs::core {
         }
     } // namespace
 
-    void flip_normal_prior_yz_hwc(float* data, const size_t pixel_count) {
-        flip_normal_prior_yz(data + 1, data + 2, pixel_count, 3);
-    }
-
     void flip_normal_prior_yz_chw(float* data, const size_t pixel_count) {
         flip_normal_prior_yz(data + pixel_count, data + 2 * pixel_count, pixel_count, 1);
-    }
-
-    void transform_normal_prior_world_to_camera_hwc(
-        float* data, const size_t pixel_count, const std::array<float, 9>& w2c) {
-        for (size_t i = 0; i < pixel_count; ++i) {
-            transform_normal_world_to_camera(data[i * 3], data[i * 3 + 1], data[i * 3 + 2], w2c);
-        }
     }
 
     void transform_normal_prior_world_to_camera_chw(
@@ -1065,13 +1082,6 @@ namespace lfs::core::image_io {
         }
     }
 
-    size_t BatchImageSaver::pending_count_if_initialized() {
-        if (auto* saver = try_instance()) {
-            return saver->pending_count();
-        }
-        return 0;
-    }
-
     BatchImageSaver::BatchImageSaver(size_t num_workers)
         : num_workers_(std::max(size_t(1), std::min(num_workers, std::min(size_t(8), size_t(std::thread::hardware_concurrency()))))),
           max_pending_tasks_(num_workers_) {
@@ -1142,11 +1152,6 @@ namespace lfs::core::image_io {
     void BatchImageSaver::wait_all() {
         std::unique_lock<std::mutex> lock(queue_mutex_);
         cv_finished_.wait(lock, [this] { return task_queue_.empty() && active_tasks_ == 0; });
-    }
-
-    size_t BatchImageSaver::pending_count() const {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
-        return task_queue_.size() + active_tasks_;
     }
 
     void BatchImageSaver::worker_thread() {

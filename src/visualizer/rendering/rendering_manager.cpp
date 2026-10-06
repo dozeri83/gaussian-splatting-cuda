@@ -20,6 +20,8 @@
 #include "scene_renderer_factory.hpp"
 #include "scene_training_interop.hpp"
 #include "theme/theme.hpp"
+#include "viewport_reference_renderer.hpp"
+#include "window/graphics_context.hpp"
 #if LFS_BUILD_TRAINER
 #include "training/trainer.hpp"
 #endif
@@ -30,6 +32,7 @@
 #include <bit>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -272,22 +275,16 @@ namespace lfs::vis {
         lfs::rendering::releaseEnvironmentMapCaches();
     }
 
-    ViewportInteropService& RenderingManager::viewportInterop() {
-
-        return this->state().viewport_interop_;
+    void RenderingManager::clearViewportSceneImage() {
+        clearViewportReference(this->state());
     }
 
-    const ViewportInteropService& RenderingManager::viewportInterop() const {
-
-        return this->state().viewport_interop_;
-    }
-
-    void RenderingManager::shutdownViewportInterop(VulkanContext* context) {
+    void RenderingManager::shutdownViewportInterop(GraphicsContext* context) {
         std::lock_guard lock(views_mutex_);
         for (auto& [id, view] : view_states_)
-            view->viewport_interop_.shutdown(context);
+            shutdownViewportReference(*view, context);
         for (auto& view : retired_view_states_)
-            view->viewport_interop_.shutdown(context);
+            shutdownViewportReference(*view, context);
     }
 
     void RenderingManager::setWakeCallback(std::function<void()> callback) {
@@ -480,7 +477,7 @@ namespace lfs::vis {
         std::erase_if(retired_view_states_, [&](auto& view) {
             if (!releaseViewTargets(*view))
                 return false;
-            view->viewport_interop_.shutdown(last_vulkan_context_);
+            shutdownViewportReference(*view, last_graphics_context_);
             return true;
         });
     }
@@ -606,10 +603,7 @@ namespace lfs::vis {
     void RenderingManager::releaseSceneModelResources() {
         dropViewStates();
 
-        point_cloud_colors_cache_ = {};
-        point_cloud_colors_cache_key_ = nullptr;
-        point_cloud_colors_cache_size_ = 0;
-        ++point_cloud_data_revision_;
+        invalidatePointCloudData();
         ++point_cloud_preview_selection_revision_;
 
         if (scene_renderer_) {
@@ -620,14 +614,14 @@ namespace lfs::vis {
         }
     }
 
-    void RenderingManager::clearVulkanViewportImageState(ViewRenderState& view, const glm::ivec2 size,
-                                                         const bool flip_y,
-                                                         const glm::ivec2 alloc_size) {
+    void RenderingManager::clearViewportImageState(ViewRenderState& view, const glm::ivec2 size,
+                                                   const bool flip_y,
+                                                   const glm::ivec2 alloc_size) {
         view.vulkan_viewport_image_.reset();
-        view.vulkan_external_viewport_image_ = VK_NULL_HANDLE;
-        view.vulkan_external_viewport_image_view_ = VK_NULL_HANDLE;
-        view.vulkan_external_viewport_image_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-        view.vulkan_external_viewport_image_generation_ = 0;
+        view.viewport_depth_image_.reset();
+        view.viewport_environment_ = {};
+        view.viewport_meshes_ = {};
+        clearViewportReferenceOutput(view);
         view.vulkan_viewport_image_size_ = size;
         view.vulkan_viewport_image_alloc_size_ = alloc_size.x > 0 && alloc_size.y > 0 ? alloc_size : size;
         view.vulkan_viewport_image_flip_y_ = flip_y;
@@ -638,10 +632,7 @@ namespace lfs::vis {
     void RenderingManager::releaseSceneRenderResources() {
         invalidateGTComparisonImageCache(state());
         dropViewStates();
-        point_cloud_colors_cache_ = {};
-        point_cloud_colors_cache_key_ = nullptr;
-        point_cloud_colors_cache_size_ = 0;
-        ++point_cloud_data_revision_;
+        invalidatePointCloudData();
         ++point_cloud_preview_selection_revision_;
         if (scene_renderer_)
             scene_renderer_->reset();
@@ -875,6 +866,23 @@ namespace lfs::vis {
         return RenderSettings(settings_, view_source_.viewSettings(view_source_.activeView()).value());
     }
 
+    void RenderingManager::logSceneUpscalerRequest(ViewRenderState& view, const RenderSettings& settings) {
+        if (view.scene_reconstruction_request_logged_ &&
+            view.last_scene_reconstruction_backend_ == settings.scene_upscaler &&
+            view.last_scene_reconstruction_preset_ == settings.scene_upscaler_preset)
+            return;
+        if (view.scene_reconstruction_request_logged_)
+            LOG_INFO("Scene reconstruction request: {}/{} -> {}/{} (input_scale={:.4f})",
+                     view.last_scene_reconstruction_backend_, view.last_scene_reconstruction_preset_,
+                     settings.scene_upscaler, settings.scene_upscaler_preset, settings.scene_upscaler_scale);
+        else
+            LOG_INFO("Scene reconstruction initial request: {}/{} (input_scale={:.4f})",
+                     settings.scene_upscaler, settings.scene_upscaler_preset, settings.scene_upscaler_scale);
+        view.scene_reconstruction_request_logged_ = true;
+        view.last_scene_reconstruction_backend_ = settings.scene_upscaler;
+        view.last_scene_reconstruction_preset_ = settings.scene_upscaler_preset;
+    }
+
     void RenderingManager::reportSceneUpscalerRuntimeSelection(
         const ViewId id, const SceneUpscalerSelection selection) {
         bool changed = false;
@@ -889,8 +897,14 @@ namespace lfs::vis {
         // preset scale, while fallback must replace any cached reduced source with
         // a full-resolution native frame. TEMPORAL deliberately avoids restarting
         // the convergence sequence as CAMERA would.
-        if (changed)
+        if (changed) {
+            LOG_INFO("Scene reconstruction effective: {} -> {} (fallback={})",
+                     sceneUpscalerBackendId(selection.requested), sceneUpscalerBackendId(selection.effective),
+                     sceneUpscalerFallbackId(selection.fallback));
+            auto& generation = app_store().scene_upscaler_generation;
+            generation.set(generation.get() + 1);
             markViewDirty(id, DirtyFlag::TEMPORAL, lfs::vis::FrameReason::SceneChange);
+        }
     }
 
     SceneUpscalerSelection RenderingManager::sceneUpscalerRuntimeSelection(const ViewId view) const {
@@ -916,9 +930,28 @@ namespace lfs::vis {
         updateSettings(settings, DirtyFlag::CAMERA);
     }
 
-    float RenderingManager::getFovDegrees() const {
-        std::lock_guard<std::mutex> lock(settings_mutex_);
-        return lfs::rendering::focalLengthToVFov(activeSettingsLocked().focal_length_mm);
+    void RenderingManager::beginImportRenderCheck(const uint64_t generation) {
+        import_render_check_ = true;
+        import_render_generation_ = generation;
+        import_render_frames_ = 0;
+        import_render_result_.reset();
+        markDirty(DirtyFlag::ALL, FrameReason::SceneChange);
+    }
+
+    double RenderingManager::secondsUntilTrainingRefresh() const {
+        std::lock_guard lock(views_mutex_);
+        double remaining = std::numeric_limits<double>::infinity();
+        for (const auto& [id, view] : view_states_)
+            remaining = std::min(remaining, view->frame_lifecycle_service_.secondsUntilTrainingRefresh(
+                                                trainingRefreshIntervalSec(*view)));
+        return remaining;
+    }
+
+    void RenderingManager::invalidatePointCloudData() {
+        point_cloud_colors_cache_ = {};
+        point_cloud_colors_cache_key_ = nullptr;
+        point_cloud_colors_cache_size_ = 0;
+        ++point_cloud_data_revision_;
     }
 
     float RenderingManager::getFocalLengthMm() const {
@@ -928,9 +961,12 @@ namespace lfs::vis {
 
     void RenderingManager::setFocalLength(const float focal_mm) {
         auto settings = getSettings();
-        settings.focal_length_mm = std::clamp(focal_mm,
-                                              lfs::rendering::MIN_FOCAL_LENGTH_MM,
-                                              lfs::rendering::MAX_FOCAL_LENGTH_MM);
+        const float clamped = std::clamp(focal_mm,
+                                         lfs::rendering::MIN_FOCAL_LENGTH_MM,
+                                         lfs::rendering::MAX_FOCAL_LENGTH_MM);
+        if (settings.focal_length_mm == clamped)
+            return;
+        settings.focal_length_mm = clamped;
         updateSettings(settings, DirtyFlag::CAMERA);
     }
 
@@ -947,11 +983,6 @@ namespace lfs::vis {
     std::optional<SplitViewInfo> RenderingManager::getSplitViewInfoIfChanged(
         std::uint64_t& generation) const {
         return this->state().split_view_service_.getInfoIfChanged(generation);
-    }
-
-    bool RenderingManager::isSplitViewActive() const {
-        std::lock_guard<std::mutex> lock(settings_mutex_);
-        return this->state().split_view_service_.isActive(activeSettingsLocked());
     }
 
     bool RenderingManager::isGTComparisonActive() const {

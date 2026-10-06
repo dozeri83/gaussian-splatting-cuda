@@ -36,7 +36,7 @@
 #include <vector>
 
 namespace {
-#ifdef __APPLE__
+#if defined(__APPLE__) && defined(LFS_GRAPHICS_VULKAN)
     void configureVulkanDriver() {
         // The vcpkg Vulkan loader does not always discover Homebrew's MoltenVK
         // manifest. Keep an explicit Vulkan driver selection from the caller.
@@ -313,7 +313,7 @@ int main(int argc, char* argv[]) {
     // Keep the signed app immutable, including for bundled Python child processes.
     (void)lfs::core::environment::set_value("PYTHONDONTWRITEBYTECODE", "1");
 #endif
-#ifdef __APPLE__
+#if defined(__APPLE__) && defined(LFS_GRAPHICS_VULKAN)
     configureVulkanDriver();
 #endif
 
@@ -336,7 +336,7 @@ int main(int argc, char* argv[]) {
     }
     const auto tensor_preferences = use_default_preferences
                                         ? lfs::vis::TensorPreferenceState{}
-                                        : lfs::vis::UserPreferences::instance().tensorBackend();
+                                        : lfs::vis::UserPreferences::instance().sanitizeTensorBackend();
     const auto options_status = lfs::core::set_tensor_backend_options(tensor_preferences.options);
     // An automatic preference leaves the choice to default_gpu_backend().
     const auto backend_status = tensor_preferences.backend

@@ -12,10 +12,12 @@
 #include "gui/rmlui/rml_tooltip.hpp"
 #include "gui/rmlui/rmlui_manager.hpp"
 #include "gui/status_bar_mining.hpp"
+#include "rendering/scene_upscaler_registry.hpp"
 #include "rendering/viewer_backend.hpp"
 #include "visualizer/rendering/rendering_types.hpp"
 #include "visualizer/visualizer.hpp"
 #include <RmlUi/Core/DataModelHandle.h>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -109,14 +111,16 @@ namespace lfs::vis::gui {
         void updateHoverTooltip();
         void updateTooltipScheduling();
         void resetTooltip();
+        LFS_VIS_API void updateUpscalerContent(const RenderSettings& settings, SceneUpscalerSelection runtime);
+        void selectUpscaler(const std::string& backend_id, const std::optional<std::string>& preset_id = std::nullopt);
         bool updateTheme();
         bool layoutFits(float reserve_px) const;
         LFS_VIS_API void fitToAvailableWidth(bool allow_expand);
         LFS_VIS_API void applyFitLevel(int level);
-        void queueCachedVulkanContext(float x, float y, float w_px, float h_px,
-                                      int screen_w, int screen_h,
-                                      int render_w, int render_h,
-                                      bool refresh_cache);
+        void queueCachedContext(float x, float y, float w_px, float h_px,
+                                int screen_w, int screen_h,
+                                int render_w, int render_h,
+                                bool refresh_cache);
         LFS_VIS_API void trackContextFrame(float window_x, float window_y);
         void trackRenderedContextFrame(float bar_x, float bar_y, float overlay_height) {
             trackContextFrame(bar_x, bar_y - overlay_height);
@@ -286,6 +290,8 @@ namespace lfs::vis::gui {
             std::string fps_label;
             std::string renderer_label, renderer_value, renderer_tooltip;
             std::string tensor_label, tensor_value, tensor_tooltip;
+            std::string upscaler_label, upscaler_value, upscaler_tooltip, upscaler_menu;
+            bool upscaler_menu_expanded = false;
             bool preview_reduced = false;
             std::string preview_reduced_text;
             std::string git_commit;
@@ -314,6 +320,7 @@ namespace lfs::vis::gui {
         std::future<GpuMemoryInfo> pending_gpu_mem_;
         std::chrono::steady_clock::time_point next_refresh_at_{};
         std::chrono::steady_clock::time_point next_gpu_refresh_at_{};
+        std::atomic_bool external_model_dirty_{false};
         bool model_dirty_ = true;
         bool model_animation_active_ = false;
         bool rml_animation_active_ = false;
@@ -326,7 +333,7 @@ namespace lfs::vis::gui {
         int last_render_w_ = 0;
         int last_render_h_ = 0;
         int last_document_h_ = 0;
-        CachedVulkanContextRender direct_cache_;
+        CachedUiContextRender direct_cache_;
         static constexpr int kMaxFitLevel = 9;
         static constexpr auto kIdleRefreshInterval = std::chrono::milliseconds(200);
         static constexpr auto kBusyRefreshInterval = std::chrono::milliseconds(100);

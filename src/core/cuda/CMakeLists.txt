@@ -15,8 +15,8 @@ set(LFS_CORE_CUDA_SOURCES
     kernels/splat_transform.cu
     kernels/sh_layout.cu
     kernels/initial_scales.cu
+    kernels/image_quantize.cu
     sh_value_quant_kernels.cu
-    tensor_debug.cu
 )
 
 add_library(lfs_core_cuda STATIC ${LFS_CORE_CUDA_SOURCES})

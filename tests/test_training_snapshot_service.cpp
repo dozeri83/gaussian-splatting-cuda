@@ -50,6 +50,27 @@ namespace {
 
     constexpr std::size_t MIB = 1024 * 1024;
 
+#if defined(__APPLE__)
+    TEST(TrainingSnapshotStorage,
+         LargeCaptureUsesFileBackedSpool) {
+        lfs::training::TrainingSnapshotBytes storage(
+            64ull * MIB, true);
+        ASSERT_TRUE(storage.file_backed());
+        EXPECT_EQ(storage.data(), nullptr);
+        std::vector<std::byte> source(MIB);
+        for (std::size_t index = 0; index < source.size(); ++index) {
+            source[index] = static_cast<std::byte>(
+                (index * 131u + 17u) & 0xffu);
+        }
+        constexpr std::uint64_t OFFSET = 31ull * MIB + 123;
+        storage.write_at(OFFSET, source);
+        const auto mapped = storage.mapped_data();
+        ASSERT_TRUE(mapped);
+        EXPECT_TRUE(std::ranges::equal(
+            mapped->subspan(OFFSET, source.size()), source));
+    }
+#endif
+
     std::unique_ptr<lfs::core::SplatData>
     make_snapshot_test_splat(
         const std::size_t count,
@@ -400,6 +421,8 @@ namespace {
         });
         const lfs::training::TrainingSnapshotCaptureRequest request{
             .iteration = 500,
+            // Checks the resident-memory measurement, not the gate: independent of the runner's free memory.
+            .relaxed_host_memory_gate = true,
             .strategy = strategy,
             .params = params,
             .capture_additional_cpu_state = [&](const lfs::core::Uuid&)
@@ -900,6 +923,8 @@ namespace {
             request{
                 .iteration = SAVED_ITERATION,
                 .snapshot_uuid = assigned_snapshot_uuid,
+                // Checks the captured bytes, not the gate: independent of the runner's free memory.
+                .relaxed_host_memory_gate = true,
                 .strategy = strategy,
                 .params = params,
             };

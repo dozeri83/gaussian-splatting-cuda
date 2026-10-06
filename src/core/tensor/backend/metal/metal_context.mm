@@ -10,6 +10,8 @@
 #include "core/error.hpp"
 #include "core/gpu_device_info.hpp"
 #include "core/memory_pressure.hpp"
+#include "core/tensor_label.hpp"
+#include "diagnostics/vram_profiler.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -66,15 +68,20 @@ namespace lfs::core::internal::metal {
             return source + kKernelSource;
         }
 
-        // Power-of-two size classes keep reuse simple; large blocks round to 2 MiB.
+        // Small power-of-two classes keep reuse dense. Tensor images and model
+        // fields are long-lived and regularly land between powers of two, so use
+        // 1 MiB classes there instead of retaining up to 100% rounding waste.
         constexpr size_t kLargeBlock = size_t{64} << 20;
 
         size_t size_class(const size_t bytes) {
+            constexpr size_t kMediumGranule = size_t{1} << 20;
             constexpr size_t kLargeGranule = size_t{2} << 20;
             if (bytes <= 256)
                 return 256;
-            if (bytes <= kLargeBlock)
+            if (bytes <= kMediumGranule)
                 return std::bit_ceil(bytes);
+            if (bytes <= kLargeBlock)
+                return (bytes + kMediumGranule - 1) / kMediumGranule * kMediumGranule;
             return (bytes + kLargeGranule - 1) / kLargeGranule * kLargeGranule;
         }
 
@@ -118,9 +125,10 @@ namespace lfs::core::internal::metal {
             [residency_ addAllocation:frame.params];
             frames_.push_back(std::move(frame));
         }
-        // The cache holds at most a sixteenth of the process budget; the rest
-        // goes back to the system as its last batch completes.
-        cache_limit_ = static_cast<size_t>(device_.recommendedMaxWorkingSetSize) / 16;
+        // A fixed ceiling prevents large unified-memory machines from retaining
+        // several GiB of one-shot load/refinement buffers.
+        cache_limit_ = std::min(static_cast<size_t>(device_.recommendedMaxWorkingSetSize) / 16,
+                                size_t{128} << 20);
         [residency_ commit];
         [queue_ addResidencySet:residency_];
         context_id_ = next_context_id.fetch_add(1);
@@ -209,7 +217,9 @@ namespace lfs::core::internal::metal {
             [arguments_ setAddress:params.gpuAddress + params_used_ atIndex:slot];
             params_used_ += (dispatch.params.size() + kParamsAlignment - 1) / kParamsAlignment * kParamsAlignment;
         }
-        if (dispatch.group_size.width == 0) {
+        if (dispatch.indirect != 0) {
+            [encoder dispatchThreadgroupsWithIndirectBuffer:dispatch.indirect threadsPerThreadgroup:dispatch.group_size];
+        } else if (dispatch.group_size.width == 0) {
             const NSUInteger width = std::min(dispatch.pipeline.maxTotalThreadsPerThreadgroup, kThreadgroupWidth);
             [encoder dispatchThreads:dispatch.grid threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
         } else {
@@ -489,6 +499,9 @@ namespace lfs::core::internal::metal {
 
     StorageRef Context::allocate(const size_t bytes, const bool host_writable) {
         const size_t capacity = size_class(bytes);
+        const auto scoped_label = current_tensor_label();
+        const auto allocation_label =
+            scoped_label.empty() ? std::string_view{"tensor.storage"} : scoped_label;
         std::lock_guard lock(memory_mutex_);
         Block block;
         // Large requests vary in size, so they also take a cached block up to a
@@ -542,6 +555,7 @@ namespace lfs::core::internal::metal {
             };
         }
         block.meta->pending_value.store(block.guard, std::memory_order_relaxed);
+        block.requested = bytes;
         const StorageRef storage{
             .backend = GpuBackend::Metal,
             .data = reinterpret_cast<void*>(block.address),
@@ -550,6 +564,17 @@ namespace lfs::core::internal::metal {
             .meta = block.meta.get(),
         };
         live_.emplace(block.address, std::move(block));
+        live_requested_bytes_ += bytes;
+        live_capacity_bytes_ += capacity;
+        peak_live_capacity_bytes_ = std::max(peak_live_capacity_bytes_, live_capacity_bytes_);
+        peak_reserved_bytes_ = std::max(peak_reserved_bytes_, live_capacity_bytes_ + cached_bytes_);
+        try {
+            lfs::diagnostics::VramProfiler::instance().recordAllocation(
+                storage.data, capacity, lfs::diagnostics::VramAllocationMethod::Metal,
+                allocation_label);
+        } catch (...) {
+            // Diagnostics must never make a tensor allocation fail.
+        }
         return storage;
     }
 
@@ -560,11 +585,24 @@ namespace lfs::core::internal::metal {
             return;
         Block block = std::move(found->second);
         live_.erase(found);
+        live_requested_bytes_ = block.requested > live_requested_bytes_
+                                    ? 0
+                                    : live_requested_bytes_ - block.requested;
+        live_capacity_bytes_ = block.capacity > live_capacity_bytes_
+                                   ? 0
+                                   : live_capacity_bytes_ - block.capacity;
+        try {
+            lfs::diagnostics::VramProfiler::instance().recordDeallocation(storage.data);
+        } catch (...) {
+            // Diagnostics must never make tensor storage teardown fail.
+        }
         block.guard = newest_serial_.load(std::memory_order_acquire);
+        block.requested = 0;
         cached_bytes_ += block.capacity;
+        peak_reserved_bytes_ = std::max(peak_reserved_bytes_, live_capacity_bytes_ + cached_bytes_);
         free_[block.capacity].push_back(std::move(block));
-        if (cached_bytes_ > cache_limit_)
-            evict_locked(cache_limit_);
+        if (trim_requested_ || cached_bytes_ > cache_limit_)
+            evict_locked(trim_requested_ ? 0 : cache_limit_);
     }
 
     // Returns cached blocks to the system, largest first, until at most limit
@@ -588,11 +626,16 @@ namespace lfs::core::internal::metal {
         }
         if (removed)
             [residency_ commit];
+        // If trim raced a tensor whose last GPU use still owns its handle,
+        // keep the request armed until at least one eligible release arrives.
+        if (trim_requested_ && cached_bytes_ == 0 && removed)
+            trim_requested_ = false;
     }
 
     void Context::trim() {
         flush();
         std::lock_guard lock(memory_mutex_);
+        trim_requested_ = true;
         evict_locked(0);
     }
 
@@ -607,6 +650,20 @@ namespace lfs::core::internal::metal {
         result.allocated_bytes = static_cast<size_t>(device_.currentAllocatedSize);
         result.free_bytes = result.total_bytes > result.allocated_bytes ? result.total_bytes - result.allocated_bytes : 0;
         result.device_id = 0;
+        {
+            std::lock_guard lock(memory_mutex_);
+            result.pool_used_current = live_capacity_bytes_;
+            result.pool_reserved_current = live_capacity_bytes_ + cached_bytes_;
+            result.pool_used_high = peak_live_capacity_bytes_;
+            result.pool_reserved_high = peak_reserved_bytes_;
+            lfs::diagnostics::VramProfiler::instance().updateMetalMemory(
+                result.allocated_bytes,
+                live_requested_bytes_,
+                live_capacity_bytes_,
+                cached_bytes_,
+                peak_live_capacity_bytes_,
+                peak_reserved_bytes_);
+        }
         return result;
     }
 
@@ -727,12 +784,13 @@ namespace lfs::core::internal {
             if (const auto context = metal::live_context()) {
                 // The working set is the process's budget of the unified memory.
                 const auto budget = static_cast<size_t>(context->device().recommendedMaxWorkingSetSize);
+                const auto memory = context->stats();
                 return GpuDeviceInfo{
                     .name = context->device().name.UTF8String,
                     .total_memory_bytes = budget,
                     .supports_process_memory_budget = true,
                     .process_memory_budget_bytes = budget,
-                    .process_memory_used_bytes = static_cast<size_t>(context->device().currentAllocatedSize),
+                    .process_memory_used_bytes = memory.allocated_bytes,
                 };
             }
         }
@@ -866,6 +924,14 @@ namespace lfs::core::internal::metal_queue {
         if (@available(macOS 26.0, *)) {
             const auto context = context_for(serial);
             return !context || context->ready(serial);
+        }
+        return true;
+    }
+
+    bool completed(const uint64_t serial) {
+        if (@available(macOS 26.0, *)) {
+            const auto context = context_for(serial);
+            return !context || context->completed() >= serial;
         }
         return true;
     }
