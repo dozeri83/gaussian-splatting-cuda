@@ -974,7 +974,7 @@ TEST(ArgumentParserTest, ConvertRejectsOutputSuffixThatConflictsWithFormat) {
         "LichtFeld-Studio", "convert", input_text.c_str(),
         "--format", "spz", "--output", output.c_str()};
 
-    const auto parsed = lfs::core::args::parse_args(
+    const auto parsed = lfs::io::args::parse_args(
         static_cast<int>(std::size(argv)), argv);
     ASSERT_FALSE(parsed);
     EXPECT_NE(parsed.error().find("extension"), std::string::npos);
@@ -992,7 +992,7 @@ TEST(ArgumentParserTest, Mesh2SplatRejectsOutputSuffixThatConflictsWithFormat) {
         "LichtFeld-Studio", "mesh2splat", input_text.c_str(),
         "--format", "spz", "--output", output.c_str()};
 
-    const auto parsed = lfs::core::args::parse_args(
+    const auto parsed = lfs::io::args::parse_args(
         static_cast<int>(std::size(argv)), argv);
     ASSERT_FALSE(parsed);
     EXPECT_NE(parsed.error().find("extension"), std::string::npos);
@@ -1847,7 +1847,7 @@ TEST(ArgumentParserTest, ResumeRejectsExplicitInitFile) {
         "--init",
         init_text.c_str(),
     };
-    auto parsed = lfs::core::args::parse_args_and_params(
+    auto parsed = lfs::io::args::parse_args_and_params(
         static_cast<int>(std::size(argv)), argv);
 
     ASSERT_FALSE(parsed.has_value());
