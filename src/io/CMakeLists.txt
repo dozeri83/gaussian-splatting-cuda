@@ -46,6 +46,9 @@ add_library(lfs_video STATIC
         video/video_encoder.hpp
         video/video_encoder.cpp
         video/video_reconstruction.cpp
+        include/io/media/media_probe.hpp
+        media_probe_ffmpeg.hpp
+        media_probe.cpp
         video_frame_extractor.hpp
         video_frame_extractor.cpp
         hdr_tonemap.hpp
@@ -84,8 +87,9 @@ target_include_directories(lfs_video SYSTEM PRIVATE
 )
 
 target_link_libraries(lfs_video
-        PRIVATE
+        PUBLIC
         lfs_core
+        PRIVATE
         PkgConfig::FFMPEG
         spdlog::spdlog
         nlohmann_json::nlohmann_json
