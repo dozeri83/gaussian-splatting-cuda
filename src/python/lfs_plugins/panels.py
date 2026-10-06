@@ -122,7 +122,7 @@ PANEL_SPECS = {
     ),
     "tiles3d": _PanelSpec(
         "lfs_plugins.tiles3d_panel", "Tiles3dPanel", "lfs.tiles3d", "3D Tiles Viewer Settings",
-        "FLOATING", 95, "rmlui/tiles3d_panel.rml", "CONTENT", (380, 0), has_poll=True, has_draw=True,
+        "FLOATING", 95, "rmlui/tiles3d_panel.rml", "FILL", (380, 520), has_poll=True, has_draw=True,
     ),
     "plugin_marketplace": _PanelSpec(
         "lfs_plugins.plugin_marketplace_panel", "PluginMarketplacePanel",
