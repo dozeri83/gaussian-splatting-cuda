@@ -423,11 +423,13 @@ def test_lazy_panel_metadata_matches_real_classes(panels_module):
     for spec_name, spec in module.PANEL_SPECS.items():
         real = getattr(import_module(spec.module_name), spec.class_name)
         lazy = registered[spec.class_name]
+        # Child panels inherit their parent's space and must not define one.
         if spec.parent:
             assert "space" not in lazy.__dict__
             assert "space" not in real.__dict__
-        assert [getattr(lazy, field, None) for field in fields] == [
-            getattr(real, field, None) for field in fields
+        checked = [field for field in fields if not (field == "space" and spec.parent)]
+        assert [getattr(lazy, field, None) for field in checked] == [
+            getattr(real, field, None) for field in checked
         ], spec_name
 
 

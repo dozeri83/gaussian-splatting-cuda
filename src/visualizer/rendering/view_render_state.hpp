@@ -21,11 +21,11 @@
 #include "view_source.hpp"
 #include "viewport_artifact_service.hpp"
 #include "viewport_draw_types.hpp"
+#include "viewport_frame_desc.hpp"
 #include "viewport_frame_lifecycle_service.hpp"
 #include "viewport_interaction_context.hpp"
 #include "viewport_overlay_service.hpp"
 #include "viewport_reference_state.hpp"
-#include "viewport_frame_desc.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -79,6 +79,8 @@ namespace lfs::vis {
         glm::vec3 last_navigation_translation_{0.0f};
         bool navigation_pose_valid_ = false;
         std::chrono::steady_clock::time_point camera_settle_deadline_{};
+        bool temporal_settle_pending_ = false;
+        std::chrono::steady_clock::time_point temporal_settle_deadline_{};
         std::atomic<DirtyMask> training_refresh_dirty_{0};
         std::atomic<double> training_preview_turn_ms_{0.0};
         int last_training_preview_iteration_ = -1;

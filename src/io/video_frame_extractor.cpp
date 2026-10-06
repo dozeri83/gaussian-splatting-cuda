@@ -8,6 +8,7 @@
 #include "core/path_utils.hpp"
 #include "hdr_libplacebo.hpp"
 #include "hdr_tonemap.hpp"
+#include "media_probe_ffmpeg.hpp"
 #if LFS_HAS_CUDA
 #include "nvcodec_image_loader.hpp"
 #include "video/color_convert.cuh"
@@ -81,38 +82,19 @@ namespace lfs::io {
             return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         }
 
-        [[nodiscard]] int findUsableHeaderVideoStream(const AVFormatContext* const context) {
-            if (!context)
-                return -1;
-
-            for (unsigned int i = 0; i < context->nb_streams; ++i) {
-                const AVStream* const stream = context->streams[i];
-                const AVCodecParameters* const parameters = stream ? stream->codecpar : nullptr;
-                if (parameters && parameters->codec_type == AVMEDIA_TYPE_VIDEO &&
-                    parameters->codec_id != AV_CODEC_ID_NONE && parameters->width > 0 &&
-                    parameters->height > 0) {
-                    return static_cast<int>(i);
-                }
-            }
-            return -1;
-        }
-
-        void discardNonVideoStreams(AVFormatContext* const context, const int video_stream_idx) {
-            if (!context)
-                return;
-
-            for (unsigned int i = 0; i < context->nb_streams; ++i)
-                context->streams[i]->discard = static_cast<int>(i) == video_stream_idx
-                                                   ? AVDISCARD_DEFAULT
-                                                   : AVDISCARD_ALL;
-        }
-
         [[nodiscard]] bool configureVideoToRgbColorimetry(
             SwsContext* context, const AVFrame* source,
             const AVColorSpace fallback_colorspace,
             const AVColorRange fallback_range) {
             if (!context || !source)
                 return false;
+            const auto* pixel_description = av_pix_fmt_desc_get(
+                static_cast<AVPixelFormat>(source->format));
+            // YUV matrices/ranges do not describe an RGB source. Applying them
+            // during RGB resize can change the colors even though no color-space
+            // conversion was requested.
+            if (pixel_description && (pixel_description->flags & AV_PIX_FMT_FLAG_RGB))
+                return true;
             const AVColorSpace colorspace = source->colorspace != AVCOL_SPC_UNSPECIFIED
                                                 ? source->colorspace
                                                 : fallback_colorspace;
@@ -864,37 +846,16 @@ namespace lfs::io {
                     return false;
                 }
 
-                // Frame extraction is video-only. Prefer the complete stream
-                // description already stored in container headers, avoiding a
-                // global probe of audio tracks which this workflow never uses.
-                int video_stream_idx = findUsableHeaderVideoStream(fmt_ctx);
+                const auto probe = media::detail::probeVideoStream(fmt_ctx);
+                const int video_stream_idx = probe.stream_index;
                 if (video_stream_idx < 0) {
-                    // Preserve compatibility with containers that need packet
-                    // probing to expose their video dimensions or codec.
-                    if (avformat_find_stream_info(fmt_ctx, nullptr) < 0) {
-                        error = "Failed to find stream info";
-                        avformat_close_input(&fmt_ctx);
-                        return false;
-                    }
-                    video_stream_idx = findUsableHeaderVideoStream(fmt_ctx);
-                }
-
-                if (video_stream_idx == -1) {
-                    error = "No video stream found";
+                    error = probe.ffmpeg_error < 0 ? "Failed to find stream info" : "No video stream found";
                     avformat_close_input(&fmt_ctx);
                     return false;
                 }
-
-                discardNonVideoStreams(fmt_ctx, video_stream_idx);
-
                 AVStream* video_stream = fmt_ctx->streams[video_stream_idx];
-                // Metadata may live in HEVC packets instead of the container
-                // header (notably PQ/HLG signalling). Probe only after every
-                // non-video stream is discarded, then rewind so decoding and
-                // frame selection remain deterministic.
-                if (avformat_find_stream_info(fmt_ctx, nullptr) < 0) {
+                if (!probe.metadata_complete)
                     LOG_WARN("Could not complete video-only stream metadata probe; some source metadata may be unavailable");
-                }
                 av_seek_frame(fmt_ctx, video_stream_idx, 0, AVSEEK_FLAG_BACKWARD);
                 const AVCodecID codec_id = video_stream->codecpar->codec_id;
                 int dv_profile = 0;
@@ -2453,6 +2414,18 @@ namespace lfs::io {
                 cleanup();
                 outcome_ = ExtractionOutcome::Cancelled;
                 error = e.what();
+                return false;
+            } catch (const std::filesystem::filesystem_error& e) {
+                cleanup();
+                // MSVC's what() can contain ACP-encoded paths and localized text.
+                // Build this public error from native paths instead of returning
+                // bytes that are invalid UTF-8 to the GUI or JSON consumers.
+                error = "Filesystem operation failed [" + std::string(e.code().category().name()) +
+                        ":" + std::to_string(e.code().value()) + "]";
+                if (!e.path1().empty())
+                    error += " " + lfs::core::path_to_utf8(e.path1());
+                if (!e.path2().empty())
+                    error += " -> " + lfs::core::path_to_utf8(e.path2());
                 return false;
             } catch (const std::exception& e) {
                 cleanup();

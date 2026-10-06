@@ -12,11 +12,12 @@
 #include "gui/rmlui/rml_tooltip.hpp"
 #include "gui/rmlui/rmlui_manager.hpp"
 #include "gui/status_bar_mining.hpp"
-#include "rendering/viewer_backend.hpp"
 #include "rendering/scene_upscaler_registry.hpp"
+#include "rendering/viewer_backend.hpp"
 #include "visualizer/rendering/rendering_types.hpp"
 #include "visualizer/visualizer.hpp"
 #include <RmlUi/Core/DataModelHandle.h>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -319,6 +320,7 @@ namespace lfs::vis::gui {
         std::future<GpuMemoryInfo> pending_gpu_mem_;
         std::chrono::steady_clock::time_point next_refresh_at_{};
         std::chrono::steady_clock::time_point next_gpu_refresh_at_{};
+        std::atomic_bool external_model_dirty_{false};
         bool model_dirty_ = true;
         bool model_animation_active_ = false;
         bool rml_animation_active_ = false;
