@@ -4,6 +4,7 @@
 #include "components/holdout_appearance.hpp"
 #include "components/ppisp.hpp"
 #include "core/image_io.hpp"
+#include "core/logger.hpp"
 #include "core/parameters.hpp"
 #include "core/scene.hpp"
 #include "core/tensor.hpp"
@@ -224,6 +225,10 @@ TEST(PPISPHoldoutAppearanceTest, DefaultsJsonCliAndProjectRoundTrip) {
         EXPECT_FALSE(params.validate().empty());
     }
     const auto data = std::filesystem::path(std::getenv("LFS_THIN_STRUCTURE_TEST_IMAGE")).parent_path().parent_path().string();
+    struct RestoreLogger {
+        lfs::core::LogLevel level = lfs::core::Logger::get().level();
+        ~RestoreLogger() { lfs::core::Logger::get().init(level); }
+    } restore_logger;
     for (const auto* mode : {"mean", "nearest", "invalid"}) {
         std::vector<std::string> args{"test", "--headless", "--train", "--data-path", data, "--output-path", output, "--log-file", "/dev/null", "--ppisp-holdout-appearance", mode};
         std::vector<const char*> argv;
