@@ -14,6 +14,7 @@
 #include "core/tensor_vulkan_interop.hpp"
 #include "python/python_runtime.hpp"
 
+#include <cmath>
 #include <cstring>
 #if LFS_HAS_CUDA
 #include <cuda_runtime.h>
@@ -89,7 +90,7 @@ namespace lfs::python {
                 r.bits = 8;
                 break;
             case DataType::Bool:
-                r.code = kDLUInt;
+                r.code = kDLBool;
                 r.bits = 8;
                 break;
             default: throw std::runtime_error("Unsupported dtype for DLPack");
@@ -110,6 +111,8 @@ namespace lfs::python {
                 return DataType::Int64;
             if (dt.code == kDLUInt && dt.bits == 8)
                 return DataType::UInt8;
+            if (dt.code == kDLBool && dt.bits == 8)
+                return DataType::Bool;
             throw std::runtime_error("Unsupported DLPack dtype");
         }
 
@@ -333,10 +336,21 @@ namespace lfs::python {
             return tensor_.item<int64_t>();
         } else if (tensor_.dtype() == DataType::UInt8 || tensor_.dtype() == DataType::Bool) {
             return static_cast<int64_t>(tensor_.item<unsigned char>());
-        } else if (tensor_.dtype() == DataType::Float16) {
-            return static_cast<int64_t>(tensor_.to(DataType::Float32).item<float>());
         }
-        return static_cast<int64_t>(tensor_.item<float>());
+        const float value = tensor_.dtype() == DataType::Float16
+                                ? tensor_.to(DataType::Float32).item<float>()
+                                : tensor_.item<float>();
+        if (std::isnan(value)) {
+            throw std::domain_error("cannot convert NaN to integer");
+        }
+        if (!std::isfinite(value)) {
+            throw std::overflow_error("cannot convert infinity to integer");
+        }
+        constexpr double int64_limit = 9223372036854775808.0;
+        if (static_cast<double>(value) < -int64_limit || static_cast<double>(value) >= int64_limit) {
+            throw std::overflow_error("floating-point value is outside the int64 range");
+        }
+        return static_cast<int64_t>(value);
     }
 
     bool PyTensor::item_bool() const {
@@ -353,6 +367,11 @@ namespace lfs::python {
     }
 
     nb::object PyTensor::numpy(bool copy) const {
+        if (!copy && tensor_.device() == Device::CPU && !tensor_.is_contiguous()) {
+            throw std::runtime_error(
+                "numpy(copy=False): non-contiguous CPU tensors cannot be exported without a copy; "
+                "call contiguous() or use copy=True");
+        }
         Tensor host = tensor_.device() == Device::GPU ? tensor_.cpu() : tensor_;
         Tensor cpu_tensor = host.is_contiguous() ? std::move(host) : host.contiguous();
 

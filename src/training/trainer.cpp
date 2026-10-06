@@ -2415,6 +2415,20 @@ namespace lfs::training {
                 params, lfs::core::default_gpu_backend(), training_loader_dependencies(params))) {
             return std::unexpected(*unavailable);
         }
+        if (params.optimization.bg_mode == lfs::core::param::BackgroundMode::Image) {
+            if (params.optimization.bg_image_path.empty()) {
+                return std::unexpected(
+                    "Image background mode requires a background image path");
+            }
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(
+                    params.optimization.bg_image_path, ec)) {
+                return std::unexpected(std::format(
+                    "Image background file does not exist or is not a regular file: '{}'",
+                    lfs::core::path_to_utf8(
+                        params.optimization.bg_image_path)));
+            }
+        }
 
         // Thread-safe initialization using mutex
         std::lock_guard<std::mutex> lock(init_mutex_);
@@ -2673,8 +2687,7 @@ namespace lfs::training {
 
             // Load background image if specified
             if (params.optimization.bg_mode == lfs::core::param::BackgroundMode::Image &&
-                !params.optimization.bg_image_path.empty() &&
-                std::filesystem::exists(params.optimization.bg_image_path)) {
+                !params.optimization.bg_image_path.empty()) {
                 try {
                     auto& loader = lfs::io::CacheLoader::getInstance();
                     lfs::io::LoadParams load_params{
@@ -2685,17 +2698,20 @@ namespace lfs::training {
                         bg_image_base_ = bg_image_base_.to(lfs::core::Device::GPU);
                     }
                     if (bg_image_base_.shape()[0] != 3) {
-                        LOG_WARN("Background image has {} channels, expected 3 (RGB)", bg_image_base_.shape()[0]);
-                        bg_image_base_ = {};
-                        params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                        return std::unexpected(std::format(
+                            "Image background must have 3 RGB channels (got {})",
+                            bg_image_base_.shape()[0]));
                     } else {
                         LOG_INFO("Background image: {} [{}x{}]",
                                  lfs::core::path_to_utf8(params.optimization.bg_image_path),
                                  bg_image_base_.shape()[2], bg_image_base_.shape()[1]);
                     }
                 } catch (const std::exception& e) {
-                    LOG_WARN("Failed to load background image: {}", e.what());
-                    params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                    return std::unexpected(std::format(
+                        "Failed to load image background '{}': {}",
+                        lfs::core::path_to_utf8(
+                            params.optimization.bg_image_path),
+                        e.what()));
                 }
             }
 
@@ -2801,9 +2817,20 @@ namespace lfs::training {
 
                 // Reload bg_image if checkpoint restored different settings
                 if (params_.optimization.bg_mode == lfs::core::param::BackgroundMode::Image &&
-                    !params_.optimization.bg_image_path.empty() &&
-                    std::filesystem::exists(params_.optimization.bg_image_path) &&
                     !bg_image_base_.is_valid()) {
+                    if (params_.optimization.bg_image_path.empty()) {
+                        return std::unexpected(
+                            "Image background mode restored from checkpoint without a path");
+                    }
+                    std::error_code bg_path_error;
+                    if (!std::filesystem::is_regular_file(
+                            params_.optimization.bg_image_path,
+                            bg_path_error)) {
+                        return std::unexpected(std::format(
+                            "Checkpoint image background file does not exist or is not a regular file: '{}'",
+                            lfs::core::path_to_utf8(
+                                params_.optimization.bg_image_path)));
+                    }
                     try {
                         auto& loader = lfs::io::CacheLoader::getInstance();
                         lfs::io::LoadParams load_params{.resize_factor = 1, .max_width = 0};
@@ -2812,17 +2839,20 @@ namespace lfs::training {
                             bg_image_base_ = bg_image_base_.to(lfs::core::Device::GPU);
                         }
                         if (bg_image_base_.shape()[0] != 3) {
-                            LOG_WARN("Background image has {} channels, expected 3", bg_image_base_.shape()[0]);
-                            bg_image_base_ = {};
-                            params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                            return std::unexpected(std::format(
+                                "Checkpoint image background must have 3 RGB channels (got {})",
+                                bg_image_base_.shape()[0]));
                         } else {
                             LOG_INFO("Background image from checkpoint: {} [{}x{}]",
                                      lfs::core::path_to_utf8(params_.optimization.bg_image_path),
                                      bg_image_base_.shape()[2], bg_image_base_.shape()[1]);
                         }
                     } catch (const std::exception& e) {
-                        LOG_WARN("Failed to load background image from checkpoint: {}", e.what());
-                        params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                        return std::unexpected(std::format(
+                            "Failed to load checkpoint image background '{}': {}",
+                            lfs::core::path_to_utf8(
+                                params_.optimization.bg_image_path),
+                            e.what()));
                     }
                 }
             }
@@ -4281,7 +4311,8 @@ namespace lfs::training {
                 return capture_project_snapshot_cpu_state(
                     *scene_, checkpoint_params,
                     captured_uuid, iteration,
-                    *cpu_state);
+                    *cpu_state, {},
+                    project_snapshot_payload_bindings_);
             },
         };
 
@@ -7872,6 +7903,20 @@ namespace lfs::training {
                                                             val_dataset_,
                                                             background_,
                                                             evaluation_image_loader.get());
+                        if (!metrics.valid) {
+                            auto error = lfs::make_error(lfs::ErrorInit{
+                                .code = lfs::ErrorCode::FailedPrecondition,
+                                .domain = lfs::ErrorDomain::Training,
+                                .user_message = "Evaluation produced no valid metrics.",
+                                .detail = std::format(
+                                    "Evaluation at iteration {} skipped every view or produced no valid metric values",
+                                    iter),
+                                .detection = LFS_SOURCE_SITE_CURRENT(),
+                            });
+                            LOG_ERROR("{}", lfs::format_for_developer(error));
+                            if (!deferred_evaluation_error_)
+                                deferred_evaluation_error_ = std::move(error);
+                        }
                         if (PerfBenchCollector::enabled() && metrics.valid) {
                             PerfBenchCollector::instance().set_psnr(metrics.psnr);
                         }
@@ -8127,6 +8172,8 @@ namespace lfs::training {
     }
 
     lfs::Status Trainer::train(std::stop_token stop_token) {
+        // A failed evaluation is reported by the run that recorded it.
+        deferred_evaluation_error_.reset();
         const std::uint64_t train_start_epoch = mutation_epoch_;
         StepPhase train_phase = StepPhase::AcquireData;
         const auto phase_name = [](const StepPhase phase) constexpr -> std::string_view {
@@ -8649,6 +8696,20 @@ namespace lfs::training {
                                                     val_dataset_,
                                                     background_,
                                                     evaluation_image_loader.get());
+                if (!metrics.valid) {
+                    auto error = lfs::make_error(lfs::ErrorInit{
+                        .code = lfs::ErrorCode::FailedPrecondition,
+                        .domain = lfs::ErrorDomain::Training,
+                        .user_message = "Evaluation produced no valid metrics.",
+                        .detail = std::format(
+                            "Evaluation at iteration {} skipped every view or produced no valid metric values",
+                            eval_iteration),
+                        .detection = LFS_SOURCE_SITE_CURRENT(),
+                    });
+                    LOG_ERROR("{}", lfs::format_for_developer(error));
+                    if (!deferred_evaluation_error_)
+                        deferred_evaluation_error_ = std::move(error);
+                }
                 if (PerfBenchCollector::enabled() && metrics.valid) {
                     PerfBenchCollector::instance().set_psnr(metrics.psnr);
                 }
@@ -8693,6 +8754,11 @@ namespace lfs::training {
                 .detail = std::format("Training failed: {}", e.what()),
                 .detection = LFS_SOURCE_SITE_CURRENT(),
             }));
+        }
+
+        if (deferred_evaluation_error_) {
+            append_terminal_error(std::move(*deferred_evaluation_error_));
+            deferred_evaluation_error_.reset();
         }
 
         train_phase = StepPhase::TerminalCleanup;
@@ -8956,6 +9022,13 @@ namespace lfs::training {
         TrainerProjectSavePolicy policy) {
         std::lock_guard lock(project_snapshot_mutex_);
         trainer_project_save_policy_ = policy;
+    }
+
+    void Trainer::set_project_snapshot_payload_bindings(
+        lfs::io::project::ScenePayloadBindings bindings) {
+        std::lock_guard lock(project_snapshot_mutex_);
+        project_snapshot_payload_bindings_ =
+            std::move(bindings);
     }
 
     Trainer::TrainerProjectSavePolicy
