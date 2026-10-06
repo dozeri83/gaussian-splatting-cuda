@@ -475,8 +475,8 @@ static float2 fast_shN_moment(const float grad, const float2 codes, const float4
     float m = mv.x;
     float v = mv.y;
     if (apply) {
-        m = beta1 * mv.x + (1.0f - beta1) * grad;
-        v = beta2 * mv.y + (1.0f - beta2) * grad * grad;
+        m = fma(beta1, mv.x, (1.0f - beta1) * grad);
+        v = fma(beta2, mv.y, ((1.0f - beta2) * grad) * grad);
         if (update)
             value -= fast_adam_delta(step, m, v, bc2_sqrt_rcp, eps);
     }

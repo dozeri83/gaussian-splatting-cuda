@@ -693,8 +693,9 @@ namespace fast_lfs::rasterization::kernels {
         float m = mv.x;
         float v = mv.y;
         if (apply_step) {
-            m = beta1 * mv.x + (1.0f - beta1) * grad;
-            v = beta2 * mv.y + (1.0f - beta2) * grad * grad;
+            // Fix contraction order across the two codec passes and backends.
+            m = fmaf(beta1, mv.x, __fmul_rn(1.0f - beta1, grad));
+            v = fmaf(beta2, mv.y, __fmul_rn(__fmul_rn(1.0f - beta2, grad), grad));
             if (update_param) {
                 const float denom = sqrtf(v) * bias_correction2_sqrt_rcp + eps;
                 pc -= row_step_size * m / denom;
@@ -852,6 +853,9 @@ namespace fast_lfs::rasterization::kernels {
                                p.sh_value_n_cells > 0;
         // IEEE f16 float4-swizzle (exportable GUI): bits==16, no bounds.
         const bool value_f16 = p.sh_value_bits == 16 && !value_q16;
+        // Both codec passes need the original coefficient for its regularizer.
+        // Defer floating-point value writes until the moments have been encoded.
+        const bool defer_value_write = fused_adam.sh_rest_reg_weight > 0.0f;
         const uint n_value_cells = value_q16 ? static_cast<uint>(p.sh_value_n_cells) : 0u;
 
         float row_step_size = p.step_size;
@@ -947,7 +951,7 @@ namespace fast_lfs::rasterization::kernels {
                     local_s_min = fminf(local_s_min, prim.y);
                     local_s_max = fmaxf(local_s_max, prim.y);
                 }
-                if (apply_step && active_slot) {
+                if (apply_step && active_slot && !defer_value_write) {
                     if (value_f16) {
                         const uint base = slot * 4u;
                         param_h[base + 0] = __float2half(pc.x);
@@ -991,7 +995,8 @@ namespace fast_lfs::rasterization::kernels {
                 float2 vb = (v_min > v_max) ? make_float2(0.0f, 0.0f)
                                             : make_float2(v_min, v_max);
                 sm_vbounds = vb;
-                *reinterpret_cast<float2*>(p.sh_value_bounds + 2 * bidx) = vb;
+                if (p.enabled)
+                    *reinterpret_cast<float2*>(p.sh_value_bounds + 2 * bidx) = vb;
             }
         }
         __syncthreads();
@@ -1010,8 +1015,8 @@ namespace fast_lfs::rasterization::kernels {
                 const bool active_slot = k < N_SLOTS;
                 const float4 gk = grad_source(primitive_idx, k, slot, active_slot);
                 float4 pc = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-                if (value_q16) {
-                    pc = load_shN_param_slot(true, false, param_u16, param_h, param4,
+                if (value_q16 || defer_value_write) {
+                    pc = load_shN_param_slot(value_q16, value_f16, param_u16, param_h, param4,
                                              primitive_idx, k, slot, n_value_cells, old_vmm);
                 }
 #pragma unroll
@@ -1032,6 +1037,14 @@ namespace fast_lfs::rasterization::kernels {
                         beta1, beta2, row_step_size, eps, p.bias_correction2_sqrt_rcp, pci);
                     C::encode_us(p.joint_packed, cell, prim.x, prim.y,
                                  new_mm.x, new_mm.z, inv_u_range, inv_s_range);
+                    if (c == 0)
+                        pc.x = pci;
+                    else if (c == 1)
+                        pc.y = pci;
+                    else if (c == 2)
+                        pc.z = pci;
+                    else
+                        pc.w = pci;
                     // Always re-encode under new block bounds (frozen/crop-damped too),
                     // matching joint-moment encode. apply_step only gates the Adam update.
                     if (value_q16) {
@@ -1041,6 +1054,17 @@ namespace fast_lfs::rasterization::kernels {
                                 primitive_idx, cell_lin, n_value_cells)] =
                                 VC::encode(pci, new_vmm.x, new_vmm.y);
                         }
+                    }
+                }
+                if (defer_value_write && apply_step && active_slot && !value_q16) {
+                    if (value_f16) {
+                        const uint base = slot * 4u;
+                        param_h[base + 0] = __float2half(pc.x);
+                        param_h[base + 1] = __float2half(pc.y);
+                        param_h[base + 2] = __float2half(pc.z);
+                        param_h[base + 3] = __float2half(pc.w);
+                    } else {
+                        param4[slot] = pc;
                     }
                 }
             }
