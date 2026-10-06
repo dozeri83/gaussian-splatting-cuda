@@ -145,12 +145,14 @@ namespace lfs::python {
             if (ndim == 0 || !arr.stride_ptr()) {
                 return true;
             }
+            for (size_t i = 0; i < ndim; ++i) {
+                if (arr.shape(i) == 0) {
+                    return true;
+                }
+            }
             int64_t expected = 1;
             for (size_t i = ndim; i-- > 0;) {
                 const int64_t extent = static_cast<int64_t>(arr.shape(i));
-                if (extent == 0) {
-                    return true;
-                }
                 // Extent-1 dims may carry arbitrary strides.
                 if (extent != 1 && arr.stride(i) != expected) {
                     return false;
@@ -776,11 +778,12 @@ namespace lfs::python {
                              .squeeze(static_cast<int>(current_dim));
             } else {
                 const auto info = parse_slice(nb::cast<nb::slice>(item), result.shape()[current_dim]);
-                if (info.step != 1) {
-                    throw std::runtime_error("Step != 1 not yet supported");
+                if (info.step < 0) {
+                    throw nb::value_error("negative slice steps are not supported by Tensor indexing");
                 }
                 result = result.slice(current_dim, static_cast<size_t>(info.start),
-                                      static_cast<size_t>(info.stop));
+                                      static_cast<size_t>(info.stop),
+                                      static_cast<size_t>(info.step));
                 ++current_dim;
             }
         }
@@ -835,6 +838,7 @@ namespace lfs::python {
                 while (source.ndim() > target.ndim() && source.shape()[0] == 1) {
                     source = source.squeeze(0);
                 }
+                source = source.broadcast_to(target.shape());
                 target.copy_from(source);
             }
         };
@@ -1715,6 +1719,9 @@ namespace lfs::python {
             std::vector<size_t> dims;
             dims.reserve(shape.size());
             for (auto d : shape) {
+                if (d < 0) {
+                    throw nb::value_error("Tensor shape contains a negative dimension");
+                }
                 dims.push_back(static_cast<size_t>(d));
             }
             return TensorShape(dims);
@@ -1751,10 +1758,7 @@ namespace lfs::python {
     PyTensor PyTensor::arange(float start, float end, float step,
                               const std::string& device,
                               const std::string& dtype) {
-        auto t = Tensor::arange(start, end, step);
-        if (device != "cuda" && device != "gpu") {
-            t = t.to(parse_device(device));
-        }
+        auto t = Tensor::arange(start, end, step, parse_device(device));
         if (dtype != "float32") {
             t = t.to(parse_dtype(dtype));
         }
