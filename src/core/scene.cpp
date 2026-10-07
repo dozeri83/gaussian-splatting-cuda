@@ -246,6 +246,14 @@ namespace lfs::core {
             ++camera_list_generation_;
         }
 
+        if (type == MutationType::NODE_ADDED ||
+            type == MutationType::NODE_REMOVED ||
+            type == MutationType::MODEL_CHANGED ||
+            type == MutationType::CLEARED) {
+            std::unique_lock lock(selection_mutex_);
+            selected_count_valid_ = false;
+        }
+
         switch (type) {
         case MutationType::TRANSFORM_CHANGED:
             invalidateTransformCache();
@@ -2218,6 +2226,9 @@ namespace lfs::core {
                 }
                 changed = true;
             }
+            if (changed) {
+                selected_count_valid_ = false;
+            }
         }
 
         if (changed) {
@@ -3067,6 +3078,35 @@ namespace lfs::core {
         return getSelectionMask(SelectionDomain::Splat);
     }
 
+    size_t Scene::selectedCount() const {
+        const size_t splat_capacity = currentSelectionCapacity(SelectionDomain::Splat);
+        const size_t point_cloud_capacity = currentSelectionCapacity(SelectionDomain::PointCloud);
+        std::unique_lock lock(selection_mutex_);
+
+        const auto matches_capacity = [](const std::shared_ptr<Tensor>& mask, const size_t capacity) {
+            return !mask || (mask->is_valid() && mask->ndim() == 1 && mask->numel() == capacity);
+        };
+        if (!matches_capacity(selection_mask_, splat_capacity) ||
+            !matches_capacity(point_cloud_selection_mask_, point_cloud_capacity)) {
+            selected_count_valid_ = false;
+        }
+
+        if (!selected_count_valid_) {
+            selected_count_ = 0;
+            if (selection_mask_ && selection_mask_->is_valid() && selection_mask_->ndim() == 1 &&
+                selection_mask_->numel() == splat_capacity) {
+                selected_count_ += selection_mask_->count_nonzero();
+            }
+            if (point_cloud_selection_mask_ && point_cloud_selection_mask_->is_valid() &&
+                point_cloud_selection_mask_->ndim() == 1 &&
+                point_cloud_selection_mask_->numel() == point_cloud_capacity) {
+                selected_count_ += point_cloud_selection_mask_->count_nonzero();
+            }
+            selected_count_valid_ = true;
+        }
+        return selected_count_;
+    }
+
     std::shared_ptr<lfs::core::Tensor> Scene::getSelectionMask(
         const SelectionDomain domain) const {
         const size_t expected_size =
@@ -3126,6 +3166,7 @@ namespace lfs::core {
                 selected_count = 0;
             }
             selected_count_ = selected_count;
+            selected_count_valid_ = true;
             selection_group_counts_dirty_ = true;
         }
         events::state::SelectionChanged{
@@ -3154,6 +3195,7 @@ namespace lfs::core {
                 count = 0;
             }
             selected_count_ = count;
+            selected_count_valid_ = true;
             selection_group_counts_dirty_ = true;
         }
         events::state::SelectionChanged{
@@ -3206,6 +3248,7 @@ namespace lfs::core {
             point_cloud_selection_mask_ = std::move(mask);
             has_point_cloud_selection_ =
                 point_cloud_selection_mask_ != nullptr;
+            selected_count_valid_ = false;
             selection_group_counts_dirty_ = true;
         }
         const int selection_count = static_cast<int>(
@@ -3234,6 +3277,7 @@ namespace lfs::core {
             has_selection_ = selection_mask_ != nullptr && has_selection;
             installed = has_selection_;
             selected_count_ = has_selection_ ? selected_count_hint : 0;
+            selected_count_valid_ = !has_selection_;
             selection_group_counts_dirty_ = has_selection_;
         }
         events::state::SelectionChanged{
@@ -3258,7 +3302,9 @@ namespace lfs::core {
             has_selection = has_selection_;
             if (!has_selection_) {
                 selection_mask_.reset();
+                selected_count_ = 0;
             }
+            selected_count_valid_ = true;
         }
         if (has_selection) {
             applySelectionGroupCounts(group_counts);
@@ -3284,6 +3330,7 @@ namespace lfs::core {
             has_selection_ = false;
             has_point_cloud_selection_ = false;
             selected_count_ = 0;
+            selected_count_valid_ = true;
         }
         clearSelectionGroupCounts();
         selection_group_counts_dirty_ = false;
@@ -3337,6 +3384,7 @@ namespace lfs::core {
                                   : nullptr;
             has_selection_ = has_selection;
             selected_count_ = 0;
+            selected_count_valid_ = true;
             selection_group_counts_dirty_ = false;
             if (has_selection_) {
                 selected_count_ = selection_mask_->count_nonzero();
@@ -3635,20 +3683,25 @@ namespace lfs::core {
 
         std::array<std::shared_ptr<lfs::core::Tensor>, 2>
             selection_masks;
+        bool has_valid_mask = false;
         {
             std::shared_lock lock(selection_mutex_);
             selection_masks = {
                 selection_mask_,
                 point_cloud_selection_mask_,
             };
-            if (std::ranges::none_of(
-                    selection_masks,
-                    [](const auto& mask) {
-                        return mask && mask->is_valid();
-                    })) {
-                selection_group_counts_dirty_ = false;
-                return;
+            has_valid_mask = std::ranges::any_of(
+                selection_masks,
+                [](const auto& mask) { return mask && mask->is_valid(); });
+        }
+        if (!has_valid_mask) {
+            {
+                std::unique_lock lock(selection_mutex_);
+                selected_count_ = 0;
+                selected_count_valid_ = true;
             }
+            selection_group_counts_dirty_ = false;
+            return;
         }
 
         for (const auto& selection_mask : selection_masks) {
@@ -3667,9 +3720,14 @@ namespace lfs::core {
                 }
             }
         }
-        selected_count_ = 0;
+        size_t selected_count = 0;
         for (const auto& group : selection_groups_) {
-            selected_count_ += group.count;
+            selected_count += group.count;
+        }
+        {
+            std::unique_lock lock(selection_mutex_);
+            selected_count_ = selected_count;
+            selected_count_valid_ = true;
         }
         selection_group_counts_dirty_ = false;
     }
@@ -3725,6 +3783,7 @@ namespace lfs::core {
                 point_cloud_selection_mask_ &&
                 point_cloud_selection_mask_->is_valid() &&
                 any_remaining[1];
+            selected_count_valid_ = false;
         }
 
         if (auto* group = findGroup(id)) {
@@ -3742,6 +3801,8 @@ namespace lfs::core {
             point_cloud_selection_mask_.reset();
             has_selection_ = false;
             has_point_cloud_selection_ = false;
+            selected_count_ = 0;
+            selected_count_valid_ = true;
         }
         selection_groups_.clear();
         next_group_id_ = 1;
@@ -4238,6 +4299,7 @@ namespace lfs::core {
         for (const auto& group : selection_groups_) {
             selected_count_ += group.count;
         }
+        selected_count_valid_ = true;
         selection_group_counts_dirty_ = false;
     }
 
@@ -4287,6 +4349,7 @@ namespace lfs::core {
         has_point_cloud_selection_ =
             staged->has_point_cloud_selection_;
         selected_count_ = staged->selected_count_;
+        selected_count_valid_ = false;
         ++selection_generation_;
         selection_group_counts_dirty_ =
             staged->selection_group_counts_dirty_;
@@ -4475,6 +4538,10 @@ namespace lfs::core {
                 has_point_cloud_selection_,
                 point_count);
             selection_group_counts_dirty_ = true;
+        }
+        {
+            std::unique_lock lock(selection_mutex_);
+            selected_count_valid_ = false;
         }
         return report;
     }
