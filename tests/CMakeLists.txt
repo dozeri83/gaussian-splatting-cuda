@@ -1125,6 +1125,7 @@ set(TEST_FILES
     test_python_io.cpp
     test_extended_unary_ops_vs_torch.cpp
     test_scene_validity.cpp
+    test_scene_bounds_cache.cpp
     test_training_scene_init_concurrency.cpp
     test_training_init_centering.cpp
     test_scene_consolidation.cpp
@@ -1237,6 +1238,7 @@ set(TEST_FILES
     test_startup_overlay_geometry.cpp
     test_vram_hud_geometry.cpp
     test_vram_hud_header_click.cpp
+    test_ui_visibility_transition.cpp
     test_menu_bar_title.cpp
     test_status_bar_mining.cpp
     test_rotated_sh_correctness.cpp

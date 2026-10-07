@@ -109,19 +109,6 @@ namespace lfs::python {
                 safe_normalize(glm::vec3(matrix[2]), {0.0f, 0.0f, 1.0f}));
         }
 
-        void mark_scene_transform_changed() {
-            if (auto* sm = get_scene_manager()) {
-                sm->getScene().notifyMutation(core::Scene::MutationType::MODEL_CHANGED);
-            }
-
-            auto* gm = get_gui_manager();
-            auto* viewer = gm ? gm->getViewer() : nullptr;
-            auto* rm = viewer ? viewer->getRenderingManager() : nullptr;
-            if (rm) {
-                rm->markDirty(vis::DirtyFlag::SPLATS | vis::DirtyFlag::MESH | vis::DirtyFlag::OVERLAY, lfs::vis::FrameReason::SceneChange);
-            }
-        }
-
         [[nodiscard]] bool callable_or_none(const nb::object& object) {
             return !object.is_valid() || object.is_none() || PyCallable_Check(object.ptr());
         }
@@ -598,7 +585,6 @@ namespace lfs::python {
                 } else {
                     sm->setNodeTransform(state_->target_node_name, state_->matrix);
                 }
-                mark_scene_transform_changed();
             }
         }
 

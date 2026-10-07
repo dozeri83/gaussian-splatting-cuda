@@ -12,8 +12,10 @@
 #include "rendering/point_cloud_vulkan_renderer.hpp"
 #include "window/vulkan_graphics_context.hpp"
 #endif
+#include "rendering/rendering_manager.hpp"
 #include "rendering/viewport_artifact_service.hpp"
 #include "scene/scene_manager.hpp"
+#include "screen/screen_service.hpp"
 #include "visualizer/app_store.hpp"
 
 #include <SDL3/SDL.h>
@@ -139,6 +141,28 @@ namespace {
             std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
     }
 #endif
+
+    TEST(AlignPanelOrthoScale, PanelZoomUsesEachViewsOwnSettings) {
+        using namespace lfs::vis;
+        screen::ScreenService source;
+        const auto first = source.screen().activeView();
+        const auto second = source.screen().split(first, screen::SplitAxis::Columns, 0.5f);
+        ASSERT_TRUE(second.valid());
+        RenderingManager renderer(source);
+        source.editViewSettings(first.value, [](ViewSettings& settings) {
+            settings.orthographic = true;
+            settings.ortho_scale = 100.0f;
+        });
+        source.editViewSettings(second.value, [](ViewSettings& settings) {
+            settings.orthographic = true;
+            settings.ortho_scale = 400.0f;
+        });
+        EXPECT_FLOAT_EQ(op::alignPanelOrthoScale(renderer, first.value), 100.0f);
+        EXPECT_FLOAT_EQ(op::alignPanelOrthoScale(renderer, second.value), 400.0f);
+        source.screen().setActiveView(second);
+        EXPECT_FLOAT_EQ(op::alignPanelOrthoScale(renderer, first.value), 100.0f);
+        EXPECT_FLOAT_EQ(op::alignPanelOrthoScale(renderer, renderer.activeViewId()), 400.0f);
+    }
 
     TEST(AlignEdgeToWorldX, IdentityUpMapsPositiveZEdgeToPlusX) {
         const glm::mat4 up(1.0f);

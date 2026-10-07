@@ -8,9 +8,14 @@
 #include "internal/viewport.hpp"
 #include "operator/operator.hpp"
 #include "rendering/rendering_types.hpp"
+#include "rendering/view_source.hpp"
 #include <glm/glm.hpp>
 #include <optional>
 #include <vector>
+
+namespace lfs::vis {
+    class RenderingManager;
+}
 
 namespace lfs::vis::op {
 
@@ -109,6 +114,9 @@ namespace lfs::vis::op {
     [[nodiscard]] LFS_VIS_API std::optional<glm::mat4> computeAlignTransform(const AlignTransformInputs& in);
 
     [[nodiscard]] LFS_VIS_API std::optional<glm::mat4> resolveAlignSnapTargetWorld(const SceneManager& scene);
+
+    // Orthographic zoom belongs to each view's settings.
+    [[nodiscard]] LFS_VIS_API float alignPanelOrthoScale(const RenderingManager& rendering, ViewId view);
 
     inline constexpr float kAlignMarkerWorldRadius = 0.05f;
     [[nodiscard]] float alignMarkerScreenRadius(const glm::vec3& world_pos,
