@@ -200,7 +200,18 @@ if(BUILD_TESTS)
         COMPUTE waveOps sharedReduce atomics narrowAndWide prepareIndirect markIndirect optionalInput variant)
     lfs_add_gpu_program(gpu_program_contracts program_features_variant SOURCE shaders/program_features.slang
         COMPUTE variant DEFINES LFS_FEATURE_VARIANT=5)
+    add_test(NAME GpuProgramCudaArchitectures COMMAND ${CMAKE_COMMAND}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_gpu_program_cuda.cmake")
     add_test(NAME GpuProgramContracts COMMAND gpu_program_contracts)
+    if(LFS_HAS_CUDA)
+        lfs_gpu_program_cuda_flags(_program_cuda_flags)
+    endif()
+    if(LFS_HAS_CUDA AND "${_program_cuda_flags}" MATCHES "sm_[0-9]")
+        # A driver capable of JIT-compiling PTX would otherwise hide missing SASS.
+        add_test(NAME GpuProgramNativeCodeContracts COMMAND gpu_program_contracts)
+        set_tests_properties(GpuProgramNativeCodeContracts PROPERTIES
+            ENVIRONMENT "CUDA_DISABLE_PTX_JIT=1" LABELS "tensor;gpu" TIMEOUT 120)
+    endif()
     set_tests_properties(GpuProgramContracts PROPERTIES LABELS "tensor;gpu" TIMEOUT 120)
     if(TARGET lfs_tensor_rasterizer)
         add_executable(tensor_rasterizer_contracts
@@ -2156,3 +2167,26 @@ foreach(_lfs_tensor_test_target IN ITEMS
         target_compile_definitions(${_lfs_tensor_test_target} PRIVATE LFS_TENSOR_PRIVATE_ACCESS)
     endif()
 endforeach()
+
+if(LFS_TENSOR_VULKAN AND BUILD_TESTS)
+    function(lfs_write_program_inventory)
+        get_property(reflections GLOBAL PROPERTY LFS_GPU_PROGRAM_REFLECTIONS)
+        string(REPLACE ";" "\n" reflections "${reflections}")
+        file(WRITE "${CMAKE_BINARY_DIR}/gpu_program_reflections.txt" "${reflections}\n")
+    endfunction()
+    cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL lfs_write_program_inventory)
+    add_executable(gpu_push_constant_contracts test_tensor_gpu_push_constants.cpp)
+    target_include_directories(gpu_push_constant_contracts PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_compile_definitions(gpu_push_constant_contracts PRIVATE LFS_TENSOR_PRIVATE_ACCESS=1
+        LFS_PROGRAM_INVENTORY="${CMAKE_BINARY_DIR}/gpu_program_reflections.txt")
+    target_link_libraries(gpu_push_constant_contracts PRIVATE lfs_core GTest::gtest_main Vulkan::Vulkan)
+    target_compile_features(gpu_push_constant_contracts PRIVATE cxx_std_23)
+    add_dependencies(gpu_push_constant_contracts lfs_shader_headers)
+
+    if(TARGET lfs_training_vulkan_shaders)
+        add_dependencies(gpu_push_constant_contracts lfs_training_vulkan_shaders)
+        target_compile_definitions(gpu_push_constant_contracts PRIVATE
+            LFS_TRAINING_MANIFEST_DIR="${CMAKE_BINARY_DIR}/lfs_training_spv")
+    endif()
+    add_test(NAME GpuPushConstantContracts COMMAND gpu_push_constant_contracts)
+endif()
