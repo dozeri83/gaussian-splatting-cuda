@@ -665,6 +665,7 @@ namespace lfs::core {
         auto* node = getMutableNode(name);
         if (!node || node->type != NodeType::POINTCLOUD || !point_cloud)
             return;
+        node->point_cloud_revision->fetch_add(1, std::memory_order_release);
         const auto count = point_cloud->size();
         const auto slices = capturePerNodeSelectionSlices(SelectionDomain::PointCloud);
         node->point_cloud = std::move(point_cloud);
@@ -674,6 +675,37 @@ namespace lfs::core {
         auto preserved = slices;
         preserved.erase(node->uuid);
         applyPerNodeSelectionSlices(SelectionDomain::PointCloud, preserved);
+    }
+
+    Scene::PointCloudRetirement Scene::publishNodePointCloud(
+        const Uuid& uuid, std::shared_ptr<PointCloud> point_cloud, const glm::vec3 centroid,
+        std::shared_ptr<PointCloud> merged) {
+        auto* node = getNodeByUuid(uuid);
+        if (!node || node->type != NodeType::POINTCLOUD || !point_cloud)
+            throw std::runtime_error("Point-cloud target no longer exists");
+        Transaction transaction(*this);
+        PointCloudRetirement previous;
+        previous.cloud = std::exchange(node->point_cloud, std::move(point_cloud));
+        node->point_cloud_revision->fetch_add(1, std::memory_order_release);
+        previous.evaluated = std::move(node->evaluated_point_cloud);
+        previous.merged = std::move(prepared_point_cloud_render_);
+        if (initial_point_cloud_ == previous.cloud)
+            initial_point_cloud_ = node->point_cloud;
+        node->gaussian_count.store(node->point_cloud->size(), std::memory_order_release);
+        node->centroid = centroid;
+        node->payload_hydration = PayloadHydrationState::Loaded;
+        {
+            std::unique_lock lock(selection_mutex_);
+            previous.selection = std::move(point_cloud_selection_mask_);
+            has_point_cloud_selection_ = false;
+            selection_group_counts_dirty_ = true;
+        }
+        point_cloud_modified_ = true;
+        notifyMutation(MutationType::SELECTION_CHANGED);
+        notifyMutation(MutationType::MODEL_CHANGED);
+        prepared_point_cloud_render_ = std::move(merged);
+        prepared_point_cloud_render_generation_ = renderGeneration();
+        return previous;
     }
 
     void Scene::replaceNodeMesh(const std::string& name, std::shared_ptr<MeshData> mesh) {
@@ -776,6 +808,8 @@ namespace lfs::core {
     }
 
     void Scene::clear(const bool internal_import) {
+        point_cloud_update_epoch_->fetch_add(1, std::memory_order_release);
+        prepared_point_cloud_render_.reset();
         if (!internal_import)
             events::state::SceneReplacing{.scene = this}.emit();
         Transaction txn(*this);
@@ -2544,28 +2578,30 @@ namespace lfs::core {
     }
 
     std::vector<std::shared_ptr<const lfs::core::Camera>> Scene::getVisibleCameras() const {
-        return getVisibleCamerasCached();
+        return *getVisibleCamerasCached();
     }
 
-    const std::vector<std::shared_ptr<const lfs::core::Camera>>&
+    std::shared_ptr<const std::vector<std::shared_ptr<const lfs::core::Camera>>>
     Scene::getVisibleCamerasCached() const {
-        if (cached_visible_cameras_valid_ &&
-            cached_visible_cameras_render_generation_ == render_generation_ &&
+        const std::uint64_t render_generation = render_generation_.load(std::memory_order_acquire);
+        std::lock_guard lock(camera_cache_mutex_);
+        if (cached_visible_cameras_ &&
+            cached_visible_cameras_render_generation_ == render_generation &&
             cached_visible_cameras_camera_list_generation_ == camera_list_generation_) {
             return cached_visible_cameras_;
         }
 
-        cached_visible_cameras_.clear();
-        cached_visible_cameras_.reserve(nodes_.size());
+        auto cameras = std::make_shared<std::vector<std::shared_ptr<const lfs::core::Camera>>>();
+        cameras->reserve(nodes_.size());
         for (const auto& node : nodes_) {
             if (node->type == NodeType::CAMERA && node->camera &&
                 isNodeEffectivelyVisible(node->id)) {
-                cached_visible_cameras_.push_back(node->camera);
+                cameras->push_back(node->camera);
             }
         }
-        cached_visible_cameras_render_generation_ = render_generation_;
+        cached_visible_cameras_ = std::move(cameras);
+        cached_visible_cameras_render_generation_ = render_generation;
         cached_visible_cameras_camera_list_generation_ = camera_list_generation_;
-        cached_visible_cameras_valid_ = true;
         return cached_visible_cameras_;
     }
 
@@ -4212,6 +4248,9 @@ namespace lfs::core {
         assert(!restore_staging_);
         assert(transaction_depth_ == 0);
 
+        point_cloud_update_epoch_->fetch_add(1, std::memory_order_release);
+        prepared_point_cloud_render_.swap(staged->prepared_point_cloud_render_);
+        std::swap(prepared_point_cloud_render_generation_, staged->prepared_point_cloud_render_generation_);
         // The restore swaps the entire node graph. Join the worker before the
         // old graph moves into the returned Scene, so a later destruction of
         // that graph cannot race reads from the target's captured inputs.
@@ -4810,6 +4849,11 @@ namespace lfs::core {
                         (src->shN_value_quantized() && src->shN_value_bounds().is_valid())
                             ? src->shN_value_bounds()
                             : lfs::core::Tensor{});
+                    if (src->lod_tree) {
+                        result->lod_tree =
+                            std::make_unique<lfs::core::SplatLodTree>(
+                                *src->lod_tree);
+                    }
                     return limit_degree(std::move(result));
                 }
 
@@ -5877,26 +5921,28 @@ namespace lfs::core {
     }
 
     std::vector<std::shared_ptr<lfs::core::Camera>> Scene::getAllCameras() const {
-        return getAllCamerasCached();
+        return *getAllCamerasCached();
     }
 
-    const std::vector<std::shared_ptr<lfs::core::Camera>>&
+    std::shared_ptr<const std::vector<std::shared_ptr<lfs::core::Camera>>>
     Scene::getAllCamerasCached() const {
-        if (cached_all_cameras_valid_ &&
-            cached_all_cameras_render_generation_ == render_generation_ &&
+        const std::uint64_t render_generation = render_generation_.load(std::memory_order_acquire);
+        std::lock_guard lock(camera_cache_mutex_);
+        if (cached_all_cameras_ &&
+            cached_all_cameras_render_generation_ == render_generation &&
             cached_all_cameras_camera_list_generation_ == camera_list_generation_) {
             return cached_all_cameras_;
         }
 
-        cached_all_cameras_.clear();
-        cached_all_cameras_.reserve(nodes_.size());
+        auto cameras = std::make_shared<std::vector<std::shared_ptr<lfs::core::Camera>>>();
+        cameras->reserve(nodes_.size());
         for (const auto& node : nodes_) {
             if (node->type == NodeType::CAMERA && node->camera)
-                cached_all_cameras_.push_back(node->camera);
+                cameras->push_back(node->camera);
         }
-        cached_all_cameras_render_generation_ = render_generation_;
+        cached_all_cameras_ = std::move(cameras);
+        cached_all_cameras_render_generation_ = render_generation;
         cached_all_cameras_camera_list_generation_ = camera_list_generation_;
-        cached_all_cameras_valid_ = true;
         return cached_all_cameras_;
     }
 

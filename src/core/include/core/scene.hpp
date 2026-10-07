@@ -157,6 +157,9 @@ namespace lfs::core {
 
         std::unique_ptr<lfs::core::SplatData> model;
         std::shared_ptr<lfs::core::PointCloud> point_cloud;
+        // Shared identity lets queued updates detect replacement without dereferencing a node.
+        std::shared_ptr<std::atomic<uint64_t>> point_cloud_revision =
+            std::make_shared<std::atomic<uint64_t>>(0);
         std::shared_ptr<lfs::core::MeshData> mesh;
         std::shared_ptr<lfs::core::SplatData> evaluated_model;
         std::shared_ptr<lfs::core::PointCloud> evaluated_point_cloud;
@@ -306,6 +309,17 @@ namespace lfs::core {
         void replaceNodeModel(const std::string& name, std::unique_ptr<lfs::core::SplatData> model);
         void replaceNodePointCloud(const std::string& name,
                                    std::shared_ptr<lfs::core::PointCloud> point_cloud);
+        // A prepared replacement: no uploads, reductions, or selection-mask copies.
+        // Returns the old payload and selection storage for retirement off the viewer.
+        struct PointCloudRetirement {
+            std::shared_ptr<PointCloud> cloud;
+            std::shared_ptr<PointCloud> evaluated;
+            std::shared_ptr<PointCloud> merged;
+            std::shared_ptr<Tensor> selection;
+        };
+        PointCloudRetirement publishNodePointCloud(
+            const Uuid& uuid, std::shared_ptr<PointCloud> point_cloud, glm::vec3 centroid,
+            std::shared_ptr<PointCloud> merged = {});
         void replaceNodeMesh(const std::string& name,
                              std::shared_ptr<lfs::core::MeshData> mesh);
         // Swap a node's model in place, returning the previous model so the caller can
@@ -638,6 +652,10 @@ namespace lfs::core {
 
         void setPointCloudModified(bool modified) { point_cloud_modified_ = modified; }
         [[nodiscard]] bool isPointCloudModified() const { return point_cloud_modified_; }
+        [[nodiscard]] std::shared_ptr<std::atomic<uint64_t>> pointCloudUpdateEpoch() const { return point_cloud_update_epoch_; }
+        [[nodiscard]] std::shared_ptr<PointCloud> preparedPointCloudRender() const {
+            return prepared_point_cloud_render_generation_ == renderGeneration() ? prepared_point_cloud_render_ : nullptr;
+        }
 
         [[nodiscard]] std::shared_ptr<lfs::core::PointCloud> getInitialPointCloud() const { return initial_point_cloud_; }
         [[nodiscard]] const lfs::core::Tensor& getSceneCenter() const { return scene_center_; }
@@ -647,7 +665,8 @@ namespace lfs::core {
 
         [[nodiscard]] std::shared_ptr<lfs::core::Camera> getCameraByUid(int uid);
         [[nodiscard]] std::vector<std::shared_ptr<lfs::core::Camera>> getAllCameras() const;
-        [[nodiscard]] const std::vector<std::shared_ptr<lfs::core::Camera>>&
+        // Immutable snapshot; the training thread and the UI read it concurrently.
+        [[nodiscard]] std::shared_ptr<const std::vector<std::shared_ptr<lfs::core::Camera>>>
         getAllCamerasCached() const;
         [[nodiscard]] std::uint64_t cameraListGeneration() const noexcept {
             return camera_list_generation_;
@@ -699,7 +718,8 @@ namespace lfs::core {
 
         std::vector<const SceneNode*> getVisibleNodes() const;
         [[nodiscard]] std::vector<std::shared_ptr<const lfs::core::Camera>> getVisibleCameras() const;
-        [[nodiscard]] const std::vector<std::shared_ptr<const lfs::core::Camera>>&
+        // Immutable snapshot; the training thread and the UI read it concurrently.
+        [[nodiscard]] std::shared_ptr<const std::vector<std::shared_ptr<const lfs::core::Camera>>>
         getVisibleCamerasCached() const;
         [[nodiscard]] std::vector<glm::mat4> getVisibleCameraSceneTransforms() const;
         [[nodiscard]] std::optional<glm::mat4> getCameraSceneTransformByUid(int uid) const;
@@ -806,14 +826,13 @@ namespace lfs::core {
 
         mutable std::vector<glm::mat4> cached_transforms_;
         mutable std::atomic<bool> transform_cache_valid_{false};
-        mutable std::vector<std::shared_ptr<const lfs::core::Camera>> cached_visible_cameras_;
+        mutable std::mutex camera_cache_mutex_;
+        mutable std::shared_ptr<const std::vector<std::shared_ptr<const lfs::core::Camera>>> cached_visible_cameras_;
         mutable uint64_t cached_visible_cameras_render_generation_ = 0;
         mutable uint64_t cached_visible_cameras_camera_list_generation_ = 0;
-        mutable bool cached_visible_cameras_valid_ = false;
-        mutable std::vector<std::shared_ptr<lfs::core::Camera>> cached_all_cameras_;
+        mutable std::shared_ptr<const std::vector<std::shared_ptr<lfs::core::Camera>>> cached_all_cameras_;
         mutable uint64_t cached_all_cameras_render_generation_ = 0;
         mutable uint64_t cached_all_cameras_camera_list_generation_ = 0;
-        mutable bool cached_all_cameras_valid_ = false;
         mutable bool consolidated_ = false;
         mutable std::vector<ConsolidatedNodeSlot> consolidated_node_slots_;
         mutable uint64_t consolidated_generation_ = 0;
@@ -901,7 +920,10 @@ namespace lfs::core {
         glm::vec3 training_data_origin_{0.0f};
         lfs::core::Tensor scene_center_;
         bool images_have_alpha_ = false;
+        std::shared_ptr<std::atomic<uint64_t>> point_cloud_update_epoch_ = std::make_shared<std::atomic<uint64_t>>(0);
         bool point_cloud_modified_ = false;
+        std::shared_ptr<PointCloud> prepared_point_cloud_render_;
+        uint64_t prepared_point_cloud_render_generation_ = 0;
         Uuid training_model_uuid_;
         // Derived display label retained for additive name-based APIs. UUID is
         // the sole authority for resolving the training node.

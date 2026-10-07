@@ -22,6 +22,7 @@
 #include "project/session_state.hpp"
 #include "rendering/rendering.hpp"
 #include "rendering/rendering_manager.hpp"
+#include "scene/point_cloud_updates.hpp"
 #include "scene/scene_manager.hpp"
 #include "screen/screen_service.hpp"
 #include "tools/tool_base.hpp"
@@ -85,6 +86,7 @@ namespace lfs::vis {
         [[nodiscard]] const core::Scene& getScene() const {
             return scene_manager_->getScene();
         }
+        std::shared_ptr<PointCloudUpdateManager> pointCloudUpdates() override { return std::atomic_load(&point_cloud_updates_); }
         bool postWork(WorkItem work) override;
         bool pumpPostedWorkForProjectWrite() override;
         bool postRenderWork(WorkItem work);
@@ -496,6 +498,8 @@ namespace lfs::vis {
         friend class DatasetEmbedIntegrationTest_CreateLoadDeferredDatasetEmbedCompletes_Test;
         friend class DatasetEmbedIntegrationTest_ProjectInfoReportsLiveDatasetBeforeFirstSave_Test;
         friend class VisualizerImplResetTest_SplatDropOntoTitledDatasetProjectStartsUntitledSessionAndKeepsProjectFile_Test;
+        friend class VisualizerImplResetTest_DroppedProjectReplacesCurrentDuringHydration_Test;
+        friend class VisualizerImplResetTest_DroppedProjectReplacesCurrentAfterHydration_Test;
         friend class VisualizerImplResetTest_SplatAddOntoSplatSceneKeepsTitledProject_Test;
         friend class VisualizerImplResetTest_PreTrainingProjectSaveRestoresCameraEnabledAndHidden_Test;
         friend class VisualizerImplResetTest_PostTrainingProjectSaveRestoresCameraEnabledAndHidden_Test;
@@ -695,6 +699,7 @@ namespace lfs::vis {
         EditorContext editor_context_;
 
         mutable std::mutex work_queue_mutex_;
+        std::shared_ptr<PointCloudUpdateManager> point_cloud_updates_;
         std::vector<WorkItem> work_queue_;
         std::vector<WorkItem> render_work_queue_;
         std::thread::id viewer_thread_id_;
