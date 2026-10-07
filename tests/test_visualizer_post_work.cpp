@@ -92,6 +92,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <span>
 #include <sstream>
 #include <utility>
@@ -1940,7 +1941,7 @@ contract["test_selection_submode_follows_native_mode"](lf)
         gui->ui_visibility_target_hidden_ = true;
         gui->ui_visibility_target_layout_.pos = {0.0f, 0.0f};
         gui->ui_visibility_target_layout_.size = {960.0f, 540.0f};
-        gui->interactive_transition_guard_until_ =
+        gui->ui_visibility_deadline_ =
             std::chrono::steady_clock::now() - std::chrono::milliseconds(1);
         rendering->setViewportResizeActive(
             true, ViewportResizeRenderPolicy::FullResolution);
@@ -2046,6 +2047,23 @@ contract["test_selection_submode_follows_native_mode"](lf)
         EXPECT_FALSE(static_cast<bool>(cropbox->visible));
         EXPECT_EQ(registry.getActiveTool(), "builtin.translate");
         registry.setActiveTool("");
+    }
+
+    // Catches select-all taking the Gaussian path for every tool: outside the Select tool
+    // Ctrl+A selects every model.
+    TEST_F(VisualizerImplResetTest, SelectAllOutsideTheSelectToolSelectsEveryModel) {
+        VisualizerImpl viewer(projectOptions());
+        auto& scene = viewer.getScene();
+        auto* const scene_manager = viewer.getSceneManager();
+        ASSERT_NE(scene.addSplat("first", lfs::test::licht::make_splat(2)), lfs::core::NULL_NODE);
+        ASSERT_NE(scene.addSplat("second", lfs::test::licht::make_splat(2)), lfs::core::NULL_NODE);
+        scene_manager->initSelectionService();
+        lfs::core::events::tools::SetToolbarTool{.tool_mode = static_cast<int>(ToolType::None)}.emit();
+
+        lfs::core::events::cmd::SelectAll{}.emit();
+        const auto selected = scene_manager->getSelectedNodeNames();
+        EXPECT_EQ(std::set<std::string>(selected.begin(), selected.end()),
+                  (std::set<std::string>{"first", "second"}));
     }
 
     TEST_F(VisualizerImplResetTest,

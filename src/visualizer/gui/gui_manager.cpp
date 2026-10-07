@@ -1112,6 +1112,7 @@ namespace lfs::vis::gui {
             const RenderSettings& settings,
             const glm::vec3& world_a,
             const glm::vec3& world_b) {
+            const float ortho_scale = settings.ortho_scale;
             if (settings.equirectangular) {
                 const glm::mat3 rotation = guide_view.viewport->getRotationMatrix();
                 const glm::vec3 translation = guide_view.viewport->getTranslation();
@@ -1180,11 +1181,11 @@ namespace lfs::vis::gui {
                 const float cx = width * 0.5f;
                 const float cy = height * 0.5f;
                 if (settings.orthographic) {
-                    if (!std::isfinite(settings.ortho_scale) || settings.ortho_scale <= 0.0f) {
+                    if (!std::isfinite(ortho_scale) || ortho_scale <= 0.0f) {
                         return std::nullopt;
                     }
-                    return glm::vec2(cx + view.x * settings.ortho_scale,
-                                     cy - view.y * settings.ortho_scale);
+                    return glm::vec2(cx + view.x * ortho_scale,
+                                     cy - view.y * ortho_scale);
                 }
                 const auto [fx, fy] = lfs::rendering::computePixelFocalLengths(
                     guide_view.render_size, settings.focal_length_mm);
@@ -2581,7 +2582,6 @@ namespace lfs::vis::gui {
             hashCombine(hash, hashFloat(settings.focal_length_mm));
             hashCombine(hash, settings.orthographic);
             hashCombine(hash, settings.equirectangular);
-            hashCombine(hash, hashFloat(settings.ortho_scale));
             for (int i = 0; i < 3; ++i) {
                 hashCombine(hash, hashFloat(settings.train_camera_color[i]));
                 hashCombine(hash, hashFloat(settings.eval_camera_color[i]));
@@ -2822,6 +2822,12 @@ namespace lfs::vis::gui {
                 if (!guide_view.valid())
                     continue;
                 hashCombine(key.view_projection_hash, hashViewportPose(*guide_view.viewport));
+                if (settings.orthographic && !settings.equirectangular) {
+                    // Quantize relative scale so tiny valid overrides still track meaningful zoom.
+                    const float ortho_scale = settings.ortho_scale;
+                    hashCombine(key.view_projection_hash,
+                                hashQuantizedFloat(std::log2(ortho_scale), 1.0e-5f));
+                }
                 // The overlay is rasterized in screen space. Quantizing layout
                 // values removes sub-pixel churn from repeated UI layout solves
                 // without hiding a meaningful viewport-size change.
@@ -2896,6 +2902,7 @@ namespace lfs::vis::gui {
                     const auto& guide_view = views[view_index];
                     if (!guide_view.valid())
                         continue;
+                    const float ortho_scale = settings.ortho_scale;
                     const glm::mat3 rotation = guide_view.viewport->getRotationMatrix();
                     const glm::vec3 translation = guide_view.viewport->getTranslation();
                     const glm::mat3 world_to_panel_rotation = glm::transpose(rotation);
@@ -2959,10 +2966,10 @@ namespace lfs::vis::gui {
                         }
                         if (!settings.equirectangular && center_view.z + radius < -1e-4f) {
                             if (settings.orthographic &&
-                                std::isfinite(settings.ortho_scale) && settings.ortho_scale > 0.0f) {
-                                const float projected_radius = radius * settings.ortho_scale;
-                                const float projected_x = cx + center_view.x * settings.ortho_scale;
-                                const float projected_y = cy - center_view.y * settings.ortho_scale;
+                                std::isfinite(ortho_scale) && ortho_scale > 0.0f) {
+                                const float projected_radius = radius * ortho_scale;
+                                const float projected_x = cx + center_view.x * ortho_scale;
+                                const float projected_y = cy - center_view.y * ortho_scale;
                                 if (projected_x + projected_radius < 0.0f ||
                                     projected_x - projected_radius > width ||
                                     projected_y + projected_radius < 0.0f ||
@@ -3007,8 +3014,8 @@ namespace lfs::vis::gui {
                                     break;
                                 }
                                 const glm::vec2 projected = settings.orthographic
-                                                                ? glm::vec2(cx + view.x * settings.ortho_scale,
-                                                                            cy - view.y * settings.ortho_scale)
+                                                                ? glm::vec2(cx + view.x * ortho_scale,
+                                                                            cy - view.y * ortho_scale)
                                                                 : glm::vec2(cx + view.x * fx / -view.z,
                                                                             cy - view.y * fy / -view.z);
                                 screen_points[corner] = renderToViewScreen(guide_view, projected);
@@ -3047,8 +3054,8 @@ namespace lfs::vis::gui {
                             .viewport_pos = guide_view.pos,
                             .viewport_size = guide_view.size,
                             .render_size = glm::vec2(guide_view.render_size),
-                            .focal_x = settings.orthographic ? settings.ortho_scale : fx,
-                            .focal_y = settings.orthographic ? settings.ortho_scale : fy,
+                            .focal_x = settings.orthographic ? ortho_scale : fx,
+                            .focal_y = settings.orthographic ? ortho_scale : fy,
                             .orthographic = settings.orthographic,
                             .equirectangular = settings.equirectangular,
                             .first_instance = first_instance,
@@ -5630,16 +5637,9 @@ namespace lfs::vis::gui {
             return;
         }
 
-        const auto now = std::chrono::steady_clock::now();
-        const auto cooldown_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                ui_toggle_next_allowed_at_ > now ? ui_toggle_next_allowed_at_ - now
-                                                 : std::chrono::steady_clock::duration::zero())
-                .count();
-        LOG_DEBUG("Request UI visibility transition: pending={}, ui_hidden={}, cooldown_remaining_ms={}",
+        LOG_DEBUG("Request UI visibility transition: pending={}, ui_hidden={}",
                   ui_toggle_pending_,
-                  ui_hidden_,
-                  cooldown_ms);
+                  ui_hidden_);
         if (ui_toggle_pending_) {
             wm->wakeEventLoop();
             return;
@@ -5650,7 +5650,7 @@ namespace lfs::vis::gui {
     }
 
     void GuiManager::updateUiVisibilityTransition() {
-        if (!ui_toggle_pending_) {
+        if (!ui_toggle_pending_ || ui_visibility_resize_active_) {
             return;
         }
 
@@ -5661,32 +5661,13 @@ namespace lfs::vis::gui {
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (now < ui_toggle_next_allowed_at_) {
-            return;
-        }
-
         ui_toggle_pending_ = false;
-        // This is a viewport-layout resize, not a window-mode transition. Keep
-        // training on the normal non-blocking viewer path: Vulkan work is still
-        // drained below and the renderer's resize contract quiesces/recreates its
-        // output without changing the training schedule.
-        beginInteractiveTransitionGuard(InteractiveTransitionTrainingPolicy::KeepRunning);
-        if (!drainGraphicsFramesForInteractiveTransition(*wm, "UI visibility")) {
-            ui_toggle_pending_ = true;
-            ui_toggle_next_allowed_at_ = now + kInteractiveTrainingToggleMinInterval;
-            LOG_WARN("UI visibility transition deferred after Vulkan drain failure: next_retry_ms={}, guard_kept_active=true, guard_remaining_ms={}",
-                     kInteractiveTrainingToggleMinInterval.count(),
-                     std::chrono::duration_cast<std::chrono::milliseconds>(
-                         interactive_transition_guard_until_ > std::chrono::steady_clock::now()
-                             ? interactive_transition_guard_until_ - std::chrono::steady_clock::now()
-                             : std::chrono::steady_clock::duration::zero())
-                         .count());
-            return;
-        }
-
-        auto* const trainer = viewer_ ? viewer_->getTrainerManager() : nullptr;
-        const bool training_active = trainer && trainer->isRunning();
+        // UI visibility only resizes renderer output. Each renderer already
+        // retires its image consumers before replacing that output, so do not
+        // drain all GUI frames or inherit fullscreen's training/cooldown guard.
+        ui_visibility_deadline_ = now + kInteractiveTransitionGuardDuration;
         ui_visibility_target_hidden_ = !ui_hidden_;
+        ui_visibility_target_ready_ = false;
         if (auto* const rendering = viewer_->getRenderingManager()) {
             // Hiding the editor chrome changes the viewport extent without an SDL
             // window-resize event. Retire cached output after the guarded layout
@@ -5712,6 +5693,11 @@ namespace lfs::vis::gui {
                     ui_visibility_target_layout_.size.x > 0.0f &&
                     ui_visibility_target_layout_.size.y > 0.0f;
             }
+            // Publishing a target extent alone does not request a scene frame.
+            // An idle viewer must render it immediately, before the GUI can
+            // atomically commit the new chrome layout and matching image.
+            rendering->markDirty(DirtyFlag::VIEWPORT, FrameReason::ViewportResize,
+                                 "ui_visibility");
         }
 
         if (!ui_visibility_target_ready_) {
@@ -5721,16 +5707,9 @@ namespace lfs::vis::gui {
             ui_visibility_layout_committed_ = true;
         }
 
-        applyInteractiveTransitionCooldown(ui_toggle_next_allowed_at_,
-                                           std::chrono::steady_clock::now(),
-                                           training_active);
-        LOG_DEBUG("UI visibility transition prepared: target_hidden={}, committed={}, training_active={}, next_allowed_in_ms={}",
+        LOG_DEBUG("UI visibility transition prepared: target_hidden={}, committed={}",
                   ui_visibility_target_hidden_,
-                  ui_visibility_layout_committed_,
-                  training_active,
-                  (training_active ? kInteractiveTrainingToggleMinInterval
-                                   : kInteractiveIdleToggleMinInterval)
-                      .count());
+                  ui_visibility_layout_committed_);
     }
 
     void GuiManager::queueFullscreenToggle() {
@@ -5871,6 +5850,19 @@ namespace lfs::vis::gui {
 
     void GuiManager::updateInteractiveTransitionGuard() {
         const auto now = std::chrono::steady_clock::now();
+        if (ui_visibility_resize_active_ &&
+            (ui_visibility_layout_committed_ || now >= ui_visibility_deadline_)) {
+            if (ui_visibility_target_ready_ && !ui_visibility_layout_committed_) {
+                // Preserve the user's request even if training cannot supply a
+                // matching frame before the independent UI resize deadline.
+                commitUiVisibilityTransition(false);
+            }
+            ui_visibility_resize_active_ = false;
+            ui_visibility_layout_committed_ = false;
+            if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr) {
+                rendering->setViewportResizeActive(false);
+            }
+        }
         if (interactive_transition_pause_pending_) {
             auto* const trainer = viewer_ ? viewer_->getTrainerManager() : nullptr;
             if (trainer && trainer->isRunning() && !trainer->isPaused()) {
@@ -5881,21 +5873,6 @@ namespace lfs::vis::gui {
         }
         if (now < interactive_transition_guard_until_) {
             return;
-        }
-
-        if (ui_visibility_resize_active_) {
-            if (ui_visibility_target_ready_ && !ui_visibility_layout_committed_) {
-                // Do not silently discard a user toggle if rendering cannot
-                // produce a matching frame before the guard expires. Commit the
-                // requested layout and let the still-dirty scene render replace
-                // the cached image on its next regular non-blocking frame.
-                commitUiVisibilityTransition(false);
-            }
-            ui_visibility_resize_active_ = false;
-            ui_visibility_layout_committed_ = false;
-            if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr) {
-                rendering->setViewportResizeActive(false);
-            }
         }
 
         endInteractiveTransitionGuard();
@@ -8321,8 +8298,7 @@ namespace lfs::vis::gui {
                 rendering->markDirty(DirtyFlag::OVERLAY, lfs::vis::FrameReason::Overlay);
             return true;
         }
-        const bool ui_toggle_due =
-            ui_toggle_pending_ && now >= ui_toggle_next_allowed_at_;
+        const bool ui_toggle_due = ui_toggle_pending_ || ui_visibility_resize_active_;
         const bool fullscreen_toggle_due =
             fullscreen_toggle_pending_ && now >= fullscreen_toggle_next_allowed_at_;
         if (ui_toggle_due || fullscreen_toggle_due || interactive_transition_resume_training_ ||
