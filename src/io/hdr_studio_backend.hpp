@@ -4,7 +4,8 @@
 
 #pragma once
 
-#include "hdr_tonemap.hpp"
+#include "core/export.hpp"
+#include "media/hdr_renderer.hpp"
 
 #include <memory>
 #include <string>
@@ -15,22 +16,16 @@ struct AVStream;
 
 namespace lfs::io {
 
-    struct HdrTonemapTiming {
-        double initialization_seconds = 0.0;
-        double render_seconds = 0.0;
-        double readback_seconds = 0.0;
-        double rgba_to_rgb_seconds = 0.0;
-    };
-
-    class HdrLibplaceboRenderer {
+    class HdrStudioRenderer final : public HdrRenderer {
     public:
-        HdrLibplaceboRenderer();
-        ~HdrLibplaceboRenderer();
+        HdrStudioRenderer();
+        ~HdrStudioRenderer();
 
-        HdrLibplaceboRenderer(const HdrLibplaceboRenderer&) = delete;
-        HdrLibplaceboRenderer& operator=(const HdrLibplaceboRenderer&) = delete;
+        HdrStudioRenderer(const HdrStudioRenderer&) = delete;
+        HdrStudioRenderer& operator=(const HdrStudioRenderer&) = delete;
 
         [[nodiscard]] bool isAvailable(std::string& error);
+        [[nodiscard]] std::string_view backendName() const noexcept override;
         [[nodiscard]] bool tonemapToSdr(const AVFrame* frame, const AVStream* stream,
                                         HdrFormat source_format,
                                         int output_width, int output_height,
