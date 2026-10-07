@@ -25,6 +25,7 @@ namespace lfs::vis {
         VulkanViewportPass pass;
         VulkanViewportPassParams params;
         GraphicsContext* graphics = nullptr;
+        std::array<std::shared_ptr<void>, 2> split_output_lifetimes;
     };
     namespace {
         VulkanViewportPassParams referenceParams(const ViewportFrameDesc& desc, ViewRenderState& view_state) {
@@ -374,6 +375,11 @@ namespace lfs::vis {
     }
     void ViewportReferenceRenderer::prepare(GraphicsContext& graphics, const ViewportFrameDesc& desc, ViewRenderState& view) {
         impl_->params = referenceParams(desc, view);
+        {
+            auto& state = vulkanViewRenderState(view);
+            std::lock_guard lock(state.mesh_frame_mutex);
+            impl_->split_output_lifetimes = state.mesh_frame.split_output_lifetimes;
+        }
         if (auto* context = vulkanContextOrNull(&graphics))
             impl_->pass.prepare(*context, impl_->params);
     }
@@ -445,6 +451,11 @@ namespace lfs::vis {
     void ViewportReferenceRenderer::prepareImport(GraphicsContext& graphics, const ViewportFrameDesc& desc,
                                                   ViewRenderState& view, ViewportReferenceRenderer* resident) {
         impl_->params = referenceParams(desc, view);
+        {
+            auto& state = vulkanViewRenderState(view);
+            std::lock_guard lock(state.mesh_frame_mutex);
+            impl_->split_output_lifetimes = state.mesh_frame.split_output_lifetimes;
+        }
         if (auto* context = vulkanContextOrNull(&graphics))
             impl_->pass.prepareImport(*context, impl_->params, resident ? &resident->impl_->pass : nullptr);
     }
