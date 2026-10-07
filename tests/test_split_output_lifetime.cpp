@@ -45,6 +45,24 @@ namespace lfs::vis {
             frame.split_output_lifetimes = {renderer.retainOutputImage(left.image.view), renderer.retainOutputImage(right.image.view)};
             auto published = frame;
 
+            // Measure the publication boundary with unchanged bindings. This
+            // matches the no-change path used on successive viewport updates.
+            std::vector<double> timings;
+            for (int repetition = 0; repetition < 9; ++repetition) {
+                const auto start = std::chrono::steady_clock::now();
+                for (int update = 0; update < 20000; ++update) {
+                    auto replacement = frame;
+                    replacement.split_output_lifetimes = {renderer.retainOutputImage(left.image.view), renderer.retainOutputImage(right.image.view)};
+                    published = std::move(replacement);
+                }
+                timings.push_back(std::chrono::duration<double, std::nano>(
+                                      std::chrono::steady_clock::now() - start)
+                                      .count() /
+                                  20000.0);
+            }
+            std::sort(timings.begin(), timings.end());
+            std::cout << "split publication median_ns=" << timings[timings.size() / 2] << '\n';
+
             // A successful panel resize releases its previous ring image. If
             // the other panel defers, the manager retains the published pair.
             // Prior GPU work is complete; this publication is a future reader.
