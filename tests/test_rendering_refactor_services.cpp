@@ -14,6 +14,7 @@
 #include "core/services.hpp"
 #include "core/tensor.hpp"
 #include "core/tensor_backend.hpp"
+#include "cuda_backend_test.hpp"
 #include "input/key_codes.hpp"
 #include "io/cache_image_loader.hpp"
 #include "operation/undo_history.hpp"
@@ -1657,9 +1658,11 @@ namespace lfs::vis {
         using lfs::core::MemoryPressureCoordinator;
         using lfs::core::Tensor;
 
-        if (!has_cuda_device()) {
+        // The allocator fault-injection hook is specific to CUDA device memory.
+        if (!has_cuda_device())
             GTEST_SKIP() << "CUDA device required";
-        }
+        const lfs::test::DefaultGpuBackendForTesting cuda_backend(lfs::core::GpuBackend::CUDA);
+        ASSERT_TRUE(cuda_backend.switched());
 
         lfs::vis::screen::ScreenService manager_views;
         RenderingManager manager{manager_views};

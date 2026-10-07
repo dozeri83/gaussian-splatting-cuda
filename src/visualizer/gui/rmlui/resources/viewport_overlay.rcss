@@ -974,7 +974,7 @@ body {
     visibility: hidden;
 }
 
-.viewport-gt-compare-spinner.spinning {
+.viewport-gt-compare-spinner.is-spinning {
     visibility: visible;
     animation: gt-compare-spin 0.8s linear-in infinite;
 }

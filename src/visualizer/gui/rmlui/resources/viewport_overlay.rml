@@ -622,7 +622,7 @@
                             data-class-disabled="!gt_compare_actual_size_available"
                             data-attrif-disabled="!gt_compare_actual_size_available"
                             data-attr-title="gt_compare_actual_size_tooltip"
-                            data-event-click="gt_compare_toggle_actual_size"><span>1:1</span><span class="viewport-gt-compare-spinner" data-class-spinning="gt_compare_actual_size_loading"></span></button>
+                            data-event-click="gt_compare_toggle_actual_size"><span>1:1</span><span class="viewport-gt-compare-spinner" data-class-is-spinning="gt_compare_actual_size_loading"></span></button>
                 </div>
             </div>
             <div class="viewport-gt-color-legend"

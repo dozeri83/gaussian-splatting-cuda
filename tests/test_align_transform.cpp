@@ -18,6 +18,7 @@
 
 #include <SDL3/SDL.h>
 #include <cmath>
+#include <cstdlib>
 #include <glm/gtc/matrix_transform.hpp>
 #include <gtest/gtest.h>
 #include <limits>
@@ -41,7 +42,7 @@ namespace {
     }
 
 #if LFS_GRAPHICS_VULKAN && !defined(LFS_TENSOR_METAL)
-    TEST(AlignDepth, VulkanPointCloudDepthMatchesSurfaceWithoutGaussians) {
+    void verifyPointCloudDepthWithoutGaussians() {
         lfs::vis::VulkanGraphicsContext graphics;
         ASSERT_TRUE(graphics.initializeHeadless());
         auto& context = graphics.vulkanContext();
@@ -130,6 +131,13 @@ namespace {
         }
     }
 
+    TEST(AlignDepth, VulkanPointCloudDepthMatchesSurfaceWithoutGaussians) {
+        // Device adoption must precede the first Vulkan tensor in the process.
+        GTEST_FLAG_SET(death_test_style, "threadsafe");
+        EXPECT_EXIT({
+            verifyPointCloudDepthWithoutGaussians();
+            std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
+    }
 #endif
 
     TEST(AlignEdgeToWorldX, IdentityUpMapsPositiveZEdgeToPlusX) {

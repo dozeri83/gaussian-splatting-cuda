@@ -487,9 +487,9 @@ TEST_F(FastGSKernelTest, OptimizerStateRunToRunDeterminismControl) {
         std::unique_ptr<SplatData> model;
         std::unique_ptr<AdamOptimizer> optimizer;
     };
-    // Several distinct visible primitives give each codec channel a meaningful
-    // interval. A single primitive can collapse an interval to one float ULP,
-    // making the five-code-step comparison measure rounding noise instead.
+    // Exercise distinct visible primitives independently of the fixture RNG.
+    // First-step normalized coordinates can still be nearly constant; the
+    // comparison accounts for the precision of their float representation.
     const size_t test_n = 8;
     std::vector<float> means, sh0, scaling, rotation, opacity, rest;
     for (size_t i = 0; i < test_n; ++i) {
