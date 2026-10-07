@@ -1593,6 +1593,7 @@ namespace lfs::vis {
         auto* const scene_manager = viewer.getSceneManager();
         ASSERT_NE(rendering, nullptr);
         ASSERT_NE(scene_manager, nullptr);
+        rendering->retainVisibleViews({rendering->activeViewId()});
         auto& scene = scene_manager->getScene();
         auto& ledger = rendering->frameDemandLedger();
 
