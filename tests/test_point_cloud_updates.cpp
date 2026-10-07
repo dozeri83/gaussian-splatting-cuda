@@ -402,9 +402,7 @@ TEST(PointCloudUpdates, RestoreKeepsPreparedViewGenerationWithItsPayload) {
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
 
-TEST(PointCloudUpdatesGpu, IndependentSnapshotAndRendererLeasesAvoidHostRoundtrip) {
-    if (!std::getenv("LFS_ASYNC_GPU_TESTS"))
-        GTEST_SKIP() << "Set LFS_ASYNC_GPU_TESTS=1 on a GPU host";
+static void verifyIndependentSnapshotAndRendererLeasesAvoidHostRoundtrip() {
     VulkanGraphicsContext graphics;
     ASSERT_TRUE(graphics.initializeHeadless());
     graphics.connectTensorBackend();
@@ -522,9 +520,19 @@ TEST(PointCloudUpdatesGpu, IndependentSnapshotAndRendererLeasesAvoidHostRoundtri
     manager.shutdown();
 }
 
-TEST(PointCloudUpdatesGpu, MillionPointUploadMeasurements) {
-    if (!std::getenv("LFS_ASYNC_GPU_BENCH"))
-        GTEST_SKIP() << "Set LFS_ASYNC_GPU_BENCH=1 for one-million and five-million point preparation measurements";
+TEST(PointCloudUpdatesGpu, IndependentSnapshotAndRendererLeasesAvoidHostRoundtrip) {
+    if (!std::getenv("LFS_ASYNC_GPU_TESTS"))
+        GTEST_SKIP() << "Set LFS_ASYNC_GPU_TESTS=1 on a GPU host";
+
+    // A shared Vulkan device must be adopted before any tensor creates one.
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT({
+        verifyIndependentSnapshotAndRendererLeasesAvoidHostRoundtrip();
+        std::cout.flush();
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
+}
+
+static void verifyMillionPointUploadMeasurements() {
     VulkanGraphicsContext graphics;
     ASSERT_TRUE(graphics.initializeHeadless());
     graphics.connectTensorBackend();
@@ -567,9 +575,19 @@ TEST(PointCloudUpdatesGpu, MillionPointUploadMeasurements) {
     manager.shutdown();
 }
 
-TEST(PointCloudUpdatesGpu, MergedViewPreservesNodeOrderAndEmptyReplacement) {
-    if (!std::getenv("LFS_ASYNC_GPU_TESTS"))
-        GTEST_SKIP() << "Set LFS_ASYNC_GPU_TESTS=1 on a GPU host";
+TEST(PointCloudUpdatesGpu, MillionPointUploadMeasurements) {
+    if (!std::getenv("LFS_ASYNC_GPU_BENCH"))
+        GTEST_SKIP() << "Set LFS_ASYNC_GPU_BENCH=1 for one-million and five-million point preparation measurements";
+
+    // A shared Vulkan device must be adopted before any tensor creates one.
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT({
+        verifyMillionPointUploadMeasurements();
+        std::cout.flush();
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
+}
+
+static void verifyMergedViewPreservesNodeOrderAndEmptyReplacement() {
     VulkanGraphicsContext graphics;
     ASSERT_TRUE(graphics.initializeHeadless());
     graphics.connectTensorBackend();
@@ -609,5 +627,17 @@ TEST(PointCloudUpdatesGpu, MergedViewPreservesNodeOrderAndEmptyReplacement) {
     ASSERT_EQ(points.size(0), 2);
     EXPECT_FLOAT_EQ(points.ptr<float>()[0], 1.0f);
     EXPECT_FLOAT_EQ(points.ptr<float>()[3], 3.0f);
+}
+
+TEST(PointCloudUpdatesGpu, MergedViewPreservesNodeOrderAndEmptyReplacement) {
+    if (!std::getenv("LFS_ASYNC_GPU_TESTS"))
+        GTEST_SKIP() << "Set LFS_ASYNC_GPU_TESTS=1 on a GPU host";
+
+    // A shared Vulkan device must be adopted before any tensor creates one.
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT({
+        verifyMergedViewPreservesNodeOrderAndEmptyReplacement();
+        std::cout.flush();
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
 }
 #endif
