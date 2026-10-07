@@ -304,7 +304,8 @@ endif()
 
 add_library(lfs_core SHARED ${CORE_SOURCES} ${TENSOR_SOURCES} shared_image_ops.cpp)
 include(${CMAKE_SOURCE_DIR}/cmake/GpuPrograms.cmake)
-target_sources(lfs_core PRIVATE tensor/tensor_vignette.cpp)
+target_sources(lfs_core PRIVATE tensor/tensor_vignette.cpp tensor/tensor_color.cpp)
+lfs_add_gpu_program(lfs_core rgb_to_yuv_program SOURCE tensor/programs/rgb_to_yuv.slang COMPUTE rgbToYuv420p DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tensor/programs/rgb_to_yuv_math.h")
 lfs_add_gpu_program(lfs_core vignette_program SOURCE tensor/programs/vignette.slang COMPUTE vignette)
 if(LFS_TENSOR_METAL)
     lfs_add_gpu_program(lfs_core image_warp_program

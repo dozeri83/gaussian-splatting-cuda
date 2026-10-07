@@ -2,12 +2,14 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-#include "video_player.hpp"
+#include "media/video_player.hpp"
 #include "core/include/core/logger.hpp"
 #include "core/path_utils.hpp"
+#include "decoded_video_frame_ffmpeg.hpp"
 #include "media/hdr_renderer.hpp"
 #include "media/hdr_tonemap.hpp"
 #include "media/media_probe_ffmpeg.hpp"
+#include "media_backends.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -15,9 +17,6 @@ extern "C" {
 #include <libavutil/display.h>
 #include <libavutil/dovi_meta.h>
 #include <libavutil/hwcontext.h>
-#if LFS_HAS_CUDA
-#include <libavutil/hwcontext_cuda.h>
-#endif
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
@@ -263,7 +262,9 @@ namespace lfs::io {
                 source_range_ = AVCOL_RANGE_MPEG;
 
 #if LFS_HAS_CUDA
-            const char* hw_decoder_name = getHwDecoderName(codec_id);
+            // A GPU host registers native media capabilities. CPU hosts do not
+            // initialize or probe a driver merely to show a preview.
+            const char* hw_decoder_name = media::detail::hasCudaVideoDecodeBackend() ? getHwDecoderName(codec_id) : nullptr;
 #else
             const char* hw_decoder_name = nullptr;
 #endif
@@ -497,6 +498,7 @@ namespace lfs::io {
             frame_duration_timestamp_ = 1;
             display_width_ = 0;
             display_height_ = 0;
+            display_buffer_.clear();
             display_gpu_rotation_ = false;
             playback_start_time_ = -1.0;
             eof_reached_ = false;
@@ -978,7 +980,12 @@ namespace lfs::io {
                 const bool swapped_dimensions = rotation == 90 || rotation == 270;
                 const int output_width = swapped_dimensions ? height_ : width_;
                 const int output_height = swapped_dimensions ? width_ : height_;
-                if (!hdr_renderer_->tonemapToSdrRgba(src_frame, fmt_ctx_->streams[video_stream_idx_],
+                auto described = media::detail::describeDecodedVideoFrame(src_frame, fmt_ctx_->streams[video_stream_idx_]);
+                if (!described) {
+                    setError(std::string(described.error().detail()));
+                    return false;
+                }
+                if (!hdr_renderer_->tonemapToSdrRgba(&*described,
                                                      hdr_format_,
                                                      output_width, output_height, rotation,
                                                      decoded_frame_.data, renderer_error)) {

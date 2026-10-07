@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# CPU reference tests share the root production modules. Only their preview
-# source disables hardware decode; Studio's lfs_video is compiled unchanged.
+# CPU reference tests share the root production modules. Preview selects
+# software decoding at runtime, using the same player implementation as Studio.
 get_filename_component(MEDIA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 get_directory_property(_media_test_definitions COMPILE_DEFINITIONS)
 list(FILTER _media_test_definitions EXCLUDE REGEX "^LFS_HAS_CUDA=")
@@ -12,14 +12,14 @@ set_directory_properties(PROPERTIES COMPILE_DEFINITIONS "${_media_test_definitio
 add_library(media_shared_core_bridge SHARED shared_core_bridge.cpp)
 target_link_libraries(media_shared_core_bridge PRIVATE lfs_error)
 set_target_properties(media_shared_core_bridge PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-add_executable(media_extraction_runner runner.cpp probe_unit_contracts.cpp frame_sink_contracts.cpp shared_core_contracts.cpp jpeg_backend_contracts.cpp
-    ${MEDIA_ROOT}/src/io/video_player.cpp)
+add_executable(media_extraction_runner runner.cpp probe_unit_contracts.cpp frame_sink_contracts.cpp shared_core_contracts.cpp jpeg_backend_contracts.cpp encode_session_contracts.cpp)
 set_target_properties(media_extraction_runner PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 target_compile_features(media_extraction_runner PRIVATE cxx_std_23)
 target_compile_definitions(media_extraction_runner PRIVATE LFS_HAS_CUDA=0)
 target_include_directories(media_extraction_runner PRIVATE
     ${MEDIA_ROOT}/src ${MEDIA_ROOT}/src/io)
-target_link_libraries(media_extraction_runner PRIVATE lfs_media lfs_image_codecs lfs_logger lfs_diagnostics media_shared_core_bridge)
+target_link_libraries(media_extraction_runner PRIVATE lfs_media lfs_image_codecs lfs_logger lfs_diagnostics media_shared_core_bridge ${FFMPEG_LIBRARIES})
+target_include_directories(media_extraction_runner SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS})
 if(MSVC)
     target_compile_options(media_extraction_runner PRIVATE /utf-8 /W4)
 endif()
