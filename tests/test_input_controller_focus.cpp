@@ -21,6 +21,7 @@
 #include "operator/operator_registry.hpp"
 #include "python/python_runtime.hpp"
 #include "rendering/coordinate_conventions.hpp"
+#include "rendering/gt_comparison_geometry.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
 #include "screen/screen_service.hpp"
@@ -1116,6 +1117,14 @@ namespace lfs::vis {
         core::events::cmd::ToggleSplitView{}.emit();
 
         EXPECT_FALSE(controller.isContinuousInputActive());
+    }
+
+    TEST_F(InputControllerFocusTest, GTImagePanConvertsTotalDragToPhysicalPixelsOnce) {
+        // These are already physical positions after WindowManager's scaling.
+        const auto displacement = detail::roundedPhysicalDrag({6.5, -7.0});
+        const glm::ivec2 origin = glm::ivec2(100, 200) - displacement;
+
+        EXPECT_EQ(origin, glm::ivec2(93, 207));
     }
 
     TEST_F(InputControllerFocusTest, FpvModeUsesInPlaceLookForPrimaryCameraDrag) {

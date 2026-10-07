@@ -1451,7 +1451,7 @@ namespace lfs::vis {
                     callback(event);
             }
         } listener_;
-        Rml::ObserverPtr<Rml::Element> handle_;
+        Rml::ObserverPtr<Rml::Element> handle_{nullptr};
         float delivered_x_ = 0;
         bool delivered_down_ = false;
 

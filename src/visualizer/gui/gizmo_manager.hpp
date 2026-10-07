@@ -60,8 +60,8 @@ namespace lfs::vis {
             void updateCropFlash();
             void deactivateAllTools();
             bool cancelActiveNodeTransformDrag();
-            void setSelectionSubMode(SelectionSubMode mode);
-            void setSelectionVolumeFromDrag(SelectionSubMode mode,
+            LFS_VIS_API void setSelectionSubMode(SelectionSubMode mode);
+            LFS_VIS_API void setSelectionVolumeFromDrag(SelectionSubMode mode,
                                             SelectionMode apply_mode,
                                             uint64_t source_generation,
                                             const glm::vec3& center_world,

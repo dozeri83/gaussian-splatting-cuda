@@ -31,6 +31,7 @@
 #include "operator/ops/depth_window_ops.hpp"
 #include "python/python_runtime.hpp"
 #include "rendering/coordinate_conventions.hpp"
+#include "rendering/gt_comparison_geometry.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
 #include "tools/align_tool.hpp"
@@ -454,7 +455,7 @@ namespace lfs::vis {
         });
 
         window_focus_lost_handler_id_ = internal::WindowFocusLost::when([this](const auto&) {
-            drag_mode_ = DragMode::None;
+            clearViewportDragState();
             clearSelectedCameraContextMenuGesture();
             press_selected_camera_frustum_ = false;
             pressed_camera_frustum_id_ = -1;
@@ -640,6 +641,7 @@ namespace lfs::vis {
     void InputController::onWindowFocusLost() {
         op::operators().cancelModalOperator();
         op::clearDepthWindowHover();
+        clearViewportDragState();
         if (auto* const scene_manager = services().sceneOrNull())
             scene_manager->modifierManager().cancelViewportMode();
         node_paint_dragging_ = false;
@@ -1055,6 +1057,22 @@ namespace lfs::vis {
             switch (bound_action) {
             case input::Action::CAMERA_PAN:
                 if (const auto interaction = resolvePanelInteraction(x, y); interaction && interaction->valid()) {
+                    const auto interaction_view = views_.viewId(*interaction->viewport);
+                    if (auto* const rendering = services().renderingOrNull();
+                        rendering && rendering->isGTComparisonActualSizeRequested(interaction_view) &&
+                        rendering->isGTComparisonActualSizeAvailable(
+                            services().sceneOrNull(), interaction_view)) {
+                        drag_mode_ = DragMode::GTImagePan;
+                        drag_view_ = rememberViewport(interaction->viewport);
+                        drag_button_ = button;
+                        gt_image_pan_start_mouse_ = {x, y};
+                        gt_image_pan_started_while_loading_ =
+                            !rendering->isGTComparisonActualSizeActive(drag_view_);
+                        gt_image_pan_start_origin_ =
+                            rendering->getGTComparisonCropOrigin(drag_view_);
+                        // WindowManager already routes framebuffer-space mouse positions.
+                        break;
+                    }
                     const int context_camera_id =
                         is_right_button && services().renderingOrNull()
                             ? services().renderingOrNull()->pickCameraFrustum(views_.viewAt(static_cast<float>(x), static_cast<float>(y)).id, glm::vec2(x, y))
@@ -1249,6 +1267,12 @@ namespace lfs::vis {
             }
 
             bool was_dragging = false;
+            if (drag_mode_ == DragMode::GTImagePan) {
+                if (button == drag_button_) {
+                    clearViewportDragState();
+                }
+                return;
+            }
             Viewport* released_viewport = dragViewport();
 
             if (drag_mode_ == DragMode::Pan) {
@@ -1644,6 +1668,19 @@ namespace lfs::vis {
         if (drag_mode_ != DragMode::None &&
             drag_mode_ != DragMode::Gizmo &&
             drag_mode_ != DragMode::Splitter) {
+            if (drag_mode_ == DragMode::GTImagePan) {
+                if (auto* const rendering = services().renderingOrNull()) {
+                    const auto drag = detail::roundedPhysicalDrag(
+                        current_pos - gt_image_pan_start_mouse_);
+                    if (gt_image_pan_started_while_loading_) {
+                        rendering->setGTComparisonCropOffsetFromCenter(-drag, drag_view_);
+                    } else {
+                        rendering->setGTComparisonCropOrigin(
+                            gt_image_pan_start_origin_ - drag, drag_view_);
+                    }
+                }
+                return;
+            }
             auto* const target_viewport = dragViewport() ? dragViewport() : &viewport();
 
             switch (drag_mode_) {
@@ -2581,6 +2618,10 @@ namespace lfs::vis {
             pressed_camera_frustum_modifiers_ = input::MODIFIER_NONE;
         }
 
+        if (drag_mode_ == DragMode::GTImagePan && drag_button_released) {
+            clearViewportDragState();
+        }
+
         if (drag_mode_ == DragMode::Rotate && drag_button_released) {
             drag_mode_ = DragMode::None;
             drag_button_ = -1;
@@ -3381,6 +3422,9 @@ namespace lfs::vis {
         drag_mode_ = DragMode::None;
         drag_button_ = -1;
         drag_view_ = kNoView;
+        gt_image_pan_start_mouse_ = {0.0, 0.0};
+        gt_image_pan_start_origin_ = {0, 0};
+        gt_image_pan_started_while_loading_ = false;
         pending_click_drag_ = {};
         forced_mouse_press_action_ = input::Action::NONE;
         is_node_rect_dragging_ = false;

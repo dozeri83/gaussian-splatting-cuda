@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "core/export.hpp"
+
 #include <RmlUi/Core/RenderInterface.h>
 
 #include "core/assert.hpp"
@@ -620,7 +622,7 @@ private:
     void StopPreviewWorkerPool() noexcept;
     void EnqueuePreviewWork(preview_work_t work);
     void QueueTextureForDeferredDeletion(texture_data_t* texture);
-    static async_preview_result_t DecodePreviewTexture(std::filesystem::path path,
+    LFS_VIS_API static async_preview_result_t DecodePreviewTexture(std::filesystem::path path,
                                                        int max_size,
                                                        bool embedded_project_preview);
 

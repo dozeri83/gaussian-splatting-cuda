@@ -113,7 +113,7 @@ endif()
 # Standalone tensor/training proofs must not pull in the Vulkan window or its
 # test harness when the core Vulkan backend is disabled.
 if(LFS_TENSOR_METAL AND BUILD_TESTS AND NOT LFS_TENSOR_VULKAN)
-    add_executable(metal_tensor_contracts test_tensor_metal.cpp test_tensor_restored.cpp)
+    add_executable(metal_tensor_contracts test_tensor_metal.cpp test_tensor_restored.cpp test_tensor_image_regions.cpp)
     target_compile_features(metal_tensor_contracts PRIVATE cxx_std_23)
     target_compile_definitions(metal_tensor_contracts PRIVATE LFS_TENSOR_PRIVATE_ACCESS)
     target_include_directories(metal_tensor_contracts PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -717,6 +717,7 @@ if(NOT LFS_HAS_CUDA)
         test_tensor_backend_semantics.cpp
         test_error_bus.cpp
         test_tensor_restored.cpp
+        test_tensor_image_regions.cpp
         test_nodes_core.cpp
         test_nodes_scene.cpp
         test_nodes_modifier_manager.cpp
@@ -866,6 +867,7 @@ set(TEST_FILES
     test_selection_ops.cpp
     test_tensor_point_ops.cpp
     test_tensor_restored.cpp
+    test_tensor_image_regions.cpp
     test_tensor_expression.cpp
     test_tensor_expression_cuda.cu
     test_tensor_warp_reduce.cpp
@@ -1263,6 +1265,7 @@ if(LFS_TENSOR_VULKAN)
         test_tensor_backend_parity.cpp
         test_tensor_backend_semantics.cpp
         test_tensor_restored.cpp
+        test_tensor_image_regions.cpp
         test_ply_vulkan_q16_bands.cpp
         test_viewer_vulkan_load.cpp
         test_headless_vulkan_device_selection.cpp
@@ -1733,6 +1736,7 @@ set(LFS_PYTHON_FAST_TESTS
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_dense_matching.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_export_panel.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_gizmo_context.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_gt_compare_controls.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_histogram_panel.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_http.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_import_dialog_panels.py
@@ -1937,6 +1941,18 @@ if(WIN32)
                 POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TORCH_DLL}"
                 "$<TARGET_FILE_DIR:${TEST_TARGET}>")
+        endforeach()
+        # Torch may bundle an older CUDA runtime with the same DLL filename.
+        # Match the toolkit used to build core (including diagnostics entry points).
+        file(GLOB _lfs_test_cuda_runtime_dlls
+            "${CUDAToolkit_BIN_DIR}/cudart64*.dll"
+            "${CUDAToolkit_BIN_DIR}/curand64*.dll"
+            "${CUDAToolkit_BIN_DIR}/x64/cudart64*.dll"
+            "${CUDAToolkit_BIN_DIR}/x64/curand64*.dll")
+        foreach(CUDA_DLL ${_lfs_test_cuda_runtime_dlls})
+            add_custom_command(TARGET ${TEST_TARGET} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CUDA_DLL}"
+                    "$<TARGET_FILE_DIR:${TEST_TARGET}>")
         endforeach()
         if(TARGET nvimgcodec)
             add_dependencies(${TEST_TARGET} nvimgcodec)
