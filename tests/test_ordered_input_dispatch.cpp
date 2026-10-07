@@ -1201,8 +1201,7 @@ namespace lfs::vis {
 
         gui::UIContext ui{.viewer = viewer_.get(), .editor = &viewer_->getEditorContext()};
         const gui::ViewportLayout layout{.view = viewer_->activeView().id, .pos = {0.0f, 0.0f}, .size = {400.0f, 300.0f}};
-        gui_->ui_hidden_ = true;
-        gui_->viewport_layout_ = layout;
+        setGizmoViewportLayout(layout);
         gizmo.updateToolState(ui, false);
         auto& frame = frameInput();
         const auto render_at = [&](const float x, const float y, const bool down, const bool clicked) {

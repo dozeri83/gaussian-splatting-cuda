@@ -4245,7 +4245,8 @@ namespace lfs::vis {
 
     TEST_F(RenderingManagerEventsTest, NodeSelectionRequestsOneRedrawWithoutAnimation) {
         SceneManager scene_manager;
-        RenderingManager manager;
+        screen::ScreenService manager_views;
+        RenderingManager manager{manager_views};
         services().set(&scene_manager);
         services().set(&manager);
         auto& scene = scene_manager.getScene();
