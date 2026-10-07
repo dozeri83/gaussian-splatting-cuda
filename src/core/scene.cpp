@@ -5817,6 +5817,12 @@ namespace lfs::core {
             training_model_node_.clear();
             return;
         }
+        if (node->model_streamed) {
+            LOG_WARN("Cannot set training model node: '{}' is a streamed model and cannot be trained", node->name);
+            training_model_uuid_ = {};
+            training_model_node_.clear();
+            return;
+        }
 
         training_model_uuid_ = uuid;
         training_model_node_ = node->name;
