@@ -654,8 +654,8 @@ namespace lfs::vis {
             ASSERT_TRUE(overlay.isLanguageSelectOpen());
             EXPECT_TRUE(overlay.content_dirty_);
         }
-        void setGizmoViewportLayout(const gui::ViewportLayout& layout) {
-            gui_->ui_hidden_ = true;
+        void setGizmoViewportLayout(const gui::ViewportLayout& layout, const bool hidden = true) {
+            gui_->ui_hidden_ = hidden;
             gui_->viewport_layout_ = layout;
         }
         bool startupVisible() { return gui_->startup_overlay_.isVisible(); }
@@ -1201,7 +1201,8 @@ namespace lfs::vis {
 
         gui::UIContext ui{.viewer = viewer_.get(), .editor = &viewer_->getEditorContext()};
         const gui::ViewportLayout layout{.view = viewer_->activeView().id, .pos = {0.0f, 0.0f}, .size = {400.0f, 300.0f}};
-        setGizmoViewportLayout(layout);
+        setGizmoViewportLayout(layout, false);
+        gui_->screenHost().layout({0.0f, 0.0f, 400.0f, 300.0f}, 1.0f);
         gizmo.updateToolState(ui, false);
         auto& frame = frameInput();
         const auto render_at = [&](const float x, const float y, const bool down, const bool clicked) {
@@ -1210,6 +1211,8 @@ namespace lfs::vis {
             frame.mouse_down[0] = down;
             frame.mouse_clicked[0] = clicked;
             frame.mouse_released[0] = false;
+            gui::beginTranslationGizmoFrame();
+            gui::guiFocusState().want_capture_mouse = false;
             gizmo.renderNodeTransformGizmo(ui, layout);
         };
 
