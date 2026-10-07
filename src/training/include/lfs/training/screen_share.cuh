@@ -100,7 +100,8 @@ namespace lfs::training {
 #ifdef __CUDACC__
     __host__ __device__
 #endif
-        inline float oversize_split_score(
+        inline float
+        oversize_split_score(
             const float error_score,
             const float max_share,
             const float limit) {
