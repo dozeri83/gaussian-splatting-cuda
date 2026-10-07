@@ -140,6 +140,7 @@ TEST(RenderedStructure, SupportedProjectResumeKeepsSupportAndFiniteLoss) {
     using namespace lfs::io::project;
     using namespace lfs::test::licht;
     for (const auto* path : {off, on}) {
+        SCOPED_TRACE(path);
         Scene scene;
         auto document = require_result(ProjectDocument::open(path));
         const auto hydration = require_result(document.hydrate(scene));
@@ -149,7 +150,9 @@ TEST(RenderedStructure, SupportedProjectResumeKeepsSupportAndFiniteLoss) {
         const auto iteration = hydration.checkpoint_header->iteration;
         ASSERT_GE(iteration, 700);
         auto params = *hydration.checkpoint_params;
+        ASSERT_EQ(params.optimization.opacity_decay_rendered_only, path == on);
         params.optimization.iterations = iteration + 25;
+        params.cli_iterations_set = true;
         params.optimization.enable_eval = false;
         params.save_project_at_iteration.reset();
         params.save_project_path.clear();
@@ -167,6 +170,9 @@ TEST(RenderedStructure, SupportedProjectResumeKeepsSupportAndFiniteLoss) {
         }
         const auto trained = trainer.train();
         ASSERT_TRUE(trained) << lfs::format_for_developer(trained.error());
+        EXPECT_EQ(trainer.get_current_iteration(), iteration + 25);
+        RecordProperty(path == on ? "enabled_resume_iteration" : "disabled_resume_iteration",
+                       trainer.get_current_iteration());
         EXPECT_TRUE(std::isfinite(trainer.get_current_loss()));
     }
 }
