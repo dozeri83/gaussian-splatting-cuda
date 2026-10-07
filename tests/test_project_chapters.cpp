@@ -12,10 +12,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -993,8 +993,7 @@ namespace {
                     const auto parsed = SceneGraphChapter::parse(candidate.dump());
                     ASSERT_FALSE(parsed);
                     EXPECT_EQ(parsed.error().code(), lfs::ErrorCode::DataLoss);
-                    EXPECT_NE(lfs::format_for_developer(parsed.error()).find(
-                                  std::string(calibration) + "." + dimension),
+                    EXPECT_NE(lfs::format_for_developer(parsed.error()).find(std::string(calibration) + "." + dimension),
                               std::string::npos);
                 };
                 for (const auto& invalid : std::vector<Json>{

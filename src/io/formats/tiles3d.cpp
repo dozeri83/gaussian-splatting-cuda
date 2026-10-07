@@ -161,7 +161,8 @@ namespace lfs::io {
                 return wgs84_to_ecef((r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5,
                                      (r[4] + r[5]) * 0.5);
             }
-            const char* key = volume.contains("box") ? "box" : volume.contains("sphere") ? "sphere" : nullptr;
+            const char* key = volume.contains("box") ? "box" : volume.contains("sphere") ? "sphere"
+                                                                                         : nullptr;
             if (!key)
                 return std::nullopt;
             const auto values = volume.at(key).get<std::vector<double>>();

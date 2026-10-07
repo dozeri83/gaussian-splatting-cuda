@@ -71,13 +71,13 @@ namespace lfs::core {
     LFS_CORE_API
 #endif
     Tensor resize_depth_prior(const Tensor& input, int output_h, int output_w,
-                                           cudaStream_t cuda_stream = nullptr);
+                              cudaStream_t cuda_stream = nullptr);
 #if LFS_HAS_CUDA
     LFS_CUDA_API
 #else
     LFS_CORE_API
 #endif
     Tensor resize_normal_prior(const Tensor& input, int output_h, int output_w,
-                                            cudaStream_t cuda_stream = nullptr);
+                               cudaStream_t cuda_stream = nullptr);
 
 } // namespace lfs::core

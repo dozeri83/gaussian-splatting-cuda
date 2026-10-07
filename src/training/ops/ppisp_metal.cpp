@@ -9,9 +9,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <type_traits>
 #include <format>
 #include <stdexcept>
+#include <type_traits>
 
 namespace lfs::training {
     namespace {

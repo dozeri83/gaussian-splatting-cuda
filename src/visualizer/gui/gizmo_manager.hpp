@@ -62,10 +62,10 @@ namespace lfs::vis {
             bool cancelActiveNodeTransformDrag();
             LFS_VIS_API void setSelectionSubMode(SelectionSubMode mode);
             LFS_VIS_API void setSelectionVolumeFromDrag(SelectionSubMode mode,
-                                            SelectionMode apply_mode,
-                                            uint64_t source_generation,
-                                            const glm::vec3& center_world,
-                                            float radius);
+                                                        SelectionMode apply_mode,
+                                                        uint64_t source_generation,
+                                                        const glm::vec3& center_world,
+                                                        float radius);
 
             [[nodiscard]] TransformSpace getTransformSpace() const { return transform_space_; }
             void setTransformSpace(TransformSpace space);

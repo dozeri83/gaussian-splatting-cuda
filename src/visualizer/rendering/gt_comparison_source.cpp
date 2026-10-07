@@ -1183,7 +1183,7 @@ namespace lfs::vis {
                             const double scale = std::min(1.0, static_cast<double>(preview.preview_max_dimension) /
                                                                    std::max(retained->size(1), retained->size(2)));
                             auto resized = resizeUInt8Preview(retained, {std::max(1, static_cast<int>(std::lround(retained->size(2) * scale))),
-                                                                        std::max(1, static_cast<int>(std::lround(retained->size(1) * scale)))});
+                                                                         std::max(1, static_cast<int>(std::lround(retained->size(1) * scale)))});
                             if (resized)
                                 gt_tensor = *resized;
                         } else {
