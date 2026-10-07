@@ -1202,6 +1202,7 @@ namespace lfs::vis {
         gui::UIContext ui{.viewer = viewer_.get(), .editor = &viewer_->getEditorContext()};
         const gui::ViewportLayout layout{.view = viewer_->activeView().id, .pos = {0.0f, 0.0f}, .size = {400.0f, 300.0f}};
         setGizmoViewportLayout(layout, false);
+        gui_->screenHost().init({.screens = &viewer_->screens(), .rml = &manager(), .scene_manager = &scene_manager});
         gui_->screenHost().layout({0.0f, 0.0f, 400.0f, 300.0f}, 1.0f);
         gizmo.updateToolState(ui, false);
         auto& frame = frameInput();
