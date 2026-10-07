@@ -37,13 +37,13 @@ namespace lfs::vis {
 
 namespace lfs::vis {
     namespace {
-#ifndef LFS_GRAPHICS_VULKAN
         lfs::Error outputError(std::string detail) {
             return lfs::make_error({.code = lfs::ErrorCode::Unavailable,
                                     .domain = lfs::ErrorDomain::Rendering,
                                     .detail = std::move(detail),
                                     .detection = LFS_SOURCE_SITE_CURRENT()});
         }
+#ifndef LFS_GRAPHICS_VULKAN
         lfs::Result<SceneRenderer::OutputTensors> copyOutputTensors(
             const MetalViewportRenderer& native, RenderTargetId target) {
             const auto size = native.size(target);
@@ -214,10 +214,28 @@ namespace lfs::vis {
                 uint64_t positions_revision = 0, colors_revision = 0;
             };
             std::unordered_map<RenderTargetId, PointUpload, RenderTargetIdHash> uploads_;
+            struct DepthReadback {
+                glm::ivec2 pixel, source_size, extent;
+                core::Tensor depth;
+                uint64_t ticket = 0;
+            };
+            std::unordered_map<RenderTargetId, DepthReadback, RenderTargetIdHash> depth_readbacks_;
+            void abandonDepthReadback(RenderTargetId target) {
+                const auto it = depth_readbacks_.find(target);
+                if (it == depth_readbacks_.end())
+                    return;
+                if (native_ && it->second.ticket)
+                    native_->abandonReadback(it->second.ticket);
+                depth_readbacks_.erase(it);
+            }
             std::unordered_set<RenderTargetId, RenderTargetIdHash> outputs_, released_;
 
         public:
             explicit MetalPointSceneRenderer(MetalViewportPresentation& context) : context_(context) {}
+            ~MetalPointSceneRenderer() override {
+                while (!depth_readbacks_.empty())
+                    abandonDepthReadback(depth_readbacks_.begin()->first);
+            }
             auto render(const RenderRequest& r, RenderTargetId t) -> std::expected<RenderResult, std::string> override {
                 if (!t.valid() || released_.contains(t))
                     return std::unexpected(std::format("Invalid or released Metal point target (target={})", t.value));
@@ -282,17 +300,53 @@ namespace lfs::vis {
             lfs::Result<float> sampleDepthAtPixel(const DepthSampleRequest& request) override {
                 if (!native_ || !hasRenderTarget(request.target))
                     return outputError("Metal point depth output is unavailable");
-                if (request.nonblocking) {
-                    const auto complete = native_->outputComplete(request.target);
-                    if (!complete)
-                        return complete.error();
-                    if (!*complete) {
-                        retry_->store(true, std::memory_order_release);
-                        lfs::python::request_redraw_after(1.0 / 60.0);
-                        return kDepthSamplePending;
-                    }
+                if (!request.nonblocking) {
+                    abandonDepthReadback(request.target);
+                    return native_->readDepth({.pixel = request.pixel, .source_size = request.source_size, .target = request.target});
                 }
-                return native_->readDepth({.pixel = request.pixel, .source_size = request.source_size, .target = request.target});
+                const auto extent = native_->size(request.target);
+                if (extent.x <= 0 || extent.y <= 0)
+                    return -1.0f;
+                auto pixel = request.pixel;
+                if (request.source_size.x > 0 && request.source_size.y > 0)
+                    pixel = glm::clamp(glm::ivec2(glm::round((glm::vec2(pixel) + 0.5f) * glm::vec2(extent) /
+                                                                 glm::vec2(request.source_size) -
+                                                             0.5f)),
+                                       glm::ivec2(0), extent - 1);
+                if (pixel.x < 0 || pixel.y < 0 || pixel.x >= extent.x || pixel.y >= extent.y)
+                    return -1.0f;
+                auto it = depth_readbacks_.find(request.target);
+                if (it != depth_readbacks_.end() &&
+                    (it->second.pixel != request.pixel || it->second.source_size != request.source_size ||
+                     it->second.extent != extent)) {
+                    abandonDepthReadback(request.target);
+                    it = depth_readbacks_.end();
+                }
+                if (it == depth_readbacks_.end()) {
+                    DepthReadback pending{.pixel = request.pixel, .source_size = request.source_size, .extent = extent, .depth = core::Tensor::empty({size_t(extent.y), size_t(extent.x)}, core::Device::CPU, core::DataType::Float32)};
+                    const auto submitted = native_->submitReadback(request.target, pending.depth, 0, 0, true);
+                    if (!submitted)
+                        return submitted.error();
+                    pending.ticket = *submitted;
+                    it = depth_readbacks_.emplace(request.target, std::move(pending)).first;
+                }
+                const auto ready = native_->pollReadback(it->second.ticket, false);
+                if (!ready) {
+                    abandonDepthReadback(request.target);
+                    return ready.error();
+                }
+                if (*ready == SceneRenderer::ReadbackTicketStatus::NotReady) {
+                    retry_->store(true, std::memory_order_release);
+                    lfs::python::request_redraw_after(1.0 / 60.0);
+                    return kDepthSamplePending;
+                }
+                if (*ready != SceneRenderer::ReadbackTicketStatus::Ready) {
+                    abandonDepthReadback(request.target);
+                    return outputError("Metal point depth readback failed");
+                }
+                const float depth = it->second.depth.ptr<float>()[size_t(pixel.y) * extent.x + pixel.x];
+                depth_readbacks_.erase(it);
+                return depth > 0.0f && depth < 1.0e9f ? depth : -1.0f;
             }
             bool takeRefinementRequest() override { return retry_->exchange(false, std::memory_order_acq_rel); }
             auto readOutputImage(RenderTargetId t) -> std::expected<std::shared_ptr<core::Tensor>, std::string> override {
@@ -314,6 +368,7 @@ namespace lfs::vis {
 #endif
             bool hasRenderTarget(RenderTargetId t) const override { return outputs_.contains(t); }
             bool releaseRenderTarget(RenderTargetId t) override {
+                abandonDepthReadback(t);
                 if (native_) {
                     auto status = native_->release(t);
                     if (!status)
@@ -325,6 +380,8 @@ namespace lfs::vis {
                 return true;
             }
             void reset() override {
+                while (!depth_readbacks_.empty())
+                    abandonDepthReadback(depth_readbacks_.begin()->first);
                 if (native_) {
                     auto status = native_->releaseAll();
                     if (!status)
