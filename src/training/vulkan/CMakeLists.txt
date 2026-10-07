@@ -5,6 +5,7 @@ add_library(lfs_training_vulkan STATIC
     dispatch.cpp
     ../ops/blob_vulkan.cpp
     ../ops/structure_vulkan.cpp
+    ../ops/flip_vulkan.cpp
     ../ops/photometric_vulkan.cpp
     ../ops/session_vulkan.cpp
     ../ops/extra_loss_vulkan.cpp
@@ -429,6 +430,17 @@ add_custom_command(
             "${_structure_spv}" "${LFS_TRAINING_SPV_DIR}/structure.json"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/structure.slang" lfs_tensor_spirv_finalize
     VERBATIM)
+set(_flip_spv "${LFS_TRAINING_SPV_DIR}/flip.spv")
+add_custom_command(
+    OUTPUT "${_flip_spv}" "${LFS_TRAINING_SPV_DIR}/flip.json"
+    COMMAND ${LFS_TENSOR_SLANGC} "${CMAKE_CURRENT_SOURCE_DIR}/shaders/flip.slang"
+            -entry main -stage compute -O -fp-mode precise -line-directive-mode none
+            -target spirv -profile glsl_460 -emit-spirv-directly
+            -o "${LFS_TRAINING_SPV_DIR}/flip.raw.spv"
+    COMMAND lfs_tensor_spirv_finalize "${LFS_TRAINING_SPV_DIR}/flip.raw.spv"
+            "${_flip_spv}" "${LFS_TRAINING_SPV_DIR}/flip.json"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/flip.slang" lfs_tensor_spirv_finalize
+    VERBATIM)
 set(_blob_spv "${LFS_TRAINING_SPV_DIR}/blob.spv")
 add_custom_command(
     OUTPUT "${_blob_spv}" "${LFS_TRAINING_SPV_DIR}/blob.json"
@@ -497,6 +509,7 @@ add_custom_command(
     COMMAND lfs_tensor_spirv_finalize embed-named "${_training_shader_table}"
             lfs::training::vulkan embedded_training_shaders
             structure "${_structure_spv}"
+            flip "${_flip_spv}"
             blob "${_blob_spv}"
             gsplat_forward "${_gsplat_forward_spv}"
             gsplat_backward "${LFS_TRAINING_SPV_DIR}/gsplat_backward.spv"
@@ -520,7 +533,7 @@ add_custom_command(
             controller "${_controller_spv}"
             ppisp "${_ppisp_spv}"
             geometry "${_geometry_spv}" geometry_fp32 "${_geometry_fp32_spv}"
-    DEPENDS "${_blob_spv}" "${_structure_spv}" "${LFS_TRAINING_SPV_DIR}/fast_backward.spv" "${LFS_TRAINING_SPV_DIR}/fast_backward_atomic.spv" "${_gsplat_forward_spv}" "${LFS_TRAINING_SPV_DIR}/gsplat_backward.spv" "${LFS_TRAINING_SPV_DIR}/gsplat_backward_atomic.spv"
+    DEPENDS "${_blob_spv}" "${_structure_spv}" "${_flip_spv}" "${LFS_TRAINING_SPV_DIR}/fast_backward.spv" "${LFS_TRAINING_SPV_DIR}/fast_backward_atomic.spv" "${_gsplat_forward_spv}" "${LFS_TRAINING_SPV_DIR}/gsplat_backward.spv" "${LFS_TRAINING_SPV_DIR}/gsplat_backward_atomic.spv"
             "${LFS_TRAINING_SPV_DIR}/photometric_fused.spv" "${LFS_TRAINING_SPV_DIR}/photometric_fused_gradient.spv"
             "${_fast_forward_spv}" "${_photometric_spv}" "${_pair_sort_spv}" "${_pair_sort_match_spv}" lfs_tensor_spirv_finalize
             "${_sh_ops_spv}" "${_extra_loss_spv}" "${_adam_spv}" "${_training_image_spv}" "${_refine_spv}" "${_mrnf_spv}" "${_morton_spv}" "${_joint_morton_spv}" "${_mcmc_spv}" "${_lpips_spv}" "${_lpips_coop_spv}" "${_lpips_halo_spv}" "${_masks_spv}" "${_mesh_mask_spv}" "${_bilateral_spv}" "${_controller_spv}" "${_ppisp_spv}" "${_geometry_spv}" "${_geometry_fp32_spv}"

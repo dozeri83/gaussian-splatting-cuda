@@ -757,6 +757,12 @@ namespace lfs::core::param {
             .locale("training_params.eval_all")
             .tooltip("training.tooltip.eval_all")
             .all_strategies()
+            .bool_prop(&OptimizationParameters::eval_flip,
+                       "eval_flip", "Eval FLIP", d.eval_flip,
+                       "Also compute FLIP per evaluated image and save its error map next to the evaluation images")
+            .locale("training_params.eval_flip")
+            .tooltip("training.tooltip.eval_flip")
+            .all_strategies()
             .enum_prop(&OptimizationParameters::eval_space,
                        "eval_space", "Eval Space", d.eval_space,
                        {{"Distorted", EvalSpace::Distorted, "training.options.eval_space.distorted", "distorted"},
@@ -766,6 +772,17 @@ namespace lfs::core::param {
                        "undistorted training images")
             .locale("training_params.eval_space")
             .tooltip("training.tooltip.eval_space")
+            .all_strategies()
+            .enum_prop(&OptimizationParameters::eval_bit_depth,
+                       "eval_bit_depth", "Eval Bit Depth", d.eval_bit_depth,
+                       {{"Auto", EvalBitDepth::Auto, "training.options.eval_bit_depth.auto", "auto"},
+                        {"8-bit", EvalBitDepth::Eight, "training.options.eval_bit_depth.eight", "8"},
+                        {"16-bit", EvalBitDepth::Sixteen, "training.options.eval_bit_depth.sixteen", "16"},
+                        {"Float", EvalBitDepth::Float, "training.options.eval_bit_depth.float", "float"}},
+                       "Grid the render is quantized to before evaluation metrics: auto = each reference "
+                       "image's own encoding (8-bit, 16-bit or float)")
+            .locale("training_params.eval_bit_depth")
+            .tooltip("training.tooltip.eval_bit_depth")
             .all_strategies()
             .string_prop(&OptimizationParameters::eval_mask,
                          "eval_mask", "Evaluation Mask", d.eval_mask,

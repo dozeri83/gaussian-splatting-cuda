@@ -23,6 +23,8 @@
   "enable_sparsity": false,
   "erank_reg": 0.0,
   "eval_all": false,
+  "eval_bit_depth": "auto",
+  "eval_flip": false,
   "eval_mask": "",
   "eval_mask_invert": false,
   "eval_mask_opacity": 0.8500000238418579,
@@ -117,7 +119,7 @@
   "use_depth_loss": false,
   "use_edge_map": true,
   "use_error_map": true,
-  "use_exposure_correction": true,
+  "use_exposure_correction": false,
   "use_normal_loss": false,
   "use_ppisp": false
 }

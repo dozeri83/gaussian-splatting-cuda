@@ -1064,6 +1064,9 @@ namespace lfs::core {
                 return "normal_loss_space must be 'auto', 'camera-opencv', 'camera-opengl', or 'world'";
             if (eval_space != EvalSpace::Distorted && eval_space != EvalSpace::Undistorted)
                 return "eval_space must be 'distorted' or 'undistorted'";
+            if (eval_bit_depth != EvalBitDepth::Auto && eval_bit_depth != EvalBitDepth::Eight &&
+                eval_bit_depth != EvalBitDepth::Sixteen && eval_bit_depth != EvalBitDepth::Float)
+                return "eval_bit_depth must be 'auto', '8', '16' or 'float'";
             if (normal_start_fraction > normal_end_fraction)
                 return std::format(
                     "normal_start_fraction must not exceed normal_end_fraction ({} > {})",
@@ -1237,6 +1240,7 @@ namespace lfs::core {
         OptimizationParameters OptimizationParameters::mrnf_defaults() {
             auto p = OptimizationParameters{};
             p.strategy = std::string(kStrategyMRNF);
+            p.use_exposure_correction = true;
             p.refine_every = 200;
             p.start_refine = 0;
             p.stop_refine = 28'500;

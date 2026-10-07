@@ -865,6 +865,12 @@ namespace lfs::python {
             .value("DISTORTED", EvalSpace::Distorted)
             .value("UNDISTORTED", EvalSpace::Undistorted);
 
+        nb::enum_<EvalBitDepth>(m, "EvalBitDepth")
+            .value("AUTO", EvalBitDepth::Auto)
+            .value("EIGHT", EvalBitDepth::Eight)
+            .value("SIXTEEN", EvalBitDepth::Sixteen)
+            .value("FLOAT", EvalBitDepth::Float);
+
         nb::enum_<DensifyErrorMap>(m, "DensifyErrorMap")
             .value("SSIM", DensifyErrorMap::Ssim)
             .value("SSIM_CS", DensifyErrorMap::SsimCs);
@@ -1030,6 +1036,11 @@ namespace lfs::python {
                 [](PyOptimizationParams& self) { return self.params().eval_all; },
                 [](PyOptimizationParams&, bool v) { modify_params([v](auto& p) { p.eval_all = v; }); },
                 "Train on every image and evaluate all of them; no image is held out")
+            .def_prop_rw(
+                "eval_flip",
+                [](PyOptimizationParams& self) { return self.params().eval_flip; },
+                [](PyOptimizationParams&, bool v) { modify_params([v](auto& p) { p.eval_flip = v; }); },
+                "Also compute FLIP per evaluated image and save its error map next to the evaluation images")
             .def_prop_rw(
                 "eval_mask",
                 [](PyOptimizationParams& self) { return self.params().eval_mask; },
@@ -1302,6 +1313,12 @@ namespace lfs::python {
                 "Reference images for evaluation with --undistort: distorted = the original "
                 "images, with the render warped into the original lens; undistorted = the "
                 "undistorted training images")
+            .def_prop_rw(
+                "eval_bit_depth",
+                [](PyOptimizationParams& self) { return self.params().eval_bit_depth; },
+                [](PyOptimizationParams&, EvalBitDepth v) { modify_params([v](auto& p) { p.eval_bit_depth = v; }); },
+                "Grid the render is quantized to before evaluation metrics: auto = each reference "
+                "image's own encoding (8-bit, 16-bit or float)")
             .def_prop_ro(
                 "save_steps",
                 [](PyOptimizationParams& self) -> std::vector<size_t> {

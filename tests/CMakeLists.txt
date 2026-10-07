@@ -746,6 +746,7 @@ if(NOT LFS_HAS_CUDA)
             test_training_command_masks.cpp
             test_mesh_mask_kernels.cpp
             test_training_ops_parity.cpp
+            test_flip.cpp
             test_training_ops_metal_densify.cpp
             test_training_ops_metal_appearance.cpp
             test_training_ops_metal_gsplat.cpp
@@ -766,7 +767,7 @@ if(NOT LFS_HAS_CUDA)
         list(APPEND TEST_SOURCES test_video_videotoolbox.cpp test_mcp_render_capture_utils.cpp)
     endif()
     add_executable(lichtfeld_tests ${TEST_SOURCES})
-    target_compile_definitions(lichtfeld_tests PRIVATE PROJECT_ROOT_PATH="${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(lichtfeld_tests PRIVATE PROJECT_ROOT_PATH="${CMAKE_SOURCE_DIR}" TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
     if(APPLE)
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(VIDEO_TEST_FFMPEG REQUIRED IMPORTED_TARGET
@@ -1015,6 +1016,7 @@ set(TEST_FILES
     test_mask_preprocess_fusion.cpp
     test_roi_weight_map.cpp
     test_mesh_mask_kernels.cpp
+    test_flip.cpp
     test_roi_weighted_losses.cpp
     test_checkpoint_resume.cpp
     test_component_config_serialization.cpp
@@ -1190,6 +1192,7 @@ set(TEST_FILES
     test_project_thumbnail_image.cpp
     test_camera_thumbnail_policy.cpp
     test_undistort.cpp
+    gut_camera_model_cuda.cu
     test_viewport_region_utils.cpp
     test_viewport_interop_decision.cpp
     test_mesh_data.cpp

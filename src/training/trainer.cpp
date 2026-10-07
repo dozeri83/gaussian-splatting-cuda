@@ -2826,10 +2826,15 @@ namespace lfs::training {
                     LOG_INFO("Evaluation mask: {} points from {}{}", means->shape()[0], *file, invert ? " (inverted)" : "");
                     evaluator_->set_eval_points(lfs::training::EvaluationPoints{.means = std::move(*means), .invert = invert});
                 } else if (const auto splat = lfs::core::param::parse_eval_mask_points(params_.optimization.eval_mask)) {
-                    const auto cloud = scene_ ? scene_->getInitialPointCloud() : nullptr;
-                    if (!cloud || !cloud->means.is_valid() || cloud->means.numel() == 0)
-                        return std::unexpected("Evaluation mask 'points' needs the dataset's initial point cloud, "
-                                               "which a resumed project does not keep");
+                    auto cloud = scene_ ? scene_->getInitialPointCloud() : nullptr;
+                    if (!cloud || !cloud->means.is_valid() || cloud->means.numel() == 0) {
+                        auto reloaded = lfs::training::loadInitialPointCloud(params_, origin);
+                        if (!reloaded)
+                            return std::unexpected(std::format("Evaluation mask 'points' needs the points training "
+                                                               "started from: {}",
+                                                               reloaded.error().user_message()));
+                        cloud = std::move(*reloaded);
+                    }
                     evaluator_->set_eval_points(lfs::training::EvaluationPoints{
                         .means = cloud->means.to(lfs::core::Device::GPU).to(lfs::core::DataType::Float32).contiguous(),
                         .radius = (*splat)[0],
@@ -3098,6 +3103,7 @@ namespace lfs::training {
                    entry.mask_threshold == opt_params.mask_threshold &&
                    entry.undistort_prepared == camera.is_undistort_prepared() &&
                    entry.eval_space == static_cast<int>(opt_params.eval_space) &&
+                   entry.eval_bit_depth == static_cast<int>(opt_params.eval_bit_depth) &&
                    entry.bg_color == opt_params.bg_color &&
                    entry.inputs.gt_image.is_valid();
         };
@@ -3212,6 +3218,7 @@ namespace lfs::training {
                 .mask_threshold = opt_params.mask_threshold,
                 .undistort_prepared = camera.is_undistort_prepared(),
                 .eval_space = static_cast<int>(opt_params.eval_space),
+                .eval_bit_depth = static_cast<int>(opt_params.eval_bit_depth),
                 .bg_color = opt_params.bg_color,
                 .inputs = prepared->inputs,
                 .last_used = ++camera_metrics_input_cache_clock_});

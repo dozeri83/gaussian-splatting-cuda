@@ -452,6 +452,10 @@ EXPECTED_CHECKBOX_ROWS = {
         "training_params.eval_all",
         "training.tooltip.eval_all",
     ),
+    "eval_flip": (
+        "training_params.eval_flip",
+        "training.tooltip.eval_flip",
+    ),
     "eval_mask_invert": (
         "training_params.eval_mask_invert",
         "training.tooltip.eval_mask_invert",
@@ -497,6 +501,16 @@ EXPECTED_SELECT_ROWS = {
         (
             (0, "training.options.eval_space.distorted"),
             (1, "training.options.eval_space.undistorted"),
+        ),
+    ),
+    "eval_bit_depth": (
+        "training_params.eval_bit_depth",
+        "training.tooltip.eval_bit_depth",
+        (
+            (0, "training.options.eval_bit_depth.auto"),
+            (1, "training.options.eval_bit_depth.eight"),
+            (2, "training.options.eval_bit_depth.sixteen"),
+            (3, "training.options.eval_bit_depth.float"),
         ),
     ),
 }
@@ -559,13 +573,13 @@ def test_full_migration_inventory_and_schema_are_exact(lf):
     assert property_view.NUMBER_PROPS == tuple(EXPECTED_NUMBER_ROWS)
     assert property_view.BOOL_PROPS == tuple(EXPECTED_CHECKBOX_ROWS)
     assert property_view.SELECT_PROPS == tuple(EXPECTED_SELECT_ROWS)
-    assert len(property_view.MIGRATED_PROP_IDS) == 64
-    assert len(set(property_view.MIGRATED_PROP_IDS)) == 64
+    assert len(property_view.MIGRATED_PROP_IDS) == 66
+    assert len(set(property_view.MIGRATED_PROP_IDS)) == 66
 
     group_info = lf.ui.property_group_info("optimization")
     resolved_runs = property_view.resolve_runs(group_info)
     rendered = tuple(prop for run in resolved_runs for prop in run.prop_ids)
-    assert len(EXPECTED_RENDERED_PROP_IDS) == 91  # Backend has a bespoke selector.
+    assert len(EXPECTED_RENDERED_PROP_IDS) == 93  # Backend has a bespoke selector.
     assert len(rendered) == len(set(rendered)) == len(EXPECTED_RENDERED_PROP_IDS)
     assert set(rendered) == EXPECTED_RENDERED_PROP_IDS
 

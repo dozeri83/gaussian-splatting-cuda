@@ -1824,7 +1824,7 @@ namespace {
     }
 
     Capture capture_gsplat_contract(GpuBackend backend, uint32_t active_bases,
-                                    ops::GsplatRenderMode mode, bool background_image) {
+                                    ops::GsplatRenderMode mode, bool background_image, bool thin_prism = false) {
         const lfs::test::DefaultGpuBackendForTesting scope(backend);
         Capture out;
         if (!scope.switched()) {
@@ -1863,10 +1863,14 @@ namespace {
             .full_image = {height, width},
             .intrinsics = {40.f, 40.f, 20.f, 16.f},
             .sh = {.active_bases = active_bases, .layout_bases = 16},
+            .camera_model = thin_prism ? lfs::core::CameraModelType::THIN_PRISM_FISHEYE
+                                       : lfs::core::CameraModelType::PINHOLE,
             .render_mode = mode};
+        const auto radial = thin_prism ? Tensor::from_vector({0.25f, -0.05f, 0.01f, -0.002f}, {4}, Device::GPU) : Tensor{};
+        const auto tangential = thin_prism ? Tensor::from_vector({0.01f, -0.008f, 0.012f, -0.009f}, {4}, Device::GPU) : Tensor{};
         ops::GsplatSaved saved{.backend = table->create()};
         Tensor image, alpha, depth, normal;
-        const auto result = table->forward(saved, inputs, view, empty, empty, background, bg_image,
+        const auto result = table->forward(saved, inputs, view, radial, tangential, background, bg_image,
                                            params, {image, alpha, depth, normal});
         if (result.code != ops::RasterResult::Code::Success) {
             out.error = std::string(result.message);
@@ -2168,6 +2172,21 @@ namespace {
             return read_golden(golden_path(*directory, name));
         }
         return std::nullopt;
+    }
+
+    TEST(TrainingOpsGsplatParity, ThinPrismProjectionAndGradientsMatchCuda) {
+        if (!lfs::core::gpu_backend_available(GpuBackend::CUDA))
+            GTEST_SKIP() << "CUDA reference unavailable";
+        const auto expected = capture_gsplat_contract(GpuBackend::CUDA, 4u, ops::GsplatRenderMode::RGB_ED, true, true);
+        ASSERT_TRUE(expected.error.empty()) << expected.error;
+        for (const auto backend : {GpuBackend::Vulkan, GpuBackend::Metal}) {
+            if (!lfs::core::gpu_backend_available(backend))
+                continue;
+            SCOPED_TRACE(static_cast<int>(backend));
+            const auto actual = capture_gsplat_contract(backend, 4u, ops::GsplatRenderMode::RGB_ED, true, true);
+            ASSERT_TRUE(actual.error.empty()) << actual.error;
+            expect_match(actual, expected, false);
+        }
     }
 
     class GsplatFixedContractParity

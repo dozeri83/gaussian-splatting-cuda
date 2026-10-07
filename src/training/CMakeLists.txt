@@ -118,6 +118,7 @@ set(TRAINING_NEW_SOURCES
     control/command_api.cpp
     metrics/eval_mask.cpp
     metrics/mesh_mask.cpp
+    metrics/flip.cpp
     metrics/metrics.cpp
         checkpoint.cpp
         project_snapshot_chapters.cpp
@@ -132,6 +133,7 @@ set(TRAINING_NEW_SOURCES
 )
 if(LFS_HAS_CUDA)
     list(APPEND TRAINING_NEW_SOURCES
+        kernels/flip.cu
         ops/table_cuda.cpp
         ops/session_cuda.cpp
         ops/blob_cuda.cpp
@@ -177,6 +179,7 @@ if(LFS_TENSOR_METAL)
         kernels/metal/gsplat.metal
         kernels/metal/blob.metal
         kernels/metal/structure.metal
+        kernels/metal/flip.metal
         kernels/metal/photometric.metal
         kernels/metal/masks.metal
         kernels/metal/mesh_mask.metal
@@ -218,6 +221,7 @@ if(LFS_TENSOR_METAL)
         ops/gsplat_metal.cpp
         ops/blob_metal.cpp
         ops/structure_metal.cpp
+        ops/flip_metal.cpp
         ops/photometric_metal.cpp
         ops/masks_metal.cpp
         ops/extra_loss_metal.cpp

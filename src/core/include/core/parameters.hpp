@@ -89,6 +89,41 @@ namespace lfs::core {
             return std::nullopt;
         }
 
+        // Grid the render is quantized to before metrics; Auto follows each reference image's encoding.
+        enum class EvalBitDepth {
+            Auto,
+            Eight,
+            Sixteen,
+            Float,
+        };
+
+        [[nodiscard]] inline constexpr std::string_view eval_bit_depth_name(const EvalBitDepth depth) noexcept {
+            switch (depth) {
+            case EvalBitDepth::Auto:
+                return "auto";
+            case EvalBitDepth::Eight:
+                return "8";
+            case EvalBitDepth::Sixteen:
+                return "16";
+            case EvalBitDepth::Float:
+                return "float";
+            }
+            return "auto";
+        }
+
+        [[nodiscard]] inline constexpr std::optional<EvalBitDepth> eval_bit_depth_from_string(
+            const std::string_view value) noexcept {
+            if (value == "auto")
+                return EvalBitDepth::Auto;
+            if (value == "8")
+                return EvalBitDepth::Eight;
+            if (value == "16")
+                return EvalBitDepth::Sixteen;
+            if (value == "float")
+                return EvalBitDepth::Float;
+            return std::nullopt;
+        }
+
         enum class DensifyErrorMap {
             Ssim,   // full SSIM (luminance × contrast × structure)
             SsimCs, // contrast × structure only (luminance excluded)
@@ -245,7 +280,9 @@ namespace lfs::core {
             bool bg_modulation = false;                        // Enable sinusoidal background modulation
             bool enable_eval = false;                          // Only evaluate when explicitly enabled
             bool eval_all = false;                             // Train on every image and evaluate all of them
+            bool eval_flip = false;                            // Also compute FLIP and save its error maps
             EvalSpace eval_space = EvalSpace::Distorted;       // Reference image space used for evaluation
+            EvalBitDepth eval_bit_depth = EvalBitDepth::Auto;  // Grid the render is quantized to for evaluation
             std::string eval_mask = "";                        // Mesh path, bbox:..., cropbox, masks:<folder>, depth:near,far, points:radius,close or points:<file>; empty disables
             bool eval_mask_invert = false;                     // Score the pixels outside the evaluation mask instead
             float eval_mask_opacity = 0.85f;                   // Rendered opacity a pixel needs to count as covered by a splat mask
@@ -297,7 +334,7 @@ namespace lfs::core {
             float tv_loss_weight = 10.f;
 
             // Combined per-photo exposure + residual grid (replaces standalone grid/PPISP)
-            bool use_exposure_correction = true;
+            bool use_exposure_correction = false;
             int exposure_correction_grid_start_iter = 1000;
 
             [[nodiscard]] bool bilateral_grid_active() const {

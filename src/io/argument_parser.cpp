@@ -101,7 +101,9 @@ namespace lfs::io::args {
             OptimizationCliBinding{"--gut", "gut", Bool},
             OptimizationCliBinding{"--eval", "enable_eval", Bool},
             OptimizationCliBinding{"--eval-all", "eval_all", Bool},
+            OptimizationCliBinding{"--eval-flip", "eval_flip", Bool},
             OptimizationCliBinding{"--eval-space", "eval_space", Enum},
+            OptimizationCliBinding{"--eval-bit-depth", "eval_bit_depth", Enum},
             OptimizationCliBinding{"--eval-mask", "eval_mask", String, false,
                                    ". Sources: mesh:<file> pixels covered by the mesh; bbox:x0,y0,z0,x1,y1,z1 pixels covered by the axis-aligned box with that minimum and maximum corner; cropbox pixels covered by the training model's crop box; masks:<folder> one mask image per input image, matched by file name, white pixels scored; depth:near,far solid rendered pixels whose depth lies between near and far; points or points:radius,close pixels around the initial point cloud, each point drawn as a disk of radius pixels (default 2) with gaps up to twice close pixels filled (default 3); points:<file> the same around the points of a splat or point cloud PLY; splat:<file> pixels a splat PLY covers when rendered with its positions, sizes, rotations and opacities, counting pixels whose rendered opacity reaches --eval-mask-opacity; none clears a mask stored in a resumed project. Meshes, boxes, point files and splats use the dataset's coordinates"},
             OptimizationCliBinding{"--eval-mask-invert", "eval_mask_invert", Bool},
@@ -878,12 +880,21 @@ namespace {
             ::args::Group output_group(parser, "OUTPUT OPTIONS:");
             ::args::Flag enable_eval(output_group, "eval", lfs::io::args::optimization_cli_help("--eval"), {"eval"});
             ::args::Flag eval_all(output_group, "eval_all", lfs::io::args::optimization_cli_help("--eval-all"), {"eval-all"});
+            ::args::Flag eval_flip(output_group, "eval_flip", lfs::io::args::optimization_cli_help("--eval-flip"), {"eval-flip"});
             ::args::MapFlag<std::string, lfs::core::param::EvalSpace> eval_space(
                 output_group, "eval_space", lfs::io::args::optimization_cli_help("--eval-space"),
                 {"eval-space"},
                 std::unordered_map<std::string, lfs::core::param::EvalSpace>{
                     {"distorted", lfs::core::param::EvalSpace::Distorted},
                     {"undistorted", lfs::core::param::EvalSpace::Undistorted}});
+            ::args::MapFlag<std::string, lfs::core::param::EvalBitDepth> eval_bit_depth(
+                output_group, "eval_bit_depth", lfs::io::args::optimization_cli_help("--eval-bit-depth"),
+                {"eval-bit-depth"},
+                std::unordered_map<std::string, lfs::core::param::EvalBitDepth>{
+                    {"auto", lfs::core::param::EvalBitDepth::Auto},
+                    {"8", lfs::core::param::EvalBitDepth::Eight},
+                    {"16", lfs::core::param::EvalBitDepth::Sixteen},
+                    {"float", lfs::core::param::EvalBitDepth::Float}});
             ::args::ValueFlag<std::string> eval_mask(output_group, "source", lfs::io::args::optimization_cli_help("--eval-mask"), {"eval-mask"});
             ::args::Flag eval_mask_invert(output_group, "eval_mask_invert", lfs::io::args::optimization_cli_help("--eval-mask-invert"), {"eval-mask-invert"});
             ::args::ValueFlag<float> eval_mask_opacity(output_group, "opacity", lfs::io::args::optimization_cli_help("--eval-mask-opacity"), {"eval-mask-opacity"});
@@ -1557,7 +1568,9 @@ namespace {
                                         ppisp_sidecar_path_val = cli_option_present({"--ppisp-sidecar"}) ? std::optional<std::string>(::args::get(ppisp_sidecar_path)) : std::optional<std::string>(),
                                         enable_eval_flag = bool(enable_eval),
                                         eval_all_flag = bool(eval_all),
+                                        eval_flip_flag = bool(eval_flip),
                                         eval_space_val = cli_option_present({"--eval-space"}) ? std::optional<lfs::core::param::EvalSpace>(::args::get(eval_space)) : std::optional<lfs::core::param::EvalSpace>(),
+                                        eval_bit_depth_val = cli_option_present({"--eval-bit-depth"}) ? std::optional<lfs::core::param::EvalBitDepth>(::args::get(eval_bit_depth)) : std::optional<lfs::core::param::EvalBitDepth>(),
                                         eval_mask_val = std::move(eval_mask_val),
                                         eval_mask_invert_flag = bool(eval_mask_invert),
                                         no_download_flag = bool(no_download),
@@ -1735,7 +1748,9 @@ namespace {
                 setFlag(enable_eval_flag, opt.enable_eval);
                 setFlag(eval_all_flag, opt.eval_all);
                 setFlag(eval_all_flag, opt.enable_eval);
+                setFlag(eval_flip_flag, opt.eval_flip);
                 setVal(eval_space_val, opt.eval_space);
+                setVal(eval_bit_depth_val, opt.eval_bit_depth);
                 setVal(eval_mask_val, opt.eval_mask);
                 setVal(eval_mask_opacity_val, opt.eval_mask_opacity);
                 setFlag(eval_mask_invert_flag, opt.eval_mask_invert);
@@ -1859,7 +1874,9 @@ namespace {
                 note_opt("ppisp_sidecar_path", ppisp_sidecar_path_val.has_value());
                 note_opt("enable_eval", enable_eval_flag || eval_all_flag);
                 note_opt("eval_all", eval_all_flag);
+                note_opt("eval_flip", eval_flip_flag);
                 note_opt("eval_space", eval_space_val.has_value());
+                note_opt("eval_bit_depth", eval_bit_depth_val.has_value());
                 note_opt("eval_mask", eval_mask_val.has_value());
                 note_opt("eval_mask_opacity", eval_mask_opacity_val.has_value());
                 note_opt("eval_mask_invert", eval_mask_invert_flag || (eval_mask_val && eval_mask_val->empty()));
@@ -2064,13 +2081,17 @@ lfs::io::args::parse_args_and_params(int argc, const char* const argv[]) {
             params->optimization.max_screen_share));
     if (flag_given("--eval-steps") && !params->optimization.enable_eval)
         return std::unexpected("--eval-steps needs --eval or --eval-all; without them no evaluation runs");
-    if (flag_given("--eval-space") && !params->optimization.undistort) {
+    const bool resuming = params->resume_project || params->resume_checkpoint;
+    if (flag_given("--eval-space") && !params->optimization.undistort && !resuming) {
         return std::unexpected(
             "--eval-space needs --undistort; without it both spaces are identical");
     }
     if ((flag_given("--eval-mask") || flag_given("--eval-mask-invert")) &&
         !params->optimization.enable_eval)
         return std::unexpected("--eval-mask and --eval-mask-invert need --eval or --eval-all; without them no evaluation runs");
+    if (flag_given("--eval-flip") && !params->optimization.enable_eval && !params->resume_project &&
+        !params->resume_checkpoint)
+        return std::unexpected("--eval-flip needs --eval or --eval-all; without them no evaluation runs");
     if (flag_given("--eval-mask-invert") && !flag_given("--eval-mask"))
         return std::unexpected("--eval-mask-invert needs --eval-mask");
     if (params->optimization.eval_all && flag_given("--test-every"))
