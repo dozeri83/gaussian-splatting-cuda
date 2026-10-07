@@ -84,7 +84,7 @@ def preferences_panel_module(monkeypatch):
         viewport_toolbar_position="centered",
         set_viewport_toolbar_position_calls=[],
         zoom_speed=11.0,
-        navigation_speed=8.0,
+        navigation_speed=10.0,
         trackpad={"device": "mouse", "swipe_pans": False, "swipe_speed": 50.0, "zoom_speed": 50.0},
         project_location="",
         embed_dataset_by_default=False,
@@ -589,7 +589,7 @@ def test_navigation_speed_preferences_reset_with_input_section(preferences_panel
     panel._reset_section()
 
     assert state.zoom_speed == 11
-    assert state.navigation_speed == 8
+    assert state.navigation_speed == 10
 
 
 def test_trackpad_preferences_round_trip_and_reset_with_input_section(preferences_panel_module):

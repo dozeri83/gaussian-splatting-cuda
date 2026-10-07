@@ -2756,7 +2756,6 @@ namespace lfs::vis {
             if (!drone_viewport && active_movement_viewport->camera.hasDroneMotion())
                 drone_viewport = active_movement_viewport;
             if (drone_viewport && (keys_active || drone_viewport->camera.hasDroneMotion())) {
-                drone_viewport->camera.setSceneExtent(sceneExtent());
                 drone_viewport->camera.advanceDrone(
                     delta_time,
                     keys_active && keys_movement_[0],
@@ -2784,7 +2783,6 @@ namespace lfs::vis {
         } else {
             auto* const movement_viewport = keys_active ? active_movement_viewport : wasdMomentumViewport();
             if (movement_viewport && (keys_active || movement_viewport->camera.hasWasdMomentum())) {
-                movement_viewport->camera.setSceneExtent(sceneExtent());
                 movement_viewport->camera.advanceWasd(
                     delta_time,
                     keys_active && keys_movement_[0],

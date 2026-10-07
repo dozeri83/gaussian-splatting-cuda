@@ -568,7 +568,7 @@ TEST_F(SelectionServiceInteractionsTest, RectangleSelectionSkipsLockedNodeAndKee
     }));
 
     const auto result = service_->selectRect(
-        0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, 0);
+        0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, -1);
     ASSERT_TRUE(result.success) << result.error;
     EXPECT_EQ(result.affected_count, 2u);
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0, 1, 0}));
@@ -576,7 +576,7 @@ TEST_F(SelectionServiceInteractionsTest, RectangleSelectionSkipsLockedNodeAndKee
     scene_manager_->getScene().setNodeLocked("copy", true);
     set_initial_selection({0, 0, 0, 0});
     const auto locked_result = service_->selectRect(
-        0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, 0);
+        0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, -1);
     ASSERT_TRUE(locked_result.success) << locked_result.error;
     EXPECT_EQ(locked_result.affected_count, 1u);
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0, 0, 0}));
@@ -617,27 +617,27 @@ TEST_F(SelectionServiceInteractionsTest, EverySelectionShapeSkipsLockedNode) {
     };
     const std::vector<uint8_t> unlocked_first_row{1, 0, 0, 0};
     expect_shape([this] {
-        return service_->selectRect(0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, 0);
+        return service_->selectRect(0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, -1);
     },
                  unlocked_first_row);
     expect_shape([this] {
         return service_->selectPolygon(
-            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, 0);
+            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, -1);
     },
                  unlocked_first_row);
     expect_shape([this] {
         return service_->selectLasso(
-            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, 0);
+            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, -1);
     },
                  unlocked_first_row);
     expect_shape([this] {
-        return service_->selectBrush(10.0f, 10.0f, 5.0f, lfs::vis::SelectionMode::Replace, 0);
+        return service_->selectBrush(10.0f, 10.0f, 5.0f, lfs::vis::SelectionMode::Replace, -1);
     },
                  unlocked_first_row);
 
     service_->setTestingHoveredGaussianId(2);
     set_initial_selection({0, 0, 0, 0});
-    const auto ring = service_->selectRing(10.0f, 10.0f, lfs::vis::SelectionMode::Replace, 0);
+    const auto ring = service_->selectRing(10.0f, 10.0f, lfs::vis::SelectionMode::Replace, -1);
     ASSERT_TRUE(ring.success) << ring.error;
     EXPECT_TRUE(selection_values(*scene_manager_).empty());
 
@@ -698,28 +698,28 @@ TEST_F(SelectionServiceInteractionsTest, HiddenNodesStayOutOfInvertAndInteractiv
     };
 
     expect_selection([this] {
-        return service_->selectRect(0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, 0);
+        return service_->selectRect(0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, -1);
     },
                      visible_only);
     expect_selection([this] {
         return service_->selectLasso(
-            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, 0);
+            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, -1);
     },
                      visible_only);
     expect_selection([this] {
         return service_->selectPolygon(
-            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, 0);
+            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, -1);
     },
                      visible_only);
     expect_selection([this] {
-        return service_->selectBrush(10.0f, 10.0f, 20.0f, lfs::vis::SelectionMode::Replace, 0);
+        return service_->selectBrush(10.0f, 10.0f, 20.0f, lfs::vis::SelectionMode::Replace, -1);
     },
                      visible_only);
     service_->setTestingHoveredGaussianId(2);
     set_initial_selection({0, 0, 0, 0});
     EXPECT_FALSE(service_->selectByColorAt(80.0f, 80.0f, lfs::vis::SelectionMode::Replace, {}, 0).success);
     EXPECT_FALSE(scene_manager_->getScene().hasSelection());
-    EXPECT_FALSE(service_->selectRing(80.0f, 80.0f, lfs::vis::SelectionMode::Replace, 0).success);
+    EXPECT_FALSE(service_->selectRing(80.0f, 80.0f, lfs::vis::SelectionMode::Replace, -1).success);
     EXPECT_FALSE(scene_manager_->getScene().hasSelection());
 
     const auto select_all = service_->selectAllFiltered();

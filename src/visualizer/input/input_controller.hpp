@@ -324,9 +324,8 @@ namespace lfs::vis {
         std::chrono::steady_clock::time_point drag_momentum_updated_at_ = std::chrono::steady_clock::now();
         void decayHeldDragMomentum();
 
-        // Cached whole-scene radius (half the bounds diagonal) that scales WASD
-        // speed and caps pan distance by splat size; 0 means "recompute" (after scene
-        // load/clear).
+        // Cached whole-scene radius (half the bounds diagonal) that caps pan
+        // distance by splat size; 0 means "recompute" (after scene load/clear).
         float scene_extent_ = 0.0f;
         // One-shot guard: the depth-view range is seeded from the trimmed scene
         // radius the first frame the extent is known after a load, then left to
