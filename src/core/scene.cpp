@@ -17,6 +17,7 @@
 #include "core/tensor_backend.hpp"
 #include "core/tensor_completion.hpp"
 #include "core/tensor_sh.hpp"
+#include "core/transform_utils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -5065,6 +5066,14 @@ namespace lfs::core {
             return false;
 
         const glm::mat4 old_world = getWorldTransform(node_id);
+        const glm::mat4 new_parent_world =
+            new_parent == NULL_NODE ? glm::mat4(1.0f) : getWorldTransform(new_parent);
+        const auto new_local = finiteLocalTransform(new_parent_world, old_world);
+        if (!new_local) {
+            LOG_WARN("Cannot reparent '{}': destination transform cannot preserve a finite world transform",
+                     node->name);
+            return false;
+        }
 
         if (node->parent_id != NULL_NODE) {
             if (auto* old_parent = getNodeById(node->parent_id)) {
@@ -5081,9 +5090,7 @@ namespace lfs::core {
         }
 
         // Keep the node visually in place: re-express its world pose in the new parent's frame.
-        const glm::mat4 new_parent_world =
-            new_parent == NULL_NODE ? glm::mat4(1.0f) : getWorldTransform(new_parent);
-        node->local_transform.set(glm::inverse(new_parent_world) * old_world, false);
+        node->local_transform.set(*new_local, false);
 
         markTransformDirty(node_id);
         notifyMutation(MutationType::NODE_REPARENTED);
@@ -5127,13 +5134,22 @@ namespace lfs::core {
 
         const NodeId old_parent = node->parent_id;
         const glm::mat4 old_world = getWorldTransform(node_id);
+        std::optional<glm::mat4> new_local;
+        if (old_parent != new_parent) {
+            const glm::mat4 new_parent_world =
+                new_parent == NULL_NODE ? glm::mat4(1.0f) : getWorldTransform(new_parent);
+            new_local = finiteLocalTransform(new_parent_world, old_world);
+            if (!new_local) {
+                LOG_WARN("Cannot move '{}': destination transform cannot preserve a finite world transform",
+                         node->name);
+                return false;
+            }
+        }
 
         // Keep the node visually in place across a parent change by re-expressing its world pose
         // in the new parent's frame. Pure reorders (same parent) leave the transform untouched.
         const auto preserveWorldTransform = [&] {
-            const glm::mat4 new_parent_world =
-                new_parent == NULL_NODE ? glm::mat4(1.0f) : getWorldTransform(new_parent);
-            node->local_transform.set(glm::inverse(new_parent_world) * old_world, false);
+            node->local_transform.set(*new_local, false);
         };
 
         if (new_parent != NULL_NODE) {

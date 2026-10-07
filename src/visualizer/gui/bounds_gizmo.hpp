@@ -53,5 +53,6 @@ namespace lfs::vis::gui {
     void beginBoundsGizmoFrame();
     [[nodiscard]] bool isBoundsGizmoHovered();
     [[nodiscard]] bool isBoundsGizmoActive();
+    void cancelBoundsGizmoDrag();
 
 } // namespace lfs::vis::gui
