@@ -481,11 +481,15 @@ TEST_F(FastGSKernelTest, OptimizerStateRunToRunDeterminismControl) {
         std::unique_ptr<AdamOptimizer> optimizer;
     };
     const size_t test_n = 1;
-    auto test_means = means_.slice(0, 0, test_n).contiguous();
-    auto test_sh0 = sh0_.slice(0, 0, test_n).contiguous();
-    auto test_scaling = scaling_.slice(0, 0, test_n).contiguous();
-    auto test_rotation = rotation_.slice(0, 0, test_n).contiguous();
-    auto test_opacity = opacity_.slice(0, 0, test_n).contiguous();
+    // Keep the identical-run control independent of earlier tests' RNG state.
+    // Asymmetric, visible input avoids a zero-gradient codec interval whose
+    // relative LSB scale is dominated by atomic cancellation noise.
+    auto test_means = Tensor::from_vector({0.11f, 0.23f, 1.1f}, {test_n, size_t{3}}, Device::GPU);
+    auto test_sh0 = Tensor::from_vector({0.1f, 0.2f, 0.3f}, {test_n, size_t{1}, size_t{3}}, Device::GPU);
+    auto test_scaling = Tensor::from_vector({-2.0f, -2.2f, -2.4f}, {test_n, size_t{3}}, Device::GPU);
+    auto test_rotation = Tensor::from_vector({0.9365858f, 0.0936586f, -0.1873172f, 0.2809757f},
+                                             {test_n, size_t{4}}, Device::GPU);
+    auto test_opacity = Tensor::full({test_n}, 0.5f, Device::GPU);
     auto sh_rest = Tensor::full({test_n, 3, 3}, 0.01f, Device::GPU);
     auto run = [&](bool generic) {
         Run result;

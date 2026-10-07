@@ -648,6 +648,10 @@ namespace lfs::vis {
             ASSERT_TRUE(overlay.isLanguageSelectOpen());
             EXPECT_TRUE(overlay.content_dirty_);
         }
+        void setGizmoViewportLayout(const gui::ViewportLayout& layout) {
+            gui_->ui_hidden_ = true;
+            gui_->viewport_layout_ = layout;
+        }
         bool startupVisible() { return gui_->startup_overlay_.isVisible(); }
         bool languageOpen() { return gui_->startup_overlay_.isLanguageSelectOpen(); }
 
@@ -1040,7 +1044,8 @@ namespace lfs::vis {
         camera.R = rendering::makeVisualizerLookAtRotation(camera.t, camera.pivot);
 
         gui::UIContext ui{.viewer = viewer_.get(), .editor = &viewer_->getEditorContext()};
-        const gui::ViewportLayout layout{.pos = {0.0f, 0.0f}, .size = {400.0f, 300.0f}};
+        const gui::ViewportLayout layout{.view = viewer_->activeView().id, .pos = {0.0f, 0.0f}, .size = {400.0f, 300.0f}};
+        setGizmoViewportLayout(layout);
         gizmo.updateToolState(ui, false);
         auto& frame = frameInput();
         frame.mouse_down[0] = frame.mouse_clicked[0] = frame.mouse_released[0] = false;
