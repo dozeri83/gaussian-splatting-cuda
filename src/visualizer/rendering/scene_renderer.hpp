@@ -159,6 +159,13 @@ namespace lfs::vis {
     };
     class LFS_VIS_API PointSceneRenderer {
     public:
+        static constexpr float kDepthSamplePending = -2.0f;
+        struct DepthSampleRequest {
+            glm::ivec2 pixel{0, 0};
+            glm::ivec2 source_size{0, 0};
+            RenderTargetId target;
+            bool nonblocking = false;
+        };
         struct RenderResult {
             SceneImageHandle image;
             SceneImageViewHandle image_view;
@@ -246,6 +253,7 @@ namespace lfs::vis {
         };
 
         virtual ~PointSceneRenderer() = default;
+        virtual lfs::Result<float> sampleDepthAtPixel(const DepthSampleRequest&) = 0;
         virtual bool takeRefinementRequest() { return false; }
         virtual std::expected<RenderResult, std::string> render(const RenderRequest&, RenderTargetId) = 0;
         virtual std::expected<std::shared_ptr<core::Tensor>, std::string> readOutputImage(RenderTargetId) = 0;

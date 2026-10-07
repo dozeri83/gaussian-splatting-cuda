@@ -228,6 +228,7 @@ namespace lfs::vis {
             DepthWindowDrawCommitValue,
             ViewerBackendValue,
             SceneUpscalerGeneration,
+            AlignStateGeneration,
         };
 
         AppStore();
@@ -273,12 +274,14 @@ namespace lfs::vis {
         lfs::core::reactive::Observable<DepthWindowDrawCommit> depth_window_draw_commit;
         // Actual scene API of the published output; empty means no scene frame.
         lfs::core::reactive::Observable<std::optional<lfs::rendering::ViewerBackend>> viewer_backend;
+        lfs::core::reactive::Observable<std::uint64_t> align_state_generation;
 
     private:
         lfs::core::reactive::Store store_;
     };
 
     LFS_VIS_API AppStore& app_store();
+    LFS_VIS_API void publish_align_state_generation();
     LFS_VIS_API void publish_language_generation();
     LFS_VIS_API void publish_viewport_toolbar_generation();
     LFS_VIS_API void publish_depth_window_draw_commit(ViewId view, float scale_x, float scale_y);

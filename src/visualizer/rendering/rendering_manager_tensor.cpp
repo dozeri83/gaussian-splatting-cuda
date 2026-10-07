@@ -177,7 +177,7 @@ namespace lfs::vis {
             .view = context.view,
             .viewport = context.viewport,
             .settings = context.settings,
-            .logical_screen_size = context.logical_screen_size,
+            .screen_size_px = context.screen_size_px,
             .viewport_region = context.viewport_region,
             .scene_manager = context.scene_manager,
             .graphics_context = context.graphics_context,
@@ -368,6 +368,7 @@ namespace lfs::vis {
             .training_active = context.scene_manager->getTrainerManager() &&
                                context.scene_manager->getTrainerManager()->isRunning(),
             .depth_window_drag_preview = depthWindowDragPreview(context.view),
+            .gaussian_selection_visible = gaussian_selection_visible_,
             .cursor_preview = view.viewport_overlay_service_.cursorPreview(),
             .gizmo = gizmo_state_,
             .hovered_camera_id = camera_interaction_service_.hoveredCameraId(),

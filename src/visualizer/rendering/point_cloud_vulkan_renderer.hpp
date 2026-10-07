@@ -5,6 +5,7 @@
 #pragma once
 #include "scene_renderer.hpp"
 
+#include "core/error.hpp"
 #include "core/export.hpp"
 #include "core/tensor.hpp"
 #include "render_target_id.hpp"
@@ -38,6 +39,9 @@ namespace lfs::vis {
         using CropBox = PointSceneRenderer::CropBox;
         using CropEllipsoid = PointSceneRenderer::CropEllipsoid;
 
+        static constexpr float kDepthSamplePending = PointSceneRenderer::kDepthSamplePending;
+        using DepthSampleRequest = PointSceneRenderer::DepthSampleRequest;
+
         PointCloudVulkanRenderer();
         ~PointCloudVulkanRenderer();
 
@@ -54,6 +58,10 @@ namespace lfs::vis {
 
         [[nodiscard]] bool hasRenderTarget(RenderTargetId target) const;
         [[nodiscard]] bool releaseRenderTarget(RenderTargetId target);
+        [[nodiscard]] lfs::Result<float> sampleDepthAtPixel(
+            VulkanContext& context, const DepthSampleRequest& request);
+        [[nodiscard]] bool takeRefinementRequest();
+
         void reset();
 
     private:

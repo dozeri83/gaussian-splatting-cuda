@@ -2408,6 +2408,9 @@ namespace lfs::vis {
         if (selection_tool_ && selection_tool_->isEnabled() && tool_context_) {
             selection_tool_->update(*tool_context_);
         }
+        if (align_tool_ && align_tool_->isEnabled() && tool_context_) {
+            align_tool_->update(*tool_context_);
+        }
 
         if (!gui_frame_rendered_) {
             // Wait for at least one GUI frame to render before loading data
@@ -3039,7 +3042,7 @@ namespace lfs::vis {
                     .view = id,
                     .viewport = camera,
                     .settings = settings,
-                    .logical_screen_size = camera.frameBufferSize,
+                    .screen_size_px = camera.frameBufferSize,
                     .viewport_region = &region,
                     .scene_manager = scene_manager_.get(),
                     .graphics_context = window_manager_->getGraphicsContext()};

@@ -598,7 +598,7 @@ namespace lfs::vis {
         }
 
         const auto framebuffer_region =
-            resolveFramebufferViewportRegion(context.viewport, context.logical_screen_size, context.viewport_region);
+            resolveFramebufferViewportRegion(context.viewport, context.screen_size_px, context.viewport_region);
         if (framebuffer_region.valid() && !context.preparing_import) {
             // resolveFramebufferViewportRegion reports a GL bottom-left origin; window
             // readbacks are top-left, so store the flipped form callers actually crop with.
@@ -1381,6 +1381,7 @@ namespace lfs::vis {
             .frame_dirty = frame_dirty,
             .training_active = is_training,
             .depth_window_drag_preview = frame_depth_window_drag_preview,
+            .gaussian_selection_visible = gaussian_selection_visible_,
             .cursor_preview = view_state.viewport_overlay_service_.cursorPreview(),
             .gizmo = gizmo_state_,
             .hovered_camera_id = camera_interaction_service_.hoveredCameraId(),
@@ -2710,6 +2711,15 @@ namespace lfs::vis {
                     },
                     metadata,
                     render_result->size);
+                view_state.viewport_artifact_service_.setDepthSampler(
+                    [this, target = view_state.main_render_target_, size = render_result->size](
+                        int x, int y, std::optional<SplitViewPanelId>, bool nonblocking) {
+                        if (!point_scene_renderer_)
+                            return -1.0f;
+                        return point_scene_renderer_->sampleDepthAtPixel(
+                                                        {.pixel = {x, y}, .source_size = size, .target = target, .nonblocking = nonblocking})
+                            .value_or(-1.0f);
+                    });
 
                 if (resize_result.completed) {
                     lfs::core::Tensor::trim_memory_pool();

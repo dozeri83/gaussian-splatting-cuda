@@ -48,6 +48,8 @@ namespace lfs::vis::gui {
         BoundsGizmoHandle active_handle = BoundsGizmoHandle::None;
         glm::vec3 center_world{0.0f};
         glm::vec3 half_extents_world{0.0f};
+        bool released = false;
+        bool returned_to_start = false;
     };
 
     LFS_VIS_API BoundsGizmoResult drawBoundsGizmo(const BoundsGizmoConfig& config);

@@ -257,6 +257,7 @@ if(BUILD_VISUALIZER_TESTS OR BUILD_TESTS)
     endif()
 
     set(LICHTFELD_VISUALIZER_TEST_SOURCES
+        test_align_transform.cpp
         test_menu_bar_title.cpp
         test_point_cloud_updates.cpp
 
@@ -272,6 +273,7 @@ if(BUILD_VISUALIZER_TESTS OR BUILD_TESTS)
         test_trackpad_navigation.cpp
         test_training_manager_capacity.cpp
         test_vram_hud_geometry.cpp
+        test_vram_hud_header_click.cpp
     )
     if(NOT LFS_HAS_CUDA)
         # CUDA builds run these in lichtfeld_tests.
@@ -1221,6 +1223,7 @@ set(TEST_FILES
     test_training_progress_publisher.cpp
     test_startup_overlay_geometry.cpp
     test_vram_hud_geometry.cpp
+    test_vram_hud_header_click.cpp
     test_menu_bar_title.cpp
     test_status_bar_mining.cpp
     test_rotated_sh_correctness.cpp
@@ -1310,6 +1313,7 @@ list(APPEND TEST_FILES test_octree_lod.cpp)
 list(APPEND TEST_FILES test_ply_to_rad_lod.cpp)
 list(APPEND TEST_FILES test_rad_gpu_encode.cpp)
 list(APPEND TEST_FILES test_rad_meta_sidecar.cpp)
+list(APPEND TEST_FILES test_rad_spark_paging.cpp)
 
 # Keep the source manifest strict: a stale entry should fail configuration
 # instead of silently dropping coverage from the executable.
@@ -1429,6 +1433,7 @@ if(NOT LFS_SIMPLIFY_TEST_PLY_OK)
             "SplatSimplify.RealPlySimplifyDoesNotUndershootRequestedTarget will be skipped.")
     endif()
 endif()
+target_compile_definitions(lichtfeld_tests PRIVATE LFS_SIMPLIFY_TEST_PLY="${LFS_SIMPLIFY_TEST_PLY}")
 
 if(CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED)
     set(LFS_TEST_INTERNAL_LINK_LIBS

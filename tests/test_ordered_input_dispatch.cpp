@@ -551,6 +551,10 @@ namespace lfs::vis {
             });
         }
         void TearDown() override {
+            gui::cancelTranslationGizmoDrag();
+            gui::cancelRotationGizmoDrag();
+            gui::cancelScaleGizmoDrag();
+            gui::cancelBoundsGizmoDrag();
             revert_.clear();
             gui_->startup_overlay_.shutdown();
             controller_.reset();
@@ -623,6 +627,7 @@ namespace lfs::vis {
             window_->pumping_events_ = false;
         }
         void poll() { window_->pollEvents(); }
+        FrameInputBuffer& frameInput() { return window_->frame_input_; }
         void wait(double timeout) { window_->waitEvents(timeout); }
         SDL_Window* nativeWindow() { return window_->window_; }
         gui::RmlModalOverlay& modal() { return *gui_->rml_modal_overlay_; }
@@ -776,7 +781,9 @@ namespace lfs::vis {
                                        BoundsScale };
         enum class TransformDragFinish { Escape,
                                          RightClick,
-                                         LeftRelease };
+                                         LeftRelease,
+                                         ReleaseAtStart,
+                                         ZeroLengthRelease };
 
         static bool sameMatrixBits(const glm::mat4& lhs, const glm::mat4& rhs) {
             return std::memcmp(glm::value_ptr(lhs), glm::value_ptr(rhs), sizeof(glm::mat4)) == 0;
@@ -786,9 +793,10 @@ namespace lfs::vis {
             auto& scene_manager = *viewer_->getSceneManager();
             auto& scene = viewer_->getScene();
             const bool bounds_scale = mode == TransformDragMode::BoundsScale;
+            const std::string node_name = "Cancel drag " + std::to_string(static_cast<int>(mode));
             const core::NodeId node_id = bounds_scale
-                                             ? scene.addSplat("Cancel drag", lfs::test::licht::make_splat(3))
-                                             : scene.addGroup("Cancel drag");
+                                             ? scene.addSplat(node_name, lfs::test::licht::make_splat(3))
+                                             : scene.addGroup(node_name);
             ASSERT_NE(node_id, core::NULL_NODE);
             scene_manager.changeContentType(SceneManager::ContentType::SplatFiles);
             scene_manager.selectNode(node_id);
@@ -878,6 +886,42 @@ namespace lfs::vis {
             frame.mouse_released[0] = false;
             gizmo.renderNodeTransformGizmo(ui, layout);
 
+            if (finish == TransformDragFinish::ZeroLengthRelease) {
+                controller_->handleMouseButton(static_cast<int>(input::AppMouseButton::LEFT), input::ACTION_RELEASE,
+                                               start.x, start.y);
+                frame.mouse_down[0] = false;
+                frame.mouse_released[0] = true;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+                frame.mouse_released[0] = false;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+                EXPECT_TRUE(sameMatrixBits(before, scene.getNodeTransform(node_id)));
+                EXPECT_EQ(op::undoHistory().undoCount(), undo_before);
+                return;
+            }
+
+            if (finish == TransformDragFinish::ReleaseAtStart) {
+                frame.mouse_x = start.x + 28.0f;
+                frame.mouse_y = start.y;
+                frame.mouse_clicked[0] = false;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+                ASSERT_FALSE(sameMatrixBits(before, scene.getNodeTransform(node_id)))
+                    << "pointer motion did not change the selected node transform";
+
+                controller_->handleMouseButton(static_cast<int>(input::AppMouseButton::LEFT), input::ACTION_RELEASE,
+                                               start.x, start.y);
+                frame.mouse_x = start.x;
+                frame.mouse_y = start.y;
+                frame.mouse_down[0] = false;
+                frame.mouse_released[0] = true;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+                frame.mouse_released[0] = false;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+
+                EXPECT_TRUE(sameMatrixBits(before, scene.getNodeTransform(node_id)));
+                EXPECT_EQ(op::undoHistory().undoCount(), undo_before);
+                return;
+            }
+
             bool changed = false;
             for (const glm::vec2 delta : {glm::vec2(28.0f, 0.0f), glm::vec2(0.0f, 28.0f),
                                           glm::vec2(20.0f, 20.0f), glm::vec2(-24.0f, 0.0f)}) {
@@ -947,7 +991,86 @@ namespace lfs::vis {
     TRANSFORM_DRAG_CANCEL_TEST(RightClickCancelsBoundsScaleAndAddsNoUndo, BoundsScale, RightClick)
     TRANSFORM_DRAG_CANCEL_TEST(LeftReleaseCommitsBoundsScaleAndAddsOneUndo, BoundsScale, LeftRelease)
 
+    TEST_F(WindowInputDispatchTest, SameFrameReleaseAppliesFinalTranslatePosition) {
+        exerciseTransformDrag(TransformDragMode::Translate, TransformDragFinish::ReleaseAtStart);
+    }
+
+    TEST_F(WindowInputDispatchTest, SameFrameReleaseAppliesFinalRotatePosition) {
+        exerciseTransformDrag(TransformDragMode::Rotate, TransformDragFinish::ReleaseAtStart);
+    }
+
+    TEST_F(WindowInputDispatchTest, SameFrameReleaseAppliesFinalScalePosition) {
+        exerciseTransformDrag(TransformDragMode::Scale, TransformDragFinish::ReleaseAtStart);
+    }
+
+    TEST_F(WindowInputDispatchTest, SameFrameReleaseAppliesFinalBoundsPosition) {
+        exerciseTransformDrag(TransformDragMode::BoundsScale, TransformDragFinish::ReleaseAtStart);
+    }
+
+    TEST_F(WindowInputDispatchTest, ZeroLengthGizmoClickDragsAddNoUndoEntry) {
+        for (const auto mode : {TransformDragMode::Translate, TransformDragMode::Rotate,
+                                TransformDragMode::Scale, TransformDragMode::BoundsScale}) {
+            SCOPED_TRACE(static_cast<int>(mode));
+            exerciseTransformDrag(mode, TransformDragFinish::ZeroLengthRelease);
+        }
+    }
+
 #undef TRANSFORM_DRAG_CANCEL_TEST
+
+    // Catches gizmo hover that outlives the crop gizmo: the deleted volume's last hover
+    // made every later viewport press look like a gizmo grab, so orbit never started.
+    TEST_F(WindowInputDispatchTest, ApplyingCropWhileHoveringItsGizmoKeepsViewportOrbit) {
+        auto& scene_manager = *viewer_->getSceneManager();
+        auto& scene = viewer_->getScene();
+        const core::NodeId splat_id = scene.addSplat("Crop orbit", lfs::test::licht::make_splat(3));
+        ASSERT_NE(splat_id, core::NULL_NODE);
+        scene_manager.changeContentType(SceneManager::ContentType::SplatFiles);
+        const core::NodeId cropbox_id = scene.addCropBox("Crop orbit_cropbox", splat_id);
+        ASSERT_NE(cropbox_id, core::NULL_NODE);
+        scene_manager.selectNode(cropbox_id);
+        viewer_->getEditorContext().update(&scene_manager, viewer_->getTrainerManager());
+        UnifiedToolRegistry::instance().setActiveTool("builtin.cropbox");
+        auto& gizmo = gui_->gizmo();
+        gizmo.setCropToolShape("box");
+        gizmo.setOperation(gui::GizmoOperation::Translate);
+
+        auto& camera = viewer_->getViewport().camera;
+        camera.t = {0.0f, 0.0f, 12.0f};
+        camera.pivot = {0.0f, 0.0f, 0.0f};
+        camera.R = rendering::makeVisualizerLookAtRotation(camera.t, camera.pivot);
+
+        gui::UIContext ui{.viewer = viewer_.get(), .editor = &viewer_->getEditorContext()};
+        const gui::ViewportLayout layout{.pos = {0.0f, 0.0f}, .size = {400.0f, 300.0f}};
+        gizmo.updateToolState(ui, false);
+        auto& frame = frameInput();
+        frame.mouse_down[0] = frame.mouse_clicked[0] = frame.mouse_released[0] = false;
+        bool hovered = false;
+        for (int y = 48; y <= 252 && !hovered; y += 4) {
+            for (int x = 48; x <= 352 && !hovered; x += 4) {
+                frame.mouse_x = static_cast<float>(x);
+                frame.mouse_y = static_cast<float>(y);
+                gizmo.renderCropBoxGizmo(ui, layout);
+                hovered = gui::isTranslationGizmoHovered();
+            }
+        }
+        ASSERT_TRUE(hovered) << "no crop gizmo handle found under the pointer";
+
+        gizmo.applyActiveCropTool();
+        ASSERT_EQ(scene.getNodeById(cropbox_id), nullptr);
+        ASSERT_EQ(UnifiedToolRegistry::instance().getActiveTool(), "");
+        gizmo.updateToolState(ui, false);
+        gizmo.renderCropBoxGizmo(ui, layout);
+        gizmo.renderNodeTransformGizmo(ui, layout);
+        gui::guiFocusState().want_capture_mouse = false;
+
+        Viewport orbit_viewport(400, 300);
+        TestViewTargets orbit_views{orbit_viewport};
+        InputController orbit_controller(nullptr, orbit_views);
+        orbit_controller.updateViewportBounds(0.0f, 0.0f, 400.0f, 300.0f);
+        orbit_controller.handleMouseButton(static_cast<int>(input::AppMouseButton::MIDDLE), input::ACTION_PRESS,
+                                           60.0, 250.0);
+        EXPECT_TRUE(orbit_controller.isCameraDragging());
+    }
 
     TEST_F(WindowInputDispatchTest, TranslateXAxisCenterlineDragSurvivesSmallViewTilts) {
         for (const float tilt : {0.0f, 1.0f, 2.0f, 3.0f, 5.0f}) {

@@ -87,6 +87,7 @@ namespace lfs::vis {
         DirtyMask frame_dirty = 0;
         bool training_active = false;
         bool depth_window_drag_preview = false;
+        bool gaussian_selection_visible = true;
 
         CursorPreviewState cursor_preview;
         GizmoState gizmo;

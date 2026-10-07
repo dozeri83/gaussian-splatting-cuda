@@ -585,12 +585,12 @@ TEST_F(SceneConsolidationExtractTest, ReturnsNullWhenNotConsolidatedOrUnknown) {
 
 TEST(SceneActiveShTest, SourceRetentionPreservesEditableModelsAndResetsForNewScene) {
     auto model = SplatData(1,
-                           Tensor::zeros({2, 3}, Device::CUDA),
-                           Tensor::zeros({2, 1, 3}, Device::CUDA),
-                           Tensor::ones({2, 3, 3}, Device::CUDA),
-                           Tensor::zeros({2, 3}, Device::CUDA),
-                           Tensor::from_vector(std::vector<float>{1, 0, 0, 0, 1, 0, 0, 0}, {2, 4}, Device::CUDA),
-                           Tensor::zeros({2, 1}, Device::CUDA), 1.0f);
+                           Tensor::zeros({2, 3}, Device::GPU),
+                           Tensor::zeros({2, 1, 3}, Device::GPU),
+                           Tensor::ones({2, 3, 3}, Device::GPU),
+                           Tensor::zeros({2, 3}, Device::GPU),
+                           Tensor::from_vector(std::vector<float>{1, 0, 0, 0, 1, 0, 0, 0}, {2, 4}, Device::GPU),
+                           Tensor::zeros({2, 1}, Device::GPU), 1.0f);
     Scene scene;
     scene.preserveSourceModels();
     for (int i = 0; i < 2; ++i)
@@ -621,12 +621,12 @@ TEST(SceneActiveShTest, PreservesInactiveDataAndNodeLimitsThroughConsolidationAn
             rotation[i * 4] = 1.0f;
         auto model = std::make_unique<SplatData>(
             3,
-            Tensor::zeros({count, 3}, Device::CUDA),
-            Tensor::zeros({count, 1, 3}, Device::CUDA),
-            Tensor::from_vector(coefficients, {count, 15, 3}, Device::CUDA),
-            Tensor::zeros({count, 3}, Device::CUDA),
-            Tensor::from_vector(rotation, {count, 4}, Device::CUDA),
-            Tensor::zeros({count, 1}, Device::CUDA),
+            Tensor::zeros({count, 3}, Device::GPU),
+            Tensor::zeros({count, 1, 3}, Device::GPU),
+            Tensor::from_vector(coefficients, {count, 15, 3}, Device::GPU),
+            Tensor::zeros({count, 3}, Device::GPU),
+            Tensor::from_vector(rotation, {count, 4}, Device::GPU),
+            Tensor::zeros({count, 1}, Device::GPU),
             1.0f);
         model->set_active_sh_degree(degrees[slot]);
         attributes.push_back(snapshot_cpu(*model));
@@ -800,23 +800,23 @@ TEST(SceneCombinedEncode, CpuDecodeMatchesFrozenMasterForEveryCode) {
         bounds.emplace_back(std::min(lo, hi), std::max(lo, hi));
     }
     constexpr size_t count = 65536;
-    SplatData model(1, Tensor::zeros({count, 3}, Device::CUDA),
-                    Tensor::zeros({count, 1, 3}, Device::CUDA), Tensor::zeros({count, 3, 3}, Device::CUDA),
-                    Tensor::zeros({count, 3}, Device::CUDA), Tensor::ones({count, 4}, Device::CUDA),
-                    Tensor::zeros({count, 1}, Device::CUDA), 1.f);
+    SplatData model(1, Tensor::zeros({count, 3}, Device::GPU),
+                    Tensor::zeros({count, 1, 3}, Device::GPU), Tensor::zeros({count, 3, 3}, Device::GPU),
+                    Tensor::zeros({count, 3}, Device::GPU), Tensor::ones({count, 4}, Device::GPU),
+                    Tensor::zeros({count, 1}, Device::GPU), 1.f);
     ASSERT_TRUE(model.apply_shN_value_quant());
     auto codes = model.shN_raw().cpu();
     for (size_t row = 0; row < count; ++row)
         for (size_t c = 0; c < 9; ++c)
             static_cast<uint16_t*>(codes.data_ptr())[(row / 32) * 9 * 32 + c * 32 + row % 32] = row;
-    model.shN_raw() = codes.cuda();
+    model.shN_raw() = codes.gpu();
     for (size_t i = 0; i < bounds.size(); ++i) {
         auto limits = model.shN_value_bounds().cpu();
         for (size_t j = 0; j < limits.numel(); j += 2) {
             limits.ptr<float>()[j] = bounds[i].first;
             limits.ptr<float>()[j + 1] = bounds[i].second;
         }
-        model.shN_value_bounds() = limits.cuda();
+        model.shN_value_bounds() = limits.gpu();
         checkFrozenMaster("decode_" + std::to_string(i), model.shN_canonical_cpu(), sizeof(float));
         // Exercise the same GPU range decoder used by bands against the frozen
         // production host bytes, independently of the branch's CPU decoder.
@@ -841,7 +841,7 @@ TEST(SceneCombinedEncode, QuantizedBandsMatchMasterEncodedBytesAndBounds) {
     const auto allocator = [](lfs::core::TensorShape shape, size_t, lfs::core::DataType dtype, std::string_view) {
         // Master leaves unused swizzle-tail cells unwritten. Give both paths
         // identical initial bytes so the comparison includes that padding too.
-        auto result = Tensor::empty(std::move(shape), Device::CUDA, dtype);
+        auto result = Tensor::empty(std::move(shape), Device::GPU, dtype);
         result.zero_();
         return result;
     };
@@ -880,23 +880,23 @@ TEST(SceneCombinedEncode, QuantizedBandsMatchMasterEncodedBytesAndBounds) {
                         coefficients[i] = float(int(i % 199) - 99) / 17.0f;
                     lfs::core::CUDAStreamGuard producer_guard(producers[degree % 2]);
                     auto model = std::make_unique<SplatData>(
-                        degree, Tensor::full({count, 3}, float(degree), Device::CUDA),
-                        Tensor::zeros({count, 1, 3}, Device::CUDA),
-                        Tensor::from_vector(coefficients, {count, rest, 3}, Device::CUDA),
-                        Tensor::zeros({count, 3}, Device::CUDA), Tensor::ones({count, 4}, Device::CUDA),
-                        Tensor::zeros({count, 1}, Device::CUDA), 1.0f);
+                        degree, Tensor::full({count, 3}, float(degree), Device::GPU),
+                        Tensor::zeros({count, 1, 3}, Device::GPU),
+                        Tensor::from_vector(coefficients, {count, rest, 3}, Device::GPU),
+                        Tensor::zeros({count, 3}, Device::GPU), Tensor::ones({count, 4}, Device::GPU),
+                        Tensor::zeros({count, 1}, Device::GPU), 1.0f);
                     if (rest && (source_mode == 1 || (source_mode >= 2 && degree % 2)))
                         ASSERT_TRUE(model->apply_shN_value_quant());
                     if (source_mode == 3 && degree == 1) {
                         auto codes = model->shN_raw().cpu();
                         std::fill_n(static_cast<uint16_t*>(codes.data_ptr()), codes.numel(), uint16_t{173});
-                        model->shN_raw() = codes.cuda();
+                        model->shN_raw() = codes.gpu();
                         auto bounds = model->shN_value_bounds().cpu();
                         for (size_t i = 0; i < bounds.numel(); i += 2) {
                             bounds.ptr<float>()[i] = 0.1f;
                             bounds.ptr<float>()[i + 1] = 0.9f;
                         }
-                        model->shN_value_bounds() = bounds.cuda();
+                        model->shN_value_bounds() = bounds.gpu();
                     }
                     const auto id = scene.addSplat(std::to_string(degree), std::move(model));
                     scene.setNodeTransform(id, glm::translate(glm::mat4(1.0f), glm::vec3(degree, degree * 2, -degree)));
@@ -951,7 +951,7 @@ TEST(SceneCombinedImport, FailedBuildReportsOnceAndAllowsExplicitRetry) {
     scene.setCombinedModelAllocator([&](lfs::core::TensorShape shape, size_t, lfs::core::DataType dtype, std::string_view) -> Tensor {
         if (fail.load())
             throw std::runtime_error("allocation failed");
-        return Tensor::empty(std::move(shape), Device::CUDA, dtype);
+        return Tensor::empty(std::move(shape), Device::GPU, dtype);
     });
     int failures = 0;
     std::atomic<int> ready{0};
@@ -1009,7 +1009,7 @@ TEST(SceneCombinedImport, OrdinaryBuildFailuresKeepAutomaticRetry) {
     scene.setCombinedModelAllocator([&](lfs::core::TensorShape shape, size_t, lfs::core::DataType dtype, std::string_view) -> Tensor {
         if (fail)
             throw std::runtime_error("allocation failed");
-        return Tensor::empty(std::move(shape), Device::CUDA, dtype);
+        return Tensor::empty(std::move(shape), Device::GPU, dtype);
     });
     scene.requestCombinedModelBuild(true);
     while (scene.combinedModelBuildPending()) {
@@ -1020,6 +1020,28 @@ TEST(SceneCombinedImport, OrdinaryBuildFailuresKeepAutomaticRetry) {
     fail = false;
     ASSERT_NE(scene.getCombinedModel(), nullptr);
     EXPECT_EQ(scene.getCombinedModel()->size(), 4u);
+}
+
+// Catches a worker that stays silent outside imports: a large multi-node edit such as
+// deleting a node left the viewport without splats until the next input event.
+TEST(SceneCombinedBuild, WorkerCompletionOutsideImportAnnouncesReadyModel) {
+    Scene scene;
+    scene.addSplat("first", make_two_splat_model(0.0f));
+    scene.addSplat("second", make_two_splat_model(1.0f));
+    std::atomic<int> ready{0};
+    lfs::event::ScopedHandler handler;
+    handler.subscribe<lfs::core::events::state::CombinedModelBuildReady>([&](const auto& event) {
+        if (event.scene == &scene)
+            ++ready;
+    });
+    scene.requestCombinedModelBuild(true);
+    while (scene.combinedModelBuildPending()) {
+        (void)scene.combinedModelBuildError();
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(ready.load(), 1);
+    ASSERT_NE(scene.getCombinedModel(), nullptr);
+    EXPECT_EQ(scene.getCombinedModel()->size(), 4);
 }
 
 TEST(SceneCombinedEncode, QuantizedStorageCoversReservedModelCapacity) {
@@ -1034,18 +1056,18 @@ TEST(SceneCombinedEncode, QuantizedStorageCoversReservedModelCapacity) {
             for (size_t cell = 0; cell < sh.size(); ++cell)
                 sh[cell] = float(int(cell % 127) - 63) / 13.f;
             auto model = std::make_unique<SplatData>(
-                3, Tensor::zeros({count, 3}, Device::CUDA),
-                Tensor::zeros({count, 1, 3}, Device::CUDA),
-                Tensor::from_vector(sh, {count, 15, 3}, Device::CUDA),
-                Tensor::zeros({count, 3}, Device::CUDA),
-                Tensor::ones({count, 4}, Device::CUDA),
-                Tensor::zeros({count, 1}, Device::CUDA), 1.f);
+                3, Tensor::zeros({count, 3}, Device::GPU),
+                Tensor::zeros({count, 1, 3}, Device::GPU),
+                Tensor::from_vector(sh, {count, 15, 3}, Device::GPU),
+                Tensor::zeros({count, 3}, Device::GPU),
+                Tensor::ones({count, 4}, Device::GPU),
+                Tensor::zeros({count, 1}, Device::GPU), 1.f);
             if (i == 0)
                 ASSERT_TRUE(model->apply_shN_value_quant());
             scene.addSplat(std::to_string(i), std::move(model));
         }
         const auto allocate = [](TensorShape shape, size_t capacity, DataType dtype, std::string_view) {
-            return Tensor::zeros_direct(std::move(shape), capacity, Device::CUDA, dtype);
+            return Tensor::zeros_direct(std::move(shape), capacity, Device::GPU, dtype);
         };
         const auto over_reserve = [&](TensorShape shape, size_t capacity, DataType dtype, std::string_view name) {
             if (name == "SplatData.means")

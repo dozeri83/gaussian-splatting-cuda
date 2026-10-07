@@ -568,12 +568,10 @@ namespace lfs::vis::gui {
             hovered_hit = nearestHandle(projected_rects, rect_count, mouse);
         }
 
-        if (g_active.active && g_active.id == config.id) {
-            result.active = config.input.mouse_left_down;
-            if (!result.active) {
-                g_active = ActiveState{};
-            }
-        }
+        const bool release_active_drag =
+            g_active.active && g_active.id == config.id && !config.input.mouse_left_down;
+        if (g_active.active && g_active.id == config.id)
+            result.active = true;
 
         if (!g_active.active && config.input_enabled &&
             hovered_hit.handle != BoundsGizmoHandle::None &&
@@ -588,7 +586,6 @@ namespace lfs::vis::gui {
 
         result.hovered_handle = hovered_hit.handle;
         result.hovered = hovered_hit.handle != BoundsGizmoHandle::None;
-        g_hovered |= result.hovered || result.active;
 
         const HandleHit highlighted = result.active
                                           ? HandleHit{g_active.handle,
@@ -605,6 +602,14 @@ namespace lfs::vis::gui {
         drawBoundsRects(*draw_config.draw_list, projected_rects, rect_count);
         drawBoundsAnchors(*draw_config.draw_list, projected_rects, rect_count, highlighted);
         draw_config.draw_list->PopClipRect();
+
+        result.released = release_active_drag;
+        result.returned_to_start = release_active_drag && mouse == g_active.start_mouse;
+        if (release_active_drag)
+            result.active = false;
+        g_hovered |= result.hovered || result.active;
+        if (release_active_drag)
+            g_active = ActiveState{};
 
         return result;
     }

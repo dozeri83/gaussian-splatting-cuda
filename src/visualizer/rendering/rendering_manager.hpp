@@ -96,7 +96,7 @@ namespace lfs::vis {
             ViewId view;
             const Viewport& viewport;
             const RenderSettings& settings;
-            glm::ivec2 logical_screen_size{0, 0};
+            glm::ivec2 screen_size_px{0, 0};
             const ViewportRegion* viewport_region = nullptr;
             SceneManager* scene_manager = nullptr;
             GraphicsContext* graphics_context = nullptr;
@@ -490,7 +490,7 @@ namespace lfs::vis {
         int pickCameraFrustum(ViewId view, const glm::vec2& mouse_pos);
 
         // Depth access for tools (returns camera-space depth at pixel, or -1 if invalid).
-        float getDepthAtPixel(ViewId view, int x, int y, std::optional<SplitViewPanelId> panel = std::nullopt) const;
+        float getDepthAtPixel(ViewId view, int x, int y, std::optional<SplitViewPanelId> panel = std::nullopt, bool nonblocking = false) const;
         struct ExpectedDepthSampleRequest {
             ViewId view = kNoView;
             SceneManager* scene_manager = nullptr;
@@ -608,6 +608,12 @@ namespace lfs::vis {
         }
         [[nodiscard]] SelectionPreviewMode getSelectionPreviewMode() const {
             return this->state().viewport_overlay_service_.selectionPreviewMode();
+        }
+        void setGaussianSelectionVisible(const bool visible) {
+            if (gaussian_selection_visible_ == visible)
+                return;
+            gaussian_selection_visible_ = visible;
+            markDirty(DirtyFlag::SELECTION, lfs::vis::FrameReason::Selection);
         }
         [[nodiscard]] int getHoveredGaussianId() const { return this->state().viewport_overlay_service_.hoveredGaussianId(); }
 
@@ -1091,6 +1097,7 @@ namespace lfs::vis {
         bool lod_available_ = false;
 
         GizmoState gizmo_state_;
+        bool gaussian_selection_visible_ = true;
 
         lfs::event::ScopedHandler event_handlers_;
 

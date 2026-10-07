@@ -448,6 +448,31 @@ TEST(PointCloudUpdatesGpu, IndependentSnapshotAndRendererLeasesAvoidHostRoundtri
     ASSERT_TRUE(pixels) << pixels.error();
     const auto* rgb = (*pixels)->ptr<float>();
     EXPECT_GT(rgb[(32 * 64 + 32) * 3 + 1], 0.9f);
+    // Depth follows the same resident output and stable target as color.
+    auto depth_request = PointSceneRenderer::DepthSampleRequest{
+        .pixel = {32, 32},
+        .source_size = {64, 64},
+        .target = RenderTargetId{1},
+        .nonblocking = true};
+    auto sampled = renderer.sampleDepthAtPixel(graphics.vulkanContext(), depth_request);
+    ASSERT_TRUE(sampled) << lfs::format_for_developer(sampled.error());
+    ASSERT_TRUE(until([&] {
+        sampled = renderer.sampleDepthAtPixel(graphics.vulkanContext(), depth_request);
+        return !sampled || *sampled != PointSceneRenderer::kDepthSamplePending;
+    }));
+    ASSERT_TRUE(sampled) << lfs::format_for_developer(sampled.error());
+    EXPECT_NEAR(*sampled, 3.0f, 1e-4f);
+    depth_request.nonblocking = false;
+    const auto synchronous = renderer.sampleDepthAtPixel(graphics.vulkanContext(), depth_request);
+    ASSERT_TRUE(synchronous) << lfs::format_for_developer(synchronous.error());
+    EXPECT_NEAR(*synchronous, *sampled, 1e-5f);
+    depth_request.target = RenderTargetId{9};
+    EXPECT_FALSE(renderer.sampleDepthAtPixel(graphics.vulkanContext(), depth_request));
+    depth_request.target = RenderTargetId{1};
+    depth_request.pixel = {0, 0};
+    const auto background_depth = renderer.sampleDepthAtPixel(graphics.vulkanContext(), depth_request);
+    ASSERT_TRUE(background_depth);
+    EXPECT_LT(*background_depth, 0.0f);
     auto positions_cpu = current->means.cpu();
     auto colors_cpu = current->colors.cpu();
     auto reference_request = request;

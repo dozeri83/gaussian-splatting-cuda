@@ -130,21 +130,20 @@ def _splat_editing_blocked() -> bool:
 def _poll_can_select(context) -> bool:
     return (
         _poll_has_gaussians(context)
-        and not _selection_is_crop_volume()
         and not _splat_editing_blocked()
     )
 
 
 def _poll_can_transform(context) -> bool:
-    return bool(getattr(context, "can_transform", False)) and not _selection_is_crop_volume()
+    return bool(getattr(context, "can_transform", False))
 
 
 def _poll_can_mirror(_context) -> bool:
-    return _poll_builtin_tool_available("builtin.mirror") and not _selection_is_crop_volume()
+    return _poll_builtin_tool_available("builtin.mirror")
 
 
 def _poll_can_align(_context) -> bool:
-    return _poll_builtin_tool_available("builtin.align") and not _selection_is_crop_volume()
+    return _poll_builtin_tool_available("builtin.align")
 
 
 def _poll_can_cropbox(context) -> bool:

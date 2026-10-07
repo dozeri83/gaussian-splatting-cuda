@@ -626,12 +626,10 @@ namespace lfs::vis::gui {
             hovered_handle = nearestHandle(projected_axes, projected_planes, mouse, pivot_screen);
         }
 
-        if (g_active.active && g_active.id == config.id) {
-            result.active = config.input.mouse_left_down;
-            if (!result.active) {
-                g_active = ActiveState{};
-            }
-        }
+        const bool release_active_drag =
+            g_active.active && g_active.id == config.id && !config.input.mouse_left_down;
+        if (g_active.active && g_active.id == config.id)
+            result.active = true;
 
         if (!g_active.active && config.input_enabled &&
             hovered_handle != TranslationGizmoHandle::None &&
@@ -661,7 +659,6 @@ namespace lfs::vis::gui {
 
         result.hovered_handle = hovered_handle;
         result.hovered = hovered_handle != TranslationGizmoHandle::None;
-        g_hovered |= result.hovered || result.active;
 
         const TranslationGizmoHandle emphasized = result.active ? g_active.handle : hovered_handle;
         for (const auto& plane : projected_planes) {
@@ -683,6 +680,14 @@ namespace lfs::vis::gui {
         draw_config.draw_list->AddCircleFilled(glm::vec2(pivot_screen.x, pivot_screen.y),
                                                center_active ? 5.5f : (center_hovered ? 5.0f : 4.2f),
                                                overlayColor(245, 248, 255, center_active ? 245 : 220), 24);
+
+        result.released = release_active_drag;
+        result.returned_to_start = release_active_drag && mouse == g_active.start_mouse;
+        if (release_active_drag)
+            result.active = false;
+        g_hovered |= result.hovered || result.active;
+        if (release_active_drag)
+            g_active = ActiveState{};
 
         return result;
     }

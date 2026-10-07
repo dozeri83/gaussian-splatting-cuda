@@ -279,6 +279,21 @@ namespace lfs::vis {
                     return result;
                 } catch (const std::exception& e) { return std::unexpected(e.what()); }
             }
+            lfs::Result<float> sampleDepthAtPixel(const DepthSampleRequest& request) override {
+                if (!native_ || !hasRenderTarget(request.target))
+                    return outputError("Metal point depth output is unavailable");
+                if (request.nonblocking) {
+                    const auto complete = native_->outputComplete(request.target);
+                    if (!complete)
+                        return complete.error();
+                    if (!*complete) {
+                        retry_->store(true, std::memory_order_release);
+                        lfs::python::request_redraw_after(1.0 / 60.0);
+                        return kDepthSamplePending;
+                    }
+                }
+                return native_->readDepth({.pixel = request.pixel, .source_size = request.source_size, .target = request.target});
+            }
             bool takeRefinementRequest() override { return retry_->exchange(false, std::memory_order_acq_rel); }
             auto readOutputImage(RenderTargetId t) -> std::expected<std::shared_ptr<core::Tensor>, std::string> override {
                 if (!hasRenderTarget(t))
