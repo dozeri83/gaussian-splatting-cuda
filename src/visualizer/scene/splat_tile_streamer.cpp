@@ -81,6 +81,20 @@ namespace lfs::vis {
         return std::clamp<std::size_t>(cores / 4, 2, 4);
     }
 
+    bool splat_tile_budget_allows_load(const SplatTileBudgetUsage& usage,
+                                       const std::uint64_t incoming_bytes) {
+        if (usage.minimum_cut)
+            return true;
+        const auto model_bytes = usage.replacing_drawn ? usage.replacement_bytes : usage.drawn_bytes;
+        std::uint64_t remaining = usage.limit_bytes;
+        for (const auto bytes : {usage.cached_bytes, usage.in_flight_bytes, model_bytes, incoming_bytes}) {
+            if (bytes > remaining)
+                return false;
+            remaining -= bytes;
+        }
+        return true;
+    }
+
     namespace {
         // Workers of every streamer, counted from launch until their last reference to the
         // streamer is gone, so shutdown can wait for retired ones.
@@ -187,8 +201,13 @@ namespace lfs::vis {
             cache_bytes_ = 0;
             over_budget_ = false;
             sse_factor_ = 1.0f;
+            minimum_cut_ = false;
             requested_set_.clear();
             build_request_.clear();
+            built_.reset();
+            built_set_.clear();
+            built_bytes_ = 0;
+            installed_gen_ = ++build_gen_; // invalidate a merge that started under the old budget
             merge_failures_ = 0;
             cache_changed_ = true;
             cv_.notify_all();
@@ -203,6 +222,20 @@ namespace lfs::vis {
         if (over_budget_ && sse_factor_ < kMaxSseFactor) {
             sse_factor_ = std::min(sse_factor_ * kSseFactorStep, kMaxSseFactor);
             factor_changed = true;
+        } else if (over_budget_ && !minimum_cut_) {
+            // A finite SSE cap can still refine very high-error tiles. Infinity is the
+            // actual coarsest cut and, as the last usable representation, is allowed even
+            // when its settled footprint exceeds the configured cache limit.
+            minimum_cut_ = true;
+            factor_changed = true;
+        } else if (!over_budget_ && minimum_cut_) {
+            auto finest_bounded = view;
+            finest_bounded.max_sse *= kMaxSseFactor;
+            if (static_cast<double>(cut_bytes(*source_, finest_bounded, 1.0f)) <=
+                kRelaxHeadroom * static_cast<double>(cache_limit_bytes_)) {
+                minimum_cut_ = false;
+                factor_changed = true;
+            }
         } else if (!over_budget_ && sse_factor_ > 1.0f) {
             const float finer = std::max(sse_factor_ / kSseRelaxStep, 1.0f);
             if (static_cast<double>(cut_bytes(*source_, view, finer)) <=
@@ -217,7 +250,14 @@ namespace lfs::vis {
             last_view_ = view;
             ++frame_;
             auto adjusted = view;
-            adjusted.max_sse *= sse_factor_;
+            adjusted.max_sse = minimum_cut_ ? std::numeric_limits<float>::infinity()
+                                            : adjusted.max_sse * sse_factor_;
+            auto ideal = io::select_splat_tiles(*source_, adjusted, [](std::uint32_t) { return true; });
+            std::ranges::sort(ideal.render);
+            replacement_bytes_ = 0;
+            for (const auto tile : ideal.render)
+                replacement_bytes_ += tile_bytes(source_->tiles()[tile]);
+            replacing_drawn_ = ideal.render != shown_set_;
             auto selection = io::select_splat_tiles(*source_, adjusted, [this](const std::uint32_t tile) {
                 return cache_.contains(tile);
             });
@@ -261,7 +301,8 @@ namespace lfs::vis {
                                  .cache_limit_bytes = cache_limit_bytes_,
                                  .gpu_total_bytes = gpu_total_bytes_,
                                  .build_ms = build_ms_,
-                                 .max_sse = last_view_.max_sse * sse_factor_,
+                                 .max_sse = minimum_cut_ ? std::numeric_limits<float>::infinity()
+                                                         : last_view_.max_sse * sse_factor_,
                                  .load_workers = workers_.size()};
         for (const auto tile : shown_set_)
             out.drawn_splats += tiles[tile].splat_count;
@@ -274,13 +315,25 @@ namespace lfs::vis {
         return cache_bytes_ + in_flight_bytes_ + drawn_bytes_ + building_bytes_ + (built_ ? built_bytes_ : 0);
     }
 
+    SplatTileBudgetUsage SplatTileStreamer::budgetUsageLocked(const bool minimum_cut) const {
+        return SplatTileBudgetUsage{
+            .cached_bytes = cache_bytes_,
+            .in_flight_bytes = in_flight_bytes_,
+            .drawn_bytes = drawn_bytes_,
+            .replacement_bytes = std::max({replacement_bytes_, building_bytes_, built_ ? built_bytes_ : 0}),
+            .limit_bytes = cache_limit_bytes_,
+            .replacing_drawn = replacing_drawn_,
+            .minimum_cut = minimum_cut,
+        };
+    }
+
     void SplatTileStreamer::evictLocked(const std::uint64_t incoming) {
         // The requested cut pins its tiles only until it is merged; once drawn (or built and
         // awaiting the swap) the model is its own copy and the tiles are ordinary cache.
         // Pinning a drawn cut would block the next cut's tiles from ever loading.
         const bool request_pending =
             requested_set_ != shown_set_ && !(built_ && requested_set_ == built_set_);
-        while (usedBytesLocked() + incoming > cache_limit_bytes_) {
+        while (!splat_tile_budget_allows_load(budgetUsageLocked(false), incoming)) {
             auto victim = cache_.end();
             for (auto it = cache_.begin(); it != cache_.end(); ++it) {
                 if (it->second.last_wanted == frame_ ||
@@ -397,14 +450,9 @@ namespace lfs::vis {
                     continue;
                 const auto bytes = tile_bytes(tiles[tile]);
                 evictLocked(bytes);
-                const auto used = usedBytesLocked();
-                const auto transient = building_bytes_ + (built_ ? built_bytes_ : 0);
-                if (used + bytes <= cache_limit_bytes_) {
+                if (splat_tile_budget_allows_load(budgetUsageLocked(minimum_cut_), bytes)) {
                     next = tile;
                     next_bytes = bytes;
-                } else if (used - transient + bytes <= cache_limit_bytes_) {
-                    // Fits once the pending merge replaces the drawn model: wait for it
-                    // instead of coarsening the view over a transient peak.
                 } else if (!over_budget_) {
                     over_budget_ = true;
                     if (wake_)
@@ -428,13 +476,27 @@ namespace lfs::vis {
             lock.unlock();
             // GPU allocation, upload and the placement transform can throw; an exception
             // leaving the worker would end the app, so it fails just this tile.
-            auto loaded = [&]() -> std::expected<core::SplatData, std::string> {
+            auto loaded = [&]() -> lfs::Result<core::SplatData> {
                 try {
                     return io::load_splat_tile_gpu(*source_, next);
+                } catch (const lfs::Exception& e) {
+                    return e.error();
                 } catch (const std::exception& e) {
-                    return std::unexpected(std::string(e.what()));
+                    return lfs::make_error(lfs::ErrorInit{
+                        .code = lfs::ErrorCode::Internal,
+                        .domain = lfs::ErrorDomain::Rendering,
+                        .detail = e.what(),
+                        .detection = LFS_SOURCE_SITE_CURRENT(),
+                        .fields = lfs::SmallFields{}.add("tile", static_cast<std::uint64_t>(next)),
+                    });
                 } catch (...) {
-                    return std::unexpected(std::string("unknown error"));
+                    return lfs::make_error(lfs::ErrorInit{
+                        .code = lfs::ErrorCode::Internal,
+                        .domain = lfs::ErrorDomain::Rendering,
+                        .detail = "Unknown failure while loading a 3D Tiles tile",
+                        .detection = LFS_SOURCE_SITE_CURRENT(),
+                        .fields = lfs::SmallFields{}.add("tile", static_cast<std::uint64_t>(next)),
+                    });
                 }
             }();
             lock.lock();
@@ -443,7 +505,7 @@ namespace lfs::vis {
             if (stop.stop_requested())
                 break; // retired while loading: drop the tile instead of caching it
             if (!loaded) {
-                LOG_ERROR("3D Tiles: tile {}: {}", next, loaded.error());
+                LOG_ERROR("3D Tiles: tile {}: {}", next, lfs::format_for_developer(loaded.error()));
                 failed_.insert(next);
                 continue;
             }

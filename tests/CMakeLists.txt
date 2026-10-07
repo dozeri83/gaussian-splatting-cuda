@@ -721,6 +721,7 @@ if(NOT LFS_HAS_CUDA)
         test_nodes_scene.cpp
         test_nodes_modifier_manager.cpp
         test_splat_simplify.cpp
+        test_tiles3d.cpp
         test_node_canvas_interaction.cpp
         test_mcp_node_tools.cpp
         test_mcp_screen_tools.cpp

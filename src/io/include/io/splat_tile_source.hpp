@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/error.hpp"
 #include "core/export.hpp"
 #include "core/splat_data.hpp"
 #include <array>
@@ -83,7 +84,7 @@ namespace lfs::io {
         virtual ~SplatTileSource() = default;
         [[nodiscard]] virtual std::span<const SplatTile> tiles() const = 0;
         // Decodes one tile's content in its content frame; safe from worker threads.
-        [[nodiscard]] virtual std::expected<core::SplatData, std::string> load_tile(std::uint32_t tile) const = 0;
+        [[nodiscard]] virtual lfs::Result<core::SplatData> load_tile(std::uint32_t tile) const = 0;
         // Source-local frame -> georeferenced frame (ECEF for 3D Tiles).
         glm::dmat4 local_to_world{1.0};
         // Tile contents left out because they hold no supported splat data.
@@ -115,7 +116,7 @@ namespace lfs::io {
         const std::function<bool(std::uint32_t)>& resident);
 
     // Decodes one tile and moves it to the GPU.
-    [[nodiscard]] LFS_IO_API std::expected<core::SplatData, std::string> load_splat_tile_gpu(
+    [[nodiscard]] LFS_IO_API lfs::Result<core::SplatData> load_splat_tile_gpu(
         const SplatTileSource& source, std::uint32_t tile);
 
     // Merges decoded tiles into one model in the source-local frame; null for no tiles.
@@ -130,7 +131,7 @@ namespace lfs::io {
     [[nodiscard]] LFS_IO_API bool is_tiles3d_path(const std::filesystem::path& path);
     // Parses the tile tree and probes each tile's splat count from its GLB header.
     // Tiles are expressed relative to the root tile's frame.
-    [[nodiscard]] LFS_IO_API std::expected<std::shared_ptr<SplatTileSource>, std::string>
+    [[nodiscard]] LFS_IO_API lfs::Result<std::shared_ptr<SplatTileSource>>
     open_tiles3d(const std::filesystem::path& path);
 
 } // namespace lfs::io

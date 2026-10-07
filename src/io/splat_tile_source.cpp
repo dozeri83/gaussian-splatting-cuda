@@ -81,8 +81,8 @@ namespace lfs::io {
         return out;
     }
 
-    std::expected<core::SplatData, std::string> load_splat_tile_gpu(const SplatTileSource& source,
-                                                                    const std::uint32_t tile) {
+    lfs::Result<core::SplatData> load_splat_tile_gpu(const SplatTileSource& source,
+                                                     const std::uint32_t tile) {
         auto data = source.load_tile(tile);
         if (!data)
             return data;

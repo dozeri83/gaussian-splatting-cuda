@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "io/splat_tile_source.hpp"
+#include "visualizer/scene/splat_tile_streamer.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -10,6 +11,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <numbers>
 
 namespace {
     namespace fs = std::filesystem;
@@ -56,6 +58,41 @@ namespace {
         return {{"box", {x, 0, 0, half, 0, 0, 0, half, 0, 0, 0, half}}};
     }
 
+    glm::dvec3 wgs84_to_ecef(const double lon, const double lat, const double height = 0.0) {
+        constexpr double a = 6378137.0;
+        constexpr double e2 = 6.69437999014e-3;
+        const double n = a / std::sqrt(1.0 - e2 * std::sin(lat) * std::sin(lat));
+        return {(n + height) * std::cos(lat) * std::cos(lon),
+                (n + height) * std::cos(lat) * std::sin(lon),
+                (n * (1.0 - e2) + height) * std::sin(lat)};
+    }
+
+    glm::dmat4 enu_at(const double lon, const double lat, const double height = 0.0) {
+        const glm::dvec3 east(-std::sin(lon), std::cos(lon), 0);
+        const glm::dvec3 north(-std::sin(lat) * std::cos(lon), -std::sin(lat) * std::sin(lon), std::cos(lat));
+        const glm::dvec3 up(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat));
+        glm::dmat4 frame(1.0);
+        frame[0] = glm::dvec4(east, 0);
+        frame[1] = glm::dvec4(north, 0);
+        frame[2] = glm::dvec4(up, 0);
+        frame[3] = glm::dvec4(wgs84_to_ecef(lon, lat, height), 1);
+        return frame;
+    }
+
+    Json matrix_json(const glm::dmat4& matrix) {
+        Json values = Json::array();
+        for (int column = 0; column < 4; ++column)
+            for (int row = 0; row < 4; ++row)
+                values.push_back(matrix[column][row]);
+        return values;
+    }
+
+    void expect_near(const glm::dvec3& actual, const glm::dvec3& expected, const double tolerance = 1e-4) {
+        EXPECT_NEAR(actual.x, expected.x, tolerance);
+        EXPECT_NEAR(actual.y, expected.y, tolerance);
+        EXPECT_NEAR(actual.z, expected.z, tolerance);
+    }
+
     // Root without content -> two coarse tiles -> two leaves each, in a row along x.
     class FakeSource final : public SplatTileSource {
     public:
@@ -79,8 +116,13 @@ namespace {
                       make(1, 1, 0, 2, 0, 0, 20), make(3, 1, 0, 2, 0, 0, 20)};
         }
         std::span<const SplatTile> tiles() const override { return tiles_; }
-        std::expected<lfs::core::SplatData, std::string> load_tile(std::uint32_t) const override {
-            return std::unexpected("not used");
+        lfs::Result<lfs::core::SplatData> load_tile(std::uint32_t) const override {
+            return lfs::make_error(lfs::ErrorInit{
+                .code = lfs::ErrorCode::FailedPrecondition,
+                .domain = lfs::ErrorDomain::IO,
+                .detail = "not used",
+                .detection = LFS_SOURCE_SITE_CURRENT(),
+            });
         }
     };
 
@@ -112,10 +154,11 @@ TEST(Tiles3d, ParsesTreeRelativeToRootFrame) {
 
     ASSERT_TRUE(is_tiles3d_path(path));
     auto source = open_tiles3d(path);
-    ASSERT_TRUE(source) << source.error();
+    ASSERT_TRUE(source) << lfs::format_for_developer(source.error());
     const auto tiles = (*source)->tiles();
     ASSERT_EQ(tiles.size(), 4u); // root, a, external link, b
     EXPECT_DOUBLE_EQ((*source)->local_to_world[3][0], 1e6);
+    EXPECT_EQ(tiles[0].transform, glm::mat4(1.0f));
     EXPECT_EQ(tiles[0].first_child, 1u);
     EXPECT_EQ(tiles[0].child_count, 2u);
     // 3D Tiles 1.1: the error scales with the tile transform (x2), and the local frame
@@ -195,6 +238,73 @@ namespace {
     }
 } // namespace
 
+TEST(Tiles3d, GeoreferencedEnuRootMapsUpToDatasetUp) {
+    TempDir dir;
+    write_glb(dir.path / "a.glb", 10, 0);
+    constexpr double degrees = std::numbers::pi / 180.0;
+    const glm::dmat4 enu = enu_at(22.5684 * degrees, 51.2465 * degrees, 180.0);
+    const Json root = {
+        {"transform", matrix_json(enu)},
+        {"boundingVolume", {{"box", {5, 0, 20, 1, 0, 0, 0, 1, 0, 0, 0, 1}}}},
+        {"geometricError", 0},
+        {"content", {{"uri", "a.glb"}}},
+    };
+    auto source = open_tiles3d(write_tileset(dir.path, root));
+    ASSERT_TRUE(source) << lfs::format_for_developer(source.error());
+    const auto& tile = (*source)->tiles().front();
+    expect_near(glm::dvec3(tile.transform * glm::vec4(1, 0, 0, 0)), {1, 0, 0});
+    expect_near(glm::dvec3(tile.transform * glm::vec4(0, 0, 1, 0)), {0, -1, 0});
+    expect_near(tile.center, {5, -20, 0});
+
+    const glm::dmat4 round_trip = (*source)->local_to_world * glm::dmat4(tile.transform);
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row)
+            EXPECT_NEAR(round_trip[column][row], enu[column][row], 1e-4);
+}
+
+TEST(Tiles3d, TransformlessEcefBoxUsesSmallUprightLocalFrame) {
+    TempDir dir;
+    write_glb(dir.path / "a.glb", 10, 0);
+    const glm::dvec3 center(3694433, 1535454, 4950913);
+    const Json root = {
+        {"boundingVolume", {{"box", {center.x, center.y, center.z, 100, 0, 0, 0, 100, 0, 0, 0, 100}}}},
+        {"geometricError", 0},
+        {"content", {{"uri", "a.glb"}}},
+    };
+    auto source = open_tiles3d(write_tileset(dir.path, root));
+    ASSERT_TRUE(source) << lfs::format_for_developer(source.error());
+    const auto& tile = (*source)->tiles().front();
+    EXPECT_LT(glm::length(tile.center), 1e4f);
+    const glm::dvec3 normal = glm::normalize(glm::dvec3(
+        center.x / (6378137.0 * 6378137.0), center.y / (6378137.0 * 6378137.0),
+        center.z / (6356752.314245 * 6356752.314245)));
+    expect_near(glm::dvec3(tile.transform * glm::dvec4(normal, 0)), {0, -1, 0}, 1e-5);
+
+    const glm::dmat4 identity = (*source)->local_to_world * glm::dmat4(tile.transform);
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row)
+            EXPECT_NEAR(identity[column][row], column == row ? 1.0 : 0.0, 0.25);
+}
+
+TEST(Tiles3d, TransformlessRegionUsesUprightLocalFrame) {
+    TempDir dir;
+    write_glb(dir.path / "a.glb", 10, 0);
+    constexpr double degrees = std::numbers::pi / 180.0;
+    const double lon = 22.5684 * degrees;
+    const double lat = 51.2465 * degrees;
+    const Json root = {
+        {"boundingVolume", {{"region", {lon - 0.001, lat - 0.001, lon + 0.001, lat + 0.001, 150, 210}}}},
+        {"geometricError", 0},
+        {"content", {{"uri", "a.glb"}}},
+    };
+    auto source = open_tiles3d(write_tileset(dir.path, root));
+    ASSERT_TRUE(source) << lfs::format_for_developer(source.error());
+    const auto& tile = (*source)->tiles().front();
+    const glm::dvec3 normal(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat));
+    expect_near(glm::dvec3(tile.transform * glm::dvec4(normal, 0)), {0, -1, 0}, 1e-5);
+    EXPECT_LT(glm::length(tile.center), 1e4f);
+}
+
 TEST(Tiles3d, ScalesGeometricErrorByChildTransform) {
     TempDir dir;
     write_glb(dir.path / "a.glb", 10, 0);
@@ -204,7 +314,7 @@ TEST(Tiles3d, ScalesGeometricErrorByChildTransform) {
                         {"content", {{"uri", "a.glb"}}}};
     auto source = open_tiles3d(
         write_tileset(dir.path, {{"boundingVolume", box(0, 200)}, {"geometricError", 1000}, {"children", {child}}}));
-    ASSERT_TRUE(source) << source.error();
+    ASSERT_TRUE(source) << lfs::format_for_developer(source.error());
     EXPECT_FLOAT_EQ((*source)->tiles()[1].geometric_error, 100.0f);
 }
 
@@ -216,7 +326,7 @@ TEST(Tiles3d, LoadsAllContentsAndSkipsNonSplatContent) {
     write_text(dir.path / "c.b3dm", "b3dm");
     const Json contents = {{{"uri", "a.glb"}}, {{"uri", "b.glb"}}, {{"uri", "mesh.glb"}}, {{"uri", "c.b3dm"}}};
     auto source = open_tiles3d(write_tileset(dir.path, {{"boundingVolume", box(0, 1)}, {"geometricError", 0}, {"contents", contents}}));
-    ASSERT_TRUE(source) << source.error();
+    ASSERT_TRUE(source) << lfs::format_for_developer(source.error());
     EXPECT_EQ((*source)->tiles()[0].splat_count, 15u);
     EXPECT_EQ((*source)->tiles()[0].sh_degree, 1);
     EXPECT_EQ((*source)->skipped_contents, 2u);
@@ -228,7 +338,8 @@ TEST(Tiles3d, RejectsTilesetWithoutSplatContent) {
     auto source = open_tiles3d(
         write_tileset(dir.path, {{"boundingVolume", box(0, 1)}, {"geometricError", 0}, {"content", {{"uri", "mesh.glb"}}}}));
     ASSERT_FALSE(source);
-    EXPECT_NE(source.error().find("no Gaussian splat content"), std::string::npos) << source.error();
+    EXPECT_NE(source.error().detail().find("no Gaussian splat content"), std::string_view::npos)
+        << lfs::format_for_developer(source.error());
 }
 
 TEST(Tiles3d, DecodesRelativeContentUris) {
@@ -236,13 +347,14 @@ TEST(Tiles3d, DecodesRelativeContentUris) {
     write_glb(dir.path / "tile one.glb", 10, 0);
     auto source = open_tiles3d(write_tileset(
         dir.path, {{"boundingVolume", box(0, 1)}, {"geometricError", 0}, {"content", {{"uri", "tile%20one.glb?v=2#x"}}}}));
-    ASSERT_TRUE(source) << source.error();
+    ASSERT_TRUE(source) << lfs::format_for_developer(source.error());
     EXPECT_EQ((*source)->tiles()[0].splat_count, 10u);
 
     auto remote = open_tiles3d(write_tileset(
         dir.path, {{"boundingVolume", box(0, 1)}, {"geometricError", 0}, {"content", {{"uri", "https://example.com/a.glb"}}}}));
     ASSERT_FALSE(remote);
-    EXPECT_NE(remote.error().find("scheme"), std::string::npos) << remote.error();
+    EXPECT_NE(remote.error().detail().find("scheme"), std::string_view::npos)
+        << lfs::format_for_developer(remote.error());
 }
 
 TEST(Tiles3d, RejectsTooDeepTileTree) {
@@ -253,7 +365,8 @@ TEST(Tiles3d, RejectsTooDeepTileTree) {
         node = {{"boundingVolume", box(0, 1)}, {"geometricError", 1}, {"children", {node}}};
     auto source = open_tiles3d(write_tileset(dir.path, node));
     ASSERT_FALSE(source);
-    EXPECT_NE(source.error().find("deeper"), std::string::npos) << source.error();
+    EXPECT_NE(source.error().detail().find("deeper"), std::string_view::npos)
+        << lfs::format_for_developer(source.error());
 }
 
 TEST(Tiles3d, EnclosesSkewedBoxesInOrthogonalOnes) {
@@ -267,7 +380,7 @@ TEST(Tiles3d, EnclosesSkewedBoxesInOrthogonalOnes) {
                         {"content", {{"uri", "a.glb"}}}};
     auto source = open_tiles3d(
         write_tileset(dir.path, {{"boundingVolume", box(0, 20)}, {"geometricError", 10}, {"children", {child}}}));
-    ASSERT_TRUE(source) << source.error();
+    ASSERT_TRUE(source) << lfs::format_for_developer(source.error());
     const auto& axes = (*source)->tiles()[1].half_axes;
     for (int i = 0; i < 3; ++i)
         for (int j = i + 1; j < 3; ++j)
@@ -303,4 +416,28 @@ TEST(Tiles3d, OrthographicErrorDependsOnZoomNotDistance) {
     // Zoomed out to 10 pixels per unit, the coarse error (1) stays below max_sse at any distance.
     auto wide = select_splat_tiles(source, {.camera = {0, 0, 1}, .sse_per_error = 10, .orthographic = true}, kAll);
     EXPECT_EQ(sorted(wide.render), (std::vector<std::uint32_t>{1, 2}));
+}
+
+TEST(Tiles3d, ReplacementBudgetReclaimsDrawnModel) {
+    lfs::vis::SplatTileBudgetUsage usage{
+        .cached_bytes = 100,
+        .drawn_bytes = 670,
+        .replacement_bytes = 200,
+        .limit_bytes = 603,
+        .replacing_drawn = true,
+    };
+    // The old 670 MB model exceeds the reduced limit, but it is released by the
+    // replacement. Its 200 MB model and 300 MB incoming tile fit after the swap.
+    EXPECT_TRUE(lfs::vis::splat_tile_budget_allows_load(usage, 300));
+
+    usage.replacing_drawn = false;
+    EXPECT_FALSE(lfs::vis::splat_tile_budget_allows_load(usage, 300));
+
+    // The coarsest cut is the display floor even when the user selects a limit
+    // below its steady-state footprint.
+    usage.replacing_drawn = true;
+    usage.replacement_bytes = 700;
+    EXPECT_FALSE(lfs::vis::splat_tile_budget_allows_load(usage, 1));
+    usage.minimum_cut = true;
+    EXPECT_TRUE(lfs::vis::splat_tile_budget_allows_load(usage, 1));
 }

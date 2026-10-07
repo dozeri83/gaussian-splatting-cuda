@@ -497,11 +497,6 @@ namespace lfs::vis {
     }
 
     void SceneManager::updateTileStreams(const TileStreamCamera& camera, const std::function<void()>& wake) {
-        constexpr const char* kTileStreamPanel = "lfs.tiles3d";
-        if (open_tile_stream_panel_ && gui::PanelRegistry::instance().get_panel(kTileStreamPanel)) {
-            gui::PanelRegistry::instance().set_panel_enabled(kTileStreamPanel, true);
-            open_tile_stream_panel_ = false;
-        }
         // A detached tileset keeps its path; when undo brings its node back (same uuid),
         // streaming restarts from the tileset instead of leaving the restored cut editable.
         std::vector<std::pair<core::Uuid, std::shared_ptr<const io::SplatTileSource>>> reattach;
@@ -515,7 +510,8 @@ namespace lfs::vis {
             if (auto source = io::open_tiles3d(path)) {
                 reattach.emplace_back(uuid, std::move(*source));
             } else {
-                LOG_WARN("3D Tiles: cannot resume streaming '{}': {}", node->name, source.error());
+                LOG_WARN("3D Tiles: cannot resume streaming '{}': {}", node->name,
+                         lfs::format_for_developer(source.error()));
                 unreadable.push_back(uuid);
             }
         }
@@ -595,7 +591,6 @@ namespace lfs::vis {
         tile_stream_models_[node] = scene_node ? scene_node->model.get() : nullptr;
         if (scene_node)
             scene_node->model_streamed = true;
-        open_tile_stream_panel_ = true;
     }
 
     std::optional<std::filesystem::path> SceneManager::tileStreamPath(const core::Uuid& uuid) const {

@@ -40,6 +40,20 @@ namespace lfs::io {
         constexpr std::uint32_t kMaxGlbJsonBytes = 64u << 20;
         constexpr std::uintmax_t kMaxTilesetJsonBytes = 512u << 20;
 
+        lfs::Error tiles3d_error(const lfs::ErrorCode code, std::string detail,
+                                 const fs::path& path = {}) {
+            lfs::SmallFields fields;
+            if (!path.empty())
+                fields.add("path", core::path_to_utf8(path));
+            return lfs::make_error(lfs::ErrorInit{
+                .code = code,
+                .domain = lfs::ErrorDomain::IO,
+                .detail = std::move(detail),
+                .detection = LFS_SOURCE_SITE_CURRENT(),
+                .fields = std::move(fields),
+            });
+        }
+
         struct ParsedTile {
             SplatTile tile;
             std::vector<fs::path> contents;
@@ -80,6 +94,105 @@ namespace lfs::io {
             return {(n + height) * std::cos(lat) * std::cos(lon),
                     (n + height) * std::cos(lat) * std::sin(lon),
                     (n * (1.0 - e2) + height) * std::sin(lat)};
+        }
+
+        bool near_wgs84_ellipsoid(const glm::dvec3& point) {
+            const double radius = glm::length(point);
+            return radius >= 6.30e6 && radius <= 6.42e6;
+        }
+
+        glm::dvec3 wgs84_surface_normal(const glm::dvec3& point) {
+            constexpr double a = 6378137.0;
+            constexpr double b = 6356752.314245;
+            constexpr double e2 = (a * a - b * b) / (a * a);
+            constexpr double ep2 = (a * a - b * b) / (b * b);
+            const double longitude = std::atan2(point.y, point.x);
+            const double horizontal = std::hypot(point.x, point.y);
+            const double theta = std::atan2(point.z * a, horizontal * b);
+            const double latitude = std::atan2(
+                point.z + ep2 * b * std::pow(std::sin(theta), 3),
+                horizontal - e2 * a * std::pow(std::cos(theta), 3));
+            return {std::cos(latitude) * std::cos(longitude),
+                    std::cos(latitude) * std::sin(longitude), std::sin(latitude)};
+        }
+
+        glm::dmat3 rotate_between(const glm::dvec3& from, const glm::dvec3& to) {
+            const double cosine = std::clamp(glm::dot(from, to), -1.0, 1.0);
+            if (cosine > 1.0 - 1e-12)
+                return glm::dmat3(1.0);
+            if (cosine < -1.0 + 1e-12) {
+                const glm::dvec3 basis = std::abs(from.x) < 0.9 ? glm::dvec3(1, 0, 0)
+                                                                : glm::dvec3(0, 1, 0);
+                const glm::dvec3 axis = glm::normalize(glm::cross(from, basis));
+                glm::dmat3 rotation(-1.0);
+                for (int column = 0; column < 3; ++column)
+                    for (int row = 0; row < 3; ++row)
+                        rotation[column][row] += 2.0 * axis[column] * axis[row];
+                return rotation;
+            }
+            const glm::dvec3 axis_sine = glm::cross(from, to);
+            const glm::dmat3 cross(0, axis_sine.z, -axis_sine.y,
+                                   -axis_sine.z, 0, axis_sine.x,
+                                   axis_sine.y, -axis_sine.x, 0);
+            return glm::dmat3(1.0) + cross + cross * cross / (1.0 + cosine);
+        }
+
+        glm::dmat4 enu_frame(const glm::dvec3& origin) {
+            const glm::dvec3 up = wgs84_surface_normal(origin);
+            glm::dvec3 east = glm::cross(glm::dvec3(0, 0, 1), up);
+            if (glm::length(east) < 1e-12)
+                east = glm::cross(glm::dvec3(0, 1, 0), up);
+            east = glm::normalize(east);
+            const glm::dvec3 north = glm::normalize(glm::cross(up, east));
+            glm::dmat4 frame(1.0);
+            frame[0] = glm::dvec4(east, 0.0);
+            frame[1] = glm::dvec4(north, 0.0);
+            frame[2] = glm::dvec4(up, 0.0);
+            frame[3] = glm::dvec4(origin, 1.0);
+            return frame;
+        }
+
+        std::optional<glm::dvec3> root_bounds_ecef_center(const json& root) {
+            const auto& volume = root.at("boundingVolume");
+            if (volume.contains("region")) {
+                const auto r = volume.at("region").get<std::vector<double>>();
+                if (r.size() != 6)
+                    throw std::runtime_error("bounding region must have 6 values");
+                return wgs84_to_ecef((r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5,
+                                     (r[4] + r[5]) * 0.5);
+            }
+            const char* key = volume.contains("box") ? "box" : volume.contains("sphere") ? "sphere" : nullptr;
+            if (!key)
+                return std::nullopt;
+            const auto values = volume.at(key).get<std::vector<double>>();
+            if (values.size() < 3)
+                throw std::runtime_error(std::format("bounding {} must include a center", key));
+            const glm::dvec3 center(values[0], values[1], values[2]);
+            if (!near_wgs84_ellipsoid(center))
+                return std::nullopt;
+            return center;
+        }
+
+        glm::dmat4 choose_local_to_world(const json& root, const glm::dmat4& root_transform) {
+            glm::dmat4 frame;
+            glm::dvec3 origin;
+            if (root.contains("transform") && near_wgs84_ellipsoid(glm::dvec3(root_transform[3]))) {
+                frame = root_transform;
+                origin = glm::dvec3(root_transform[3]);
+            } else if (!root.contains("transform")) {
+                const auto center = root_bounds_ecef_center(root);
+                if (!center)
+                    return root_transform;
+                origin = *center;
+                frame = enu_frame(origin);
+            } else {
+                return root_transform;
+            }
+
+            const glm::dvec3 up_world = wgs84_surface_normal(origin);
+            const glm::dvec3 up_local = glm::normalize(glm::inverse(glm::dmat3(frame)) * up_world);
+            const glm::dmat4 local_rotation(rotate_between(up_local, glm::dvec3(0, -1, 0)));
+            return frame * glm::inverse(local_rotation);
         }
 
         // A box transformed by non-uniform scale and rotation becomes a parallelepiped whose
@@ -304,20 +417,38 @@ namespace lfs::io {
 
             std::span<const SplatTile> tiles() const override { return tiles_; }
 
-            std::expected<core::SplatData, std::string> load_tile(const std::uint32_t tile) const override {
+            lfs::Result<core::SplatData> load_tile(const std::uint32_t tile) const override {
                 if (tile >= tiles_.size() || contents_[tile].empty())
-                    return std::unexpected(std::format("tile {} has no content", tile));
+                    return tiles3d_error(lfs::ErrorCode::DataLoss,
+                                         std::format("3D Tiles tile {} has no content", tile));
                 const auto& paths = contents_[tile];
+                const auto load_content = [tile](const fs::path& path) {
+                    return lfs::from_legacy_expected<core::SplatData>(
+                               load_spz(path),
+                               lfs::LegacyErrorContext{
+                                   .code = lfs::ErrorCode::DataLoss,
+                                   .domain = lfs::ErrorDomain::IO,
+                                   .operation = "decode 3D Tiles content",
+                                   .source = LFS_SOURCE_SITE_CURRENT(),
+                               })
+                        .or_else([&](lfs::Error error) -> lfs::Result<core::SplatData> {
+                            return std::move(error).with_context(
+                                "load 3D Tiles tile", LFS_SOURCE_SITE_CURRENT(),
+                                lfs::SmallFields{}
+                                    .add("tile", static_cast<std::uint64_t>(tile))
+                                    .add("path", core::path_to_utf8(path)));
+                        });
+                };
                 if (paths.size() == 1)
-                    return load_spz(paths.front());
+                    return load_content(paths.front());
                 // Several contents make up the tile together: concatenate them (on the GPU,
                 // where merge_splat_tiles pads lower SH degrees) into the tile's model.
                 std::vector<core::SplatData> parts;
                 parts.reserve(paths.size());
                 for (const auto& path : paths) {
-                    auto part = load_spz(path);
+                    auto part = load_content(path);
                     if (!part)
-                        return std::unexpected(part.error());
+                        return std::move(part).error();
                     using core::Device;
                     part->means_raw() = part->means_raw().to(Device::GPU);
                     part->sh0_raw() = part->sh0_raw().to(Device::GPU);
@@ -332,7 +463,8 @@ namespace lfs::io {
                 std::iota(indices.begin(), indices.end(), 0u);
                 auto merged = merge_splat_tiles(*this, indices, [&](const std::uint32_t i) { return &parts[i]; });
                 if (!merged)
-                    return std::unexpected(std::format("tile {} has no splats", tile));
+                    return tiles3d_error(lfs::ErrorCode::DataLoss,
+                                         std::format("3D Tiles tile {} has no splats", tile));
                 return std::move(*merged);
             }
         };
@@ -378,24 +510,27 @@ namespace lfs::io {
                    doc["root"].contains("geometricError") && doc["root"]["geometricError"].is_number() &&
                    doc["root"].contains("boundingVolume") && has_volume(doc["root"]["boundingVolume"]);
         } catch (const std::exception&) {
+            // LFS-CENSUS-OK(empty-catch): format sniffing maps unreadable or malformed JSON to a false predicate.
             return false;
         }
     }
 
-    std::expected<std::shared_ptr<SplatTileSource>, std::string> open_tiles3d(const std::filesystem::path& path) {
+    lfs::Result<std::shared_ptr<SplatTileSource>> open_tiles3d(const std::filesystem::path& path) {
         try {
             const auto doc = read_json(path);
             const auto& root = doc.at("root");
-            // Keep float geometry near the origin: the root frame (often ECEF) becomes local.
+            // Keep float geometry near the origin. Georeferenced frames also rotate their
+            // ellipsoid normal onto dataset up (-Y); ordinary authored frames stay exact.
             auto source = std::make_shared<Tiles3dSource>();
-            source->local_to_world = read_matrix(root);
+            const glm::dmat4 root_transform = read_matrix(root);
+            source->local_to_world = choose_local_to_world(root, root_transform);
             ParseContext context{.ecef_to_local = glm::inverse(source->local_to_world)};
             auto parsed = parse_tile(root, path.parent_path(), glm::dmat4(1.0), false, context, 0, 0);
             flatten(parsed, *source);
 
             // Probe every content; keep only the splat GLBs. Other content (meshes, point
             // clouds, b3dm, ...) is skipped, so a mixed tileset still shows its splats.
-            std::vector<std::string> errors(source->tiles_.size());
+            std::vector<std::optional<lfs::Error>> errors(source->tiles_.size());
             std::vector<std::vector<std::string>> skipped(source->tiles_.size());
             tbb::parallel_for(std::size_t{0}, source->tiles_.size(), [&](const std::size_t i) {
                 auto& tile = source->tiles_[i];
@@ -411,13 +546,14 @@ namespace lfs::io {
                         }
                     }
                 } catch (const std::exception& e) {
-                    errors[i] = e.what();
+                    // LFS-CENSUS-OK(empty-catch): each probe exception becomes a structured per-tile IO error.
+                    errors[i] = tiles3d_error(lfs::ErrorCode::DataLoss, e.what(), path);
                 }
                 source->contents_[i] = std::move(splat_contents);
             });
             for (const auto& error : errors)
-                if (!error.empty())
-                    return std::unexpected(error);
+                if (error)
+                    return *error;
 
             std::map<std::string, std::size_t> skipped_by_kind;
             for (const auto& kinds : skipped)
@@ -432,18 +568,25 @@ namespace lfs::io {
             for (const auto& tile : source->tiles_)
                 splats += tile.splat_count;
             if (splats == 0)
-                return std::unexpected(std::format(
-                    "3D Tiles tileset '{}' has no Gaussian splat content. Only glTF tiles with KHR_gaussian_splatting "
-                    "(SPZ compression) are supported{}",
-                    core::path_to_utf8(path),
-                    skipped_summary.empty() ? std::string(".") : std::format("; found {} contents.", skipped_summary)));
+                return tiles3d_error(
+                    lfs::ErrorCode::Unsupported,
+                    std::format(
+                        "3D Tiles tileset '{}' has no Gaussian splat content. Only glTF tiles with "
+                        "KHR_gaussian_splatting (SPZ compression) are supported{}",
+                        core::path_to_utf8(path),
+                        skipped_summary.empty() ? std::string(".")
+                                                : std::format("; found {} contents.", skipped_summary)),
+                    path);
             if (source->skipped_contents > 0)
                 LOG_WARN("3D Tiles '{}': skipped {} contents without SPZ Gaussian splats ({})", core::path_to_utf8(path),
                          source->skipped_contents, skipped_summary);
             LOG_INFO("3D Tiles '{}': {} tiles, {} splats", core::path_to_utf8(path), source->tiles_.size(), splats);
             return source;
         } catch (const std::exception& e) {
-            return std::unexpected(std::format("Invalid 3D Tiles tileset '{}': {}", core::path_to_utf8(path), e.what()));
+            // LFS-CENSUS-OK(empty-catch): the public parser boundary returns a structured IO error.
+            return tiles3d_error(
+                lfs::ErrorCode::DataLoss,
+                std::format("Invalid 3D Tiles tileset '{}': {}", core::path_to_utf8(path), e.what()), path);
         }
     }
 

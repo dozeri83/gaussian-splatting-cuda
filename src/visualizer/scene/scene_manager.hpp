@@ -439,7 +439,6 @@ namespace lfs::vis {
         std::unordered_map<core::Uuid, const core::SplatData*> tile_stream_models_;
         std::unordered_set<core::Uuid> flat_tile_nodes_; // tilesets small enough to load flat
         SplatTileStreamSettings tile_stream_settings_;
-        bool open_tile_stream_panel_ = false; // until the panel is registered
         std::filesystem::path dataset_path_;
         std::filesystem::path colmap_sparse_path_;
         std::filesystem::path ppisp_path_;

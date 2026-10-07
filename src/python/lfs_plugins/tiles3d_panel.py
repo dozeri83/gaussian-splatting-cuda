@@ -29,7 +29,7 @@ def _gib(value: int) -> str:
 
 @panel_class("tiles3d")
 class Tiles3dPanel(Panel):
-    """Streaming controls and statistics, opened when a 3D Tiles tileset streams."""
+    """On-demand streaming controls and statistics for a 3D Tiles tileset."""
 
     def on_bind_model(self, ctx):
         model = ctx.create_data_model("tiles3d")

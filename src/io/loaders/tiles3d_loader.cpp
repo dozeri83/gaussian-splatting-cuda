@@ -31,7 +31,7 @@ namespace lfs::io {
                                                        const std::vector<std::uint32_t>& tiles,
                                                        const LoadOptions& options) {
             std::vector<std::optional<SplatData>> loaded(tiles.size());
-            std::vector<std::string> errors(tiles.size());
+            std::vector<std::optional<lfs::Error>> errors(tiles.size());
             tbb::parallel_for(std::size_t{0}, tiles.size(), [&](const std::size_t i) {
                 if (is_load_cancel_requested(options))
                     return;
@@ -42,8 +42,8 @@ namespace lfs::io {
             });
             throw_if_load_cancel_requested(options);
             for (const auto& error : errors)
-                if (!error.empty())
-                    return make_error(ErrorCode::CORRUPTED_DATA, error);
+                if (error)
+                    return make_error(ErrorCode::CORRUPTED_DATA, lfs::format_for_developer(*error));
             std::unordered_map<std::uint32_t, const SplatData*> by_tile;
             for (std::size_t i = 0; i < tiles.size(); ++i)
                 by_tile.emplace(tiles[i], loaded[i] ? &*loaded[i] : nullptr);
@@ -64,7 +64,7 @@ namespace lfs::io {
             options.progress(0.0f, "Reading 3D Tiles tileset");
         auto source = open_tiles3d(path);
         if (!source)
-            return make_error(ErrorCode::CORRUPTED_DATA, source.error(), path);
+            return make_error(ErrorCode::CORRUPTED_DATA, lfs::format_for_developer(source.error()), path);
 
         LoadResult result;
         result.scene_center = core::Tensor::zeros({3}, core::Device::CPU);

@@ -32,6 +32,22 @@ namespace lfs::vis {
     // stays serial, so returns flatten past a few workers. clamp(cores / 4, 2, 4).
     [[nodiscard]] std::size_t auto_tile_load_workers();
 
+    struct SplatTileBudgetUsage {
+        std::uint64_t cached_bytes = 0;
+        std::uint64_t in_flight_bytes = 0;
+        std::uint64_t drawn_bytes = 0;
+        std::uint64_t replacement_bytes = 0;
+        std::uint64_t limit_bytes = 0;
+        bool replacing_drawn = false;
+        bool minimum_cut = false;
+    };
+
+    // A replacement is charged for the model that will remain after the swap, not the
+    // old model that it releases. The old and new models may overlap temporarily to keep
+    // REPLACE refinement hole-free. The minimum cut is always admitted as a budget floor.
+    [[nodiscard]] bool splat_tile_budget_allows_load(const SplatTileBudgetUsage& usage,
+                                                     std::uint64_t incoming_bytes);
+
     struct SplatTileStreamStats {
         std::size_t tiles = 0;
         std::size_t drawn_tiles = 0;
@@ -101,6 +117,7 @@ namespace lfs::vis {
         // GPU bytes held by the stream: cached and in-flight tiles plus the drawn,
         // finished and in-progress merged models, which copy their tiles.
         [[nodiscard]] std::uint64_t usedBytesLocked() const;
+        [[nodiscard]] SplatTileBudgetUsage budgetUsageLocked(bool minimum_cut) const;
 
         std::shared_ptr<const io::SplatTileSource> source_;
         core::SplatTensorAllocator allocator_;
@@ -119,6 +136,7 @@ namespace lfs::vis {
         std::uint64_t drawn_bytes_ = 0;            // model the node currently shows
         std::uint64_t built_bytes_ = 0;            // finished model awaiting its swap (built_)
         std::uint64_t building_bytes_ = 0;         // model a worker is merging
+        std::uint64_t replacement_bytes_ = 0;      // merged model reserved by the ideal cut
         std::uint64_t release_gen_ = 0;            // bumped when a merged model's memory frees up
         std::vector<std::uint32_t> wanted_;        // load queue, most urgent first
         std::vector<std::uint32_t> build_request_; // latest render set awaiting a merge
@@ -136,6 +154,8 @@ namespace lfs::vis {
         std::uint64_t frame_ = 0;
         bool cache_changed_ = true;
         bool over_budget_ = false; // the view's tiles do not fit the cache
+        bool replacing_drawn_ = false;
+        bool minimum_cut_ = false; // the coarsest cut is the non-negotiable budget floor
         float sse_factor_ = 1.0f;  // memory-adjusted multiplier of the max SSE
         std::function<void()> wake_;
 
