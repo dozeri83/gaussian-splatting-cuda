@@ -260,8 +260,6 @@ namespace lfs::vis {
         virtual std::expected<RenderResult, std::string> render(const RenderRequest&, RenderTargetId) = 0;
         virtual std::expected<std::shared_ptr<core::Tensor>, std::string> readOutputImage(RenderTargetId) = 0;
         virtual lfs::Result<SceneRenderer::OutputTensors> readOutputTensors(RenderTargetId) const;
-        // Keeps a published image alive until all copied frame descriptions release it.
-        virtual std::shared_ptr<void> retainOutputImage(SceneImageViewHandle) { return {}; }
         virtual bool hasRenderTarget(RenderTargetId) const = 0;
         virtual bool releaseRenderTarget(RenderTargetId) = 0;
         virtual void reset() = 0;
