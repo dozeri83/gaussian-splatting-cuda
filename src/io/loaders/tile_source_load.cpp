@@ -53,6 +53,11 @@ namespace lfs::io {
         return plan;
     }
 
+    std::unexpected<Error> tile_load_error(const lfs::Error& error, const std::filesystem::path& path) {
+        LOG_ERROR("{}", lfs::format_for_developer(error));
+        return make_error(ErrorCode::CORRUPTED_DATA, std::string(error.detail()), path);
+    }
+
     Result<std::unique_ptr<SplatData>> load_tiles_merged(const SplatTileSource& source,
                                                          const std::vector<std::uint32_t>& tiles,
                                                          const LoadOptions& options) {
@@ -69,7 +74,7 @@ namespace lfs::io {
         throw_if_load_cancel_requested(options);
         for (const auto& error : errors)
             if (error)
-                return make_error(ErrorCode::CORRUPTED_DATA, lfs::format_for_developer(*error));
+                return tile_load_error(*error);
         std::unordered_map<std::uint32_t, const SplatData*> by_tile;
         for (std::size_t i = 0; i < tiles.size(); ++i)
             by_tile.emplace(tiles[i], loaded[i] ? &*loaded[i] : nullptr);

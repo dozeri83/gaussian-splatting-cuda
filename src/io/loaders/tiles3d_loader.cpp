@@ -21,7 +21,7 @@ namespace lfs::io {
             options.progress(0.0f, "Reading 3D Tiles tileset");
         auto source = open_tiles3d(path);
         if (!source)
-            return make_error(ErrorCode::CORRUPTED_DATA, lfs::format_for_developer(source.error()), path);
+            return tile_load_error(source.error(), path);
 
         LoadResult result;
         result.scene_center = core::Tensor::zeros({3}, core::Device::CPU);

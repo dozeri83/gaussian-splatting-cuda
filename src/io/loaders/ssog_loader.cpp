@@ -22,7 +22,7 @@ namespace lfs::io {
         } else {
             auto source = open_ssog_tiles(path, &license_bytes);
             if (!source)
-                return make_error(ErrorCode::CORRUPTED_DATA, lfs::format_for_developer(source.error()), path);
+                return tile_load_error(source.error(), path);
             const auto plan = plan_tile_load(**source, "SSOG");
             if (plan.flat) {
                 auto result = load_ssog(path, {}, &license_bytes);

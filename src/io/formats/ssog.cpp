@@ -639,9 +639,11 @@ namespace lfs::io {
     }
 
     namespace {
-        // Decoded units kept for the tiles that share them: a unit holds the ranges of many
-        // tiles of one level, which the view asks for together.
-        constexpr std::size_t kCachedUnits = 16;
+        // Host memory for decoded units kept for the tiles that share them: a unit holds the
+        // ranges of many tiles of one level, which the view asks for together. A unit of
+        // ~512K SH3 splats takes ~120 MB, so this keeps about eight; the newest unit stays
+        // even when it alone exceeds the limit.
+        constexpr std::uint64_t kUnitCacheBytes = 1ull << 30;
         // Leaves are small (the format chunks for its own streaming), so a tile of level L
         // covers the smallest tree node holding at most this many level-L splats: coarse
         // levels span large regions and finer levels split them, as in 3D Tiles. Per-tile
@@ -728,19 +730,19 @@ namespace lfs::io {
                 bool decode = false;
                 {
                     std::lock_guard lock(mutex_);
-                    const auto it = std::ranges::find(lru_, unit, &std::pair<std::size_t, std::shared_future<Decoded>>::first);
+                    const auto it = std::ranges::find(lru_, unit, &CachedUnit::unit);
                     if (it != lru_.end()) {
                         lru_.splice(lru_.begin(), lru_, it);
-                        future = it->second;
+                        future = it->future;
                     } else {
                         future = promise.get_future().share();
-                        lru_.emplace_front(unit, future);
-                        while (lru_.size() > kCachedUnits)
-                            lru_.pop_back();
+                        lru_.push_front({unit, future, 0});
                         decode = true;
                     }
                 }
                 if (decode) {
+                    std::uint64_t bytes = 0;
+                    bool decoded_ok = false;
                     try {
                         auto ready = entries_->prepare(units_[unit]);
                         if (!ready)
@@ -748,21 +750,45 @@ namespace lfs::io {
                         auto data = (*ready)();
                         if (!data)
                             throw std::runtime_error(data.error().message);
-                        promise.set_value(std::make_shared<const HostSplats>(*data));
+                        auto host = std::make_shared<const HostSplats>(*data);
+                        for (const auto* tensor : {&host->means, &host->sh0, &host->shN, &host->scaling, &host->rotation,
+                                                   &host->opacity})
+                            if (tensor->is_valid())
+                                bytes += tensor->numel() * sizeof(float);
+                        promise.set_value(std::move(host));
+                        decoded_ok = true;
                     } catch (const std::exception&) {
                         // LFS-CENSUS-OK(empty-catch): the failure reaches every waiter through the future; a later request retries.
                         {
                             std::lock_guard lock(mutex_);
-                            std::erase_if(lru_, [unit](const auto& entry) { return entry.first == unit; });
+                            std::erase_if(lru_, [unit](const CachedUnit& entry) { return entry.unit == unit; });
                         }
                         promise.set_exception(std::current_exception());
+                    }
+                    if (decoded_ok) {
+                        std::lock_guard lock(mutex_);
+                        if (const auto it = std::ranges::find(lru_, unit, &CachedUnit::unit); it != lru_.end()) {
+                            it->bytes = bytes;
+                            cached_bytes_ += bytes;
+                        }
+                        // Evict least recently used units; units still decoding count nothing yet.
+                        while (cached_bytes_ > kUnitCacheBytes && lru_.size() > 1) {
+                            cached_bytes_ -= lru_.back().bytes;
+                            lru_.pop_back();
+                        }
                     }
                 }
                 return future.get();
             }
 
+            struct CachedUnit {
+                std::size_t unit = 0;
+                std::shared_future<Decoded> future;
+                std::uint64_t bytes = 0; // host memory once decoded
+            };
             mutable std::mutex mutex_;
-            mutable std::list<std::pair<std::size_t, std::shared_future<Decoded>>> lru_; // most recent first
+            mutable std::list<CachedUnit> lru_; // most recent first
+            mutable std::uint64_t cached_bytes_ = 0;
         };
 
         // The manifest's spatial tree, with per-level splat counts summed over subtrees.
@@ -949,7 +975,7 @@ namespace lfs::io {
             return source;
         } catch (const std::exception& e) {
             // LFS-CENSUS-OK(empty-catch): the public parser boundary returns a structured IO error.
-            return ssog_tile_error(std::format("Invalid SSOG '{}': {}", core::path_to_utf8(p), e.what()), p);
+            return ssog_tile_error(std::format("Failed to load SSOG: {}", e.what()), p);
         }
     }
 

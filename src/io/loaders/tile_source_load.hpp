@@ -24,6 +24,10 @@ namespace lfs::io {
 
     [[nodiscard]] TileLoadPlan plan_tile_load(const SplatTileSource& source, std::string_view label);
 
+    // A tile source failure as a load error: the readable detail for the user, the full
+    // developer report in the log.
+    [[nodiscard]] std::unexpected<Error> tile_load_error(const lfs::Error& error, const std::filesystem::path& path = {});
+
     // Decodes the tiles in parallel and merges them into one model.
     [[nodiscard]] Result<std::unique_ptr<SplatData>> load_tiles_merged(const SplatTileSource& source,
                                                                        const std::vector<std::uint32_t>& tiles,
