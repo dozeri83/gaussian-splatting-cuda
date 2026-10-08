@@ -394,6 +394,16 @@ namespace {
         size_t packed_bytes = 0;
     };
 
+    float joint_adam_comparison_step(float amin, float amax, float bmin, float bmax, float qmax) {
+        if (!std::isfinite(amin) || !std::isfinite(amax) || !std::isfinite(bmin) || !std::isfinite(bmax))
+            throw std::runtime_error("Non-finite joint Adam bounds");
+        const float magnitude = std::max({std::abs(amin), std::abs(amax), std::abs(bmin), std::abs(bmax)});
+        const float float_step = std::nextafter(magnitude, std::numeric_limits<float>::infinity()) - magnitude;
+        // Codec coordinates and bounds are floats. A nearly constant interval
+        // cannot resolve its nominal 16-bit code step below one float ULP.
+        return std::max(std::max(std::abs(amax - amin), std::abs(bmax - bmin)) / qmax, float_step);
+    }
+
     JointAdamStateDifference measure_joint_adam_state_difference(const AdamOptimizer& a,
                                                                  const AdamOptimizer& b) {
         JointAdamStateDifference result;
@@ -424,9 +434,8 @@ namespace {
             for (size_t i = 0; i < ab.numel(); ++i) {
                 const size_t axis = i % 4;
                 const size_t base = (i / 4) * 4;
-                const float arange = axis < 2 ? av[base + 1] - av[base] : av[base + 3] - av[base + 2];
-                const float brange = axis < 2 ? bv[base + 1] - bv[base] : bv[base + 3] - bv[base + 2];
-                const float step = std::max(std::abs(arange), std::abs(brange)) / qmax;
+                const size_t offset = base + (axis < 2 ? 0 : 2);
+                const float step = joint_adam_comparison_step(av[offset], av[offset + 1], bv[offset], bv[offset + 1], qmax);
                 if (step > 0.0f)
                     result.max_bound_lsb = std::max(result.max_bound_lsb, std::abs(av[i] - bv[i]) / step);
             }
@@ -439,7 +448,7 @@ namespace {
 
             const size_t cells = ap.numel() / bytes_per_cell;
             for (size_t cell = 0; cell < cells; ++cell) {
-                const size_t bounds = 0; // The fixture has one primitive and one bounds block.
+                const size_t bounds = 0; // The control fixture fits in one bounds block.
                 float au = 0.0f, ascale = 0.0f, bu = 0.0f, bscale = 0.0f;
                 if (bits == 16) {
                     joint_adam::Codec16::decode_us(aptr, cell, av[bounds], av[bounds + 1], av[bounds + 2],
@@ -452,10 +461,8 @@ namespace {
                     joint_adam::Codec8::decode_us(bptr, cell, bv[bounds], bv[bounds + 1], bv[bounds + 2],
                                                   bv[bounds + 3], bu, bscale);
                 }
-                const float ustep = std::max(av[bounds + 1] - av[bounds], bv[bounds + 1] - bv[bounds]) / qmax;
-                const float sstep = std::max(av[bounds + 3] - av[bounds + 2],
-                                             bv[bounds + 3] - bv[bounds + 2]) /
-                                    qmax;
+                const float ustep = joint_adam_comparison_step(av[bounds], av[bounds + 1], bv[bounds], bv[bounds + 1], qmax);
+                const float sstep = joint_adam_comparison_step(av[bounds + 2], av[bounds + 3], bv[bounds + 2], bv[bounds + 3], qmax);
                 if (ustep > 0.0f)
                     result.max_coordinate_lsb = std::max(result.max_coordinate_lsb,
                                                          std::abs(au - bu) / ustep);
@@ -480,13 +487,26 @@ TEST_F(FastGSKernelTest, OptimizerStateRunToRunDeterminismControl) {
         std::unique_ptr<SplatData> model;
         std::unique_ptr<AdamOptimizer> optimizer;
     };
-    const size_t test_n = 1;
-    auto test_means = means_.slice(0, 0, test_n).contiguous();
-    auto test_sh0 = sh0_.slice(0, 0, test_n).contiguous();
-    auto test_scaling = scaling_.slice(0, 0, test_n).contiguous();
-    auto test_rotation = rotation_.slice(0, 0, test_n).contiguous();
-    auto test_opacity = opacity_.slice(0, 0, test_n).contiguous();
-    auto sh_rest = Tensor::full({test_n, 3, 3}, 0.01f, Device::GPU);
+    // Exercise distinct visible primitives independently of the fixture RNG.
+    // First-step normalized coordinates can still be nearly constant; the
+    // comparison accounts for the precision of their float representation.
+    const size_t test_n = 8;
+    std::vector<float> means, sh0, scaling, rotation, opacity, rest;
+    for (size_t i = 0; i < test_n; ++i) {
+        const float t = static_cast<float>(i);
+        means.insert(means.end(), {-0.4f + 0.13f * t, -0.3f + 0.11f * t, 1.0f + 0.1f * t});
+        sh0.insert(sh0.end(), {0.1f + 0.03f * t, 0.2f - 0.02f * t, 0.3f + 0.01f * t});
+        scaling.insert(scaling.end(), {-2.0f - 0.1f * t, -2.2f + 0.03f * t, -2.4f + 0.02f * t});
+        rotation.insert(rotation.end(), {0.93f, 0.09f + 0.01f * t, -0.18f, 0.28f});
+        opacity.push_back(0.3f + 0.1f * t);
+        rest.insert(rest.end(), 9, 0.01f * (t + 1.0f));
+    }
+    auto test_means = Tensor::from_vector(means, {test_n, size_t{3}}, Device::GPU);
+    auto test_sh0 = Tensor::from_vector(sh0, {test_n, size_t{1}, size_t{3}}, Device::GPU);
+    auto test_scaling = Tensor::from_vector(scaling, {test_n, size_t{3}}, Device::GPU);
+    auto test_rotation = Tensor::from_vector(rotation, {test_n, size_t{4}}, Device::GPU);
+    auto test_opacity = Tensor::from_vector(opacity, {test_n}, Device::GPU);
+    auto sh_rest = Tensor::from_vector(rest, {test_n, size_t{3}, size_t{3}}, Device::GPU);
     auto run = [&](bool generic) {
         Run result;
         result.model = std::make_unique<SplatData>(1, test_means.clone(), test_sh0.clone(), sh_rest.clone(),
@@ -518,7 +538,7 @@ TEST_F(FastGSKernelTest, OptimizerStateRunToRunDeterminismControl) {
     const auto specialized_diff = measure_joint_adam_state_difference(*specialized_a.optimizer,
                                                                       *specialized_b.optimizer);
     const auto cross_diff = measure_joint_adam_state_difference(*generic_a.optimizer, *specialized_a.optimizer);
-    std::cout << "Optimizer state variation (bound LSB, decoded coordinate LSB, packed bytes differing/total): "
+    std::cout << "Optimizer state variation (bound/coordinate steps floored at float ULP, packed bytes differing/total): "
               << "generic=" << generic_diff.max_bound_lsb << "," << generic_diff.max_coordinate_lsb << ","
               << generic_diff.different_packed_bytes << "/" << generic_diff.packed_bytes
               << " specialized=" << specialized_diff.max_bound_lsb << ","
@@ -544,6 +564,15 @@ TEST_F(FastGSKernelTest, OptimizerStateRunToRunDeterminismControl) {
         expect_joint_adam_state_equivalent(*ga, *gb);
         expect_joint_adam_state_equivalent(*sa, *sb);
     }
+    // The precision floor must still reject an actual change to codec bounds.
+    const auto* altered = generic_b.optimizer->get_state(ParamType::Means);
+    auto target_bounds = altered->joint_bounds;
+    auto altered_bounds = target_bounds.cpu();
+    altered_bounds.ptr<float>()[0] -= 1.0f;
+    ASSERT_EQ(cudaMemcpy(target_bounds.data_ptr(), altered_bounds.data_ptr(),
+                         altered_bounds.numel() * sizeof(float), cudaMemcpyHostToDevice),
+              cudaSuccess);
+    EXPECT_GT(measure_joint_adam_state_difference(*generic_a.optimizer, *generic_b.optimizer).max_bound_lsb, 5.0f);
 }
 
 TEST_F(FastGSKernelTest, Forward_TileDepthOrdering) {

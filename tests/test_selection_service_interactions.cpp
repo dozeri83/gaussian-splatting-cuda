@@ -5,6 +5,7 @@
 #include "core/event_bridge/event_bridge.hpp"
 #include "core/event_bus.hpp"
 #include "core/image_io.hpp"
+#include "core/selection_ops.hpp"
 #include "core/services.hpp"
 #include "core/splat_data.hpp"
 #include "core/tensor.hpp"
@@ -536,6 +537,244 @@ TEST_F(SelectionServiceInteractionsTest, BrushAndLassoAcceptSelectedNodeInMultiS
     ASSERT_TRUE(lasso.success) << lasso.error;
     EXPECT_EQ(lasso.affected_count, 2u);
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0, 1, 0}));
+}
+
+TEST_F(SelectionServiceInteractionsTest, RectangleSelectionSkipsLockedNodeAndKeepsUnlockedNodeSelectable) {
+    const auto copy_id = scene_manager_->getScene().addSplat(
+        "copy",
+        make_test_splat({
+            2.0f,
+            0.0f,
+            0.0f,
+            3.0f,
+            0.0f,
+            0.0f,
+        }));
+    ASSERT_NE(copy_id, lfs::core::NULL_NODE);
+    scene_manager_->selectNodes({"test", "copy"});
+
+    auto settings = rendering_manager_->getSettings();
+    settings.point_cloud_mode = true;
+    rendering_manager_->updateSettings(settings);
+    service_->setTestingScreenPositions(make_screen_positions({
+        10.0f,
+        10.0f,
+        80.0f,
+        80.0f,
+        10.0f,
+        10.0f,
+        80.0f,
+        80.0f,
+    }));
+
+    const auto result = service_->selectRect(
+        0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, -1);
+    ASSERT_TRUE(result.success) << result.error;
+    EXPECT_EQ(result.affected_count, 2u);
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0, 1, 0}));
+
+    scene_manager_->getScene().setNodeLocked("copy", true);
+    set_initial_selection({0, 0, 0, 0});
+    const auto locked_result = service_->selectRect(
+        0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, -1);
+    ASSERT_TRUE(locked_result.success) << locked_result.error;
+    EXPECT_EQ(locked_result.affected_count, 1u);
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0, 0, 0}));
+}
+
+TEST_F(SelectionServiceInteractionsTest, EverySelectionShapeSkipsLockedNode) {
+    const auto parent_id = scene_manager_->getScene().addGroup("locked_parent");
+    ASSERT_NE(parent_id, lfs::core::NULL_NODE);
+    const auto copy_id = scene_manager_->getScene().addSplat(
+        "copy",
+        make_test_splat({2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f}),
+        parent_id);
+    ASSERT_NE(copy_id, lfs::core::NULL_NODE);
+    scene_manager_->selectNodes({"test", "copy"});
+    scene_manager_->getScene().setNodeLocked("locked_parent", true);
+    auto settings = rendering_manager_->getSettings();
+    settings.point_cloud_mode = true;
+    rendering_manager_->updateSettings(settings);
+    service_->setTestingScreenPositions(make_screen_positions({
+        10.0f,
+        10.0f,
+        80.0f,
+        80.0f,
+        10.0f,
+        10.0f,
+        80.0f,
+        80.0f,
+    }));
+
+    const auto expect_shape = [this](const auto& select, const std::vector<uint8_t>& expected) {
+        set_initial_selection({0, 0, 0, 0});
+        const auto result = select();
+        EXPECT_TRUE(result.success) << result.error;
+        if (!result.success) {
+            return;
+        }
+        EXPECT_EQ(selection_values(*scene_manager_), expected);
+    };
+    const std::vector<uint8_t> unlocked_first_row{1, 0, 0, 0};
+    expect_shape([this] {
+        return service_->selectRect(0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, -1);
+    },
+                 unlocked_first_row);
+    expect_shape([this] {
+        return service_->selectPolygon(
+            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, -1);
+    },
+                 unlocked_first_row);
+    expect_shape([this] {
+        return service_->selectLasso(
+            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, -1);
+    },
+                 unlocked_first_row);
+    expect_shape([this] {
+        return service_->selectBrush(10.0f, 10.0f, 5.0f, lfs::vis::SelectionMode::Replace, -1);
+    },
+                 unlocked_first_row);
+
+    service_->setTestingHoveredGaussianId(2);
+    set_initial_selection({0, 0, 0, 0});
+    const auto ring = service_->selectRing(10.0f, 10.0f, lfs::vis::SelectionMode::Replace, -1);
+    ASSERT_TRUE(ring.success) << ring.error;
+    EXPECT_TRUE(selection_values(*scene_manager_).empty());
+
+    set_initial_selection({0, 0, 0, 0});
+    const auto all = service_->selectAllFiltered();
+    ASSERT_TRUE(all.success) << all.error;
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 1, 0, 0}));
+
+    service_->setTestingHoveredGaussianId(0);
+    expect_shape([this] {
+        return service_->selectByColorAt(10.0f, 10.0f, lfs::vis::SelectionMode::Replace, {}, 0);
+    },
+                 std::vector<uint8_t>{1, 1, 0, 0});
+
+    set_initial_selection({0, 0, 0, 0});
+    ASSERT_TRUE(service_->beginInteractiveSelection(
+        lfs::vis::SelectionShape::Rectangle,
+        lfs::vis::SelectionMode::Replace,
+        {0.0f, 0.0f},
+        0.0f));
+    service_->updateInteractiveSelection({50.0f, 50.0f});
+    service_->refreshInteractivePreview();
+    const auto* preview = service_->interactivePreviewSelectionForTesting();
+    ASSERT_NE(preview, nullptr);
+    EXPECT_EQ(preview->cpu().to_vector_bool(), (std::vector<bool>{true, false, false, false}));
+    const auto interactive = service_->finishInteractiveSelection();
+    ASSERT_TRUE(interactive.success) << interactive.error;
+    EXPECT_EQ(selection_values(*scene_manager_), unlocked_first_row);
+}
+
+TEST_F(SelectionServiceInteractionsTest, HiddenNodesStayOutOfInvertAndInteractiveSelection) {
+    const auto copy_id = scene_manager_->getScene().addSplat(
+        "copy", make_test_splat({2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f}));
+    ASSERT_NE(copy_id, lfs::core::NULL_NODE);
+    ASSERT_NE(scene_manager_->getScene().getCombinedModel(), nullptr);
+    scene_manager_->setNodeVisibility(copy_id, false);
+    const auto visible_slots = scene_manager_->getScene().getVisibleSplatNodeSlots();
+    ASSERT_EQ(visible_slots.size(), 1u);
+    EXPECT_EQ(visible_slots.front().slot_index, 0u);
+    auto settings = rendering_manager_->getSettings();
+    settings.point_cloud_mode = true;
+    rendering_manager_->updateSettings(settings);
+    service_->setTestingScreenPositions(make_screen_positions({
+        10.0f,
+        10.0f,
+        20.0f,
+        20.0f,
+    }));
+
+    const std::vector<uint8_t> visible_only{1, 1, 0, 0};
+    const auto expect_selection = [this](const auto& select, const std::vector<uint8_t>& expected) {
+        set_initial_selection({0, 0, 0, 0});
+        const auto result = select();
+        EXPECT_TRUE(result.success) << result.error;
+        if (result.success) {
+            EXPECT_EQ(selection_values(*scene_manager_), expected);
+        }
+    };
+
+    expect_selection([this] {
+        return service_->selectRect(0.0f, 0.0f, 50.0f, 50.0f, lfs::vis::SelectionMode::Replace, -1);
+    },
+                     visible_only);
+    expect_selection([this] {
+        return service_->selectLasso(
+            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, -1);
+    },
+                     visible_only);
+    expect_selection([this] {
+        return service_->selectPolygon(
+            {{0.0f, 0.0f}, {50.0f, 0.0f}, {0.0f, 50.0f}}, lfs::vis::SelectionMode::Replace, -1);
+    },
+                     visible_only);
+    expect_selection([this] {
+        return service_->selectBrush(10.0f, 10.0f, 20.0f, lfs::vis::SelectionMode::Replace, -1);
+    },
+                     visible_only);
+    service_->setTestingHoveredGaussianId(2);
+    set_initial_selection({0, 0, 0, 0});
+    EXPECT_FALSE(service_->selectByColorAt(80.0f, 80.0f, lfs::vis::SelectionMode::Replace, {}, 0).success);
+    EXPECT_FALSE(scene_manager_->getScene().hasSelection());
+    EXPECT_FALSE(service_->selectRing(80.0f, 80.0f, lfs::vis::SelectionMode::Replace, -1).success);
+    EXPECT_FALSE(scene_manager_->getScene().hasSelection());
+
+    const auto select_all = service_->selectAllFiltered();
+    ASSERT_TRUE(select_all.success) << select_all.error;
+    EXPECT_EQ(selection_values(*scene_manager_), visible_only);
+
+    set_initial_selection({0, 0, 0, 0});
+    const auto invert = service_->invertFiltered();
+    ASSERT_TRUE(invert.success) << invert.error;
+    EXPECT_EQ(selection_values(*scene_manager_), visible_only);
+
+    set_initial_selection({0, 0, 0, 0});
+    ASSERT_TRUE(service_->beginInteractiveSelection(
+        lfs::vis::SelectionShape::Rectangle,
+        lfs::vis::SelectionMode::Replace,
+        {0.0f, 0.0f},
+        0.0f));
+    service_->updateInteractiveSelection({50.0f, 50.0f});
+    service_->refreshInteractivePreview();
+    const auto* preview = service_->interactivePreviewSelectionForTesting();
+    ASSERT_NE(preview, nullptr);
+    EXPECT_EQ(preview->cpu().to_vector_bool(), (std::vector<bool>{true, true}));
+    const auto committed = service_->finishInteractiveSelection();
+    ASSERT_TRUE(committed.success) << committed.error;
+    EXPECT_EQ(selection_values(*scene_manager_), visible_only);
+}
+
+TEST_F(SelectionServiceInteractionsTest, InvertStaysWithinSelectedNodeScope) {
+    const auto copy_id = scene_manager_->getScene().addSplat(
+        "copy", make_test_splat({2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f}));
+    ASSERT_NE(copy_id, lfs::core::NULL_NODE);
+    ASSERT_NE(scene_manager_->getScene().getCombinedModel(), nullptr);
+    scene_manager_->selectNode("test");
+
+    const auto select_all = service_->selectAllFiltered();
+    ASSERT_TRUE(select_all.success) << select_all.error;
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 1, 0, 0}));
+    const auto invert = service_->invertFiltered();
+    ASSERT_TRUE(invert.success) << invert.error;
+    EXPECT_FALSE(scene_manager_->getScene().hasSelection());
+}
+
+TEST_F(SelectionServiceInteractionsTest, GrowingSelectionStaysWithinActiveNodeScope) {
+    const auto copy_id = scene_manager_->getScene().addSplat(
+        "copy", make_test_splat({2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f}));
+    ASSERT_NE(copy_id, lfs::core::NULL_NODE);
+    scene_manager_->selectNode("test");
+    const auto* model = scene_manager_->getScene().getCombinedModel();
+    ASSERT_NE(model, nullptr);
+    ASSERT_EQ(model->size(), 4u);
+
+    auto input = make_uint8_mask({1, 0, 0, 0});
+    auto grown = lfs::core::selection_grow(input, model->means(), 100.0f, 1).to(DataType::Bool);
+    service_->restrictToEffectiveNodeScope(grown);
+    EXPECT_EQ(grown.cpu().to_vector_bool(), (std::vector<bool>{true, true, false, false}));
 }
 
 TEST_F(SelectionServiceInteractionsTest, DeleteSelectedGaussiansMapsFullSelectionMaskAcrossHiddenNodes) {
@@ -1552,4 +1791,80 @@ TEST_F(SelectionServiceInteractionsTest, CancelingRingsStrokePreservesTheOrigina
         {10.0f, 10.0f}, 0.0f));
     service_->cancelInteractiveSelection();
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{0, 1}));
+}
+
+TEST_F(SelectionServiceInteractionsTest, ViewerSelectionShapesMatchProjectedCentersAtDisplayScale) {
+    using lfs::vis::SelectionMode;
+    using lfs::vis::SelectionShape;
+    Viewport camera(1, 1);
+    const auto settings = rendering_manager_->getSettings();
+    std::vector<float> xyz;
+    for (int y = -4; y <= 4; ++y) {
+        for (int x = -4; x <= 4; ++x) {
+            const auto world = glm::vec3(1, -1, -1) * (camera.camera.t + camera.camera.R * glm::vec3(x * 0.35f, y * 0.35f, -8.0f));
+            xyz.insert(xyz.end(), {world.x, world.y, world.z});
+        }
+    }
+    auto& scene = scene_manager_->getScene();
+    scene.clear();
+    const auto id = scene.addSplat("grid", make_test_splat(xyz));
+    scene_manager_->changeContentType(lfs::vis::SceneManager::ContentType::SplatFiles);
+    for (const bool transformed : {false, true}) {
+        const auto transform = glm::translate(glm::mat4(1.0f), transformed ? glm::vec3(0.31f, -0.17f, 0.23f) : glm::vec3(0.0f));
+        scene.setNodeTransform(id, transform);
+        for (const auto size : {glm::ivec2(200, 160), glm::ivec2(250, 200), glm::ivec2(400, 320), glm::ivec2(151, 119)}) {
+            SCOPED_TRACE(::testing::Message() << transformed << " " << size.x << "x" << size.y);
+            service_->setTestingViewport({.x = 324.0f, .y = 30.0f, .width = 200.0f, .height = 160.0f, .render_width = size.x, .render_height = size.y});
+            const auto [fx, fy] = lfs::rendering::computePixelFocalLengths(size, settings.focal_length_mm);
+            std::vector<uint8_t> rect, brush;
+            for (size_t i = 0; i < xyz.size(); i += 3) {
+                const auto world = glm::vec3(1, -1, -1) * glm::vec3(transform * glm::vec4(xyz[i], xyz[i + 1], xyz[i + 2], 1.0f));
+                const auto view = glm::transpose(camera.camera.R) * (world - camera.camera.t);
+                const glm::vec2 pixel(size.x * 0.5f + fx * view.x / -view.z,
+                                      size.y * 0.5f - fy * view.y / -view.z);
+                const glm::vec2 local(pixel.x * 200.0f / size.x, pixel.y * 160.0f / size.y);
+                rect.push_back(local.x >= 73.0f && local.x <= 119.0f && local.y >= 59.0f && local.y <= 103.0f);
+                const glm::vec2 delta(pixel.x - 96.0f * size.x / 200.0f, pixel.y - 81.0f * size.y / 160.0f);
+                brush.push_back(glm::dot(delta, delta) <= std::pow(23.0f * size.x / 200.0f, 2));
+            }
+            ASSERT_TRUE(service_->beginInteractiveSelection(SelectionShape::Rectangle, SelectionMode::Replace, {397, 89}, 0));
+            service_->updateInteractiveSelection({443, 133});
+            ASSERT_TRUE(service_->finishInteractiveSelection().success);
+            EXPECT_EQ(selection_values(*scene_manager_), rect);
+            ASSERT_TRUE(service_->beginInteractiveSelection(SelectionShape::Polygon, SelectionMode::Replace, {397, 89}, 0));
+            ASSERT_TRUE(service_->appendInteractivePolygonVertex({443, 89}));
+            ASSERT_TRUE(service_->appendInteractivePolygonVertex({443, 133}));
+            ASSERT_TRUE(service_->appendInteractivePolygonVertex({397, 133}));
+            ASSERT_TRUE(service_->finishInteractiveSelection().success);
+            EXPECT_EQ(selection_values(*scene_manager_), rect);
+            ASSERT_TRUE(service_->selectRect(73, 59, 119, 103, SelectionMode::Replace, -1).success);
+            EXPECT_EQ(selection_values(*scene_manager_), rect);
+            ASSERT_TRUE(service_->selectPolygon({{73, 59}, {119, 59}, {119, 103}, {73, 103}}, SelectionMode::Replace, -1).success);
+            EXPECT_EQ(selection_values(*scene_manager_), rect);
+            ASSERT_TRUE(service_->selectLasso({{73, 59}, {119, 59}, {119, 103}, {73, 103}}, SelectionMode::Replace, -1).success);
+            EXPECT_EQ(selection_values(*scene_manager_), rect);
+            ASSERT_TRUE(service_->beginInteractiveSelection(SelectionShape::Brush, SelectionMode::Replace, {420, 111}, 23));
+            ASSERT_TRUE(service_->finishInteractiveSelection().success);
+            EXPECT_EQ(selection_values(*scene_manager_), brush);
+            ASSERT_TRUE(service_->selectBrush(96, 81, 23, SelectionMode::Replace, -1).success);
+            EXPECT_EQ(selection_values(*scene_manager_), brush);
+        }
+    }
+}
+
+TEST_F(SelectionServiceInteractionsTest, DatasetCameraSelectionKeepsImagePixelCoordinates) {
+    using lfs::vis::SelectionMode;
+    service_->setTestingViewport({.x = 324, .y = 30, .width = 100, .height = 100, .render_width = 200, .render_height = 200});
+    auto& scene = scene_manager_->getScene();
+    const auto cameras_group = scene.addGroup("Cameras");
+    scene.addCamera("dataset.png", cameras_group, make_x_axis_dataset_camera());
+    service_->setTestingScreenPositions(make_screen_positions({20, 20, 60, 60}));
+    ASSERT_TRUE(service_->selectRect(0, 0, 40, 40, SelectionMode::Replace, 0).success);
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0}));
+    ASSERT_TRUE(service_->selectPolygon({{0, 0}, {40, 0}, {40, 40}, {0, 40}}, SelectionMode::Replace, 0).success);
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0}));
+    ASSERT_TRUE(service_->selectLasso({{0, 0}, {40, 0}, {40, 40}, {0, 40}}, SelectionMode::Replace, 0).success);
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0}));
+    ASSERT_TRUE(service_->selectBrush(20, 20, 15, SelectionMode::Replace, 0).success);
+    EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0}));
 }

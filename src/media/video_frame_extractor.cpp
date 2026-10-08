@@ -5,6 +5,7 @@
 #include "media/video_frame_extractor.hpp"
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
+#include "decoded_video_frame_ffmpeg.hpp"
 #include "media/file_frame_sink.hpp"
 #include "media/hdr_renderer.hpp"
 #include "media/hdr_tonemap.hpp"
@@ -20,6 +21,8 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
+
+#include "media/cuda_frame_ffmpeg.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -1051,15 +1054,25 @@ namespace lfs::io {
                 const double start_time = params.start_time;
                 double end_time =
                     params.end_time < 0.0 ? video_duration : params.end_time;
+                // Plain interval extraction can read to EOF when the duration estimate is short.
+                // FPS sampling and sharpness windows retain their existing time boundaries.
+                bool extract_to_stream_end = params.end_time < 0.0;
                 if (video_duration > 0.0) {
                     const double duration_tolerance =
                         std::max(1.0e-6, time_base);
-                    if (start_time >= video_duration ||
-                        end_time > video_duration + duration_tolerance) {
+                    if (start_time >= video_duration) {
                         error = "Invalid extraction parameters: trim range exceeds video duration";
                         throw std::invalid_argument(error);
                     }
+                    // A frame-count based duration estimate can run past the stream's end; an end
+                    // beyond the video extracts to its last frame.
+                    if (end_time > video_duration + duration_tolerance) {
+                        end_time = video_duration;
+                        extract_to_stream_end = true;
+                    }
                 }
+                extract_to_stream_end = extract_to_stream_end &&
+                                        !(params.sharpness.enabled && params.sharpness.window_mode);
                 const double trim_duration = end_time - start_time;
                 if (!std::isfinite(trim_duration) || trim_duration <= 0.0) {
                     error = "Invalid extraction parameters: invalid video trim range";
@@ -1188,7 +1201,12 @@ namespace lfs::io {
                             hdr_renderer = std::make_unique<HdrLibplaceboRenderer>();
                         std::string renderer_error;
                         HdrTonemapTiming frame_timing{};
-                        if (!hdr_renderer->tonemapToSdr(source, video_stream, hdr_format,
+                        auto described = media::detail::describeDecodedVideoFrame(source, video_stream);
+                        if (!described) {
+                            error = std::string(described.error().detail());
+                            return false;
+                        }
+                        if (!hdr_renderer->tonemapToSdr(&*described, hdr_format,
                                                         out_width, out_height,
                                                         hdr_sdr_buffer, renderer_error, &frame_timing)) {
                             LOG_ERROR("HDR extraction renderer failed: {}", renderer_error);
@@ -1506,7 +1524,10 @@ namespace lfs::io {
                     }
 
                     if (use_full_gpu_pipeline) {
-                        gpu_jpeg->convertHardware(hw_frame, params.sharpness.enabled ? cpu_contiguous_buffer : nullptr);
+                        const auto hardware_frame = media::detail::cudaFrameView(hw_frame);
+                        if (!hardware_frame)
+                            throw lfs::Exception(hardware_frame.error());
+                        gpu_jpeg->convertHardware(*hardware_frame, params.sharpness.enabled ? cpu_contiguous_buffer : nullptr);
                         double frame_score = 0.0;
                         if (params.sharpness.enabled) {
                             frame_score = computeSharpnessScore(
@@ -1833,7 +1854,7 @@ namespace lfs::io {
                     const bool past_end =
                         params.mode == ExtractionMode::FPS
                             ? frame_time >= end_time
-                            : frame_time > end_time;
+                            : !extract_to_stream_end && frame_time > end_time;
                     if (past_end)
                         return true;
 

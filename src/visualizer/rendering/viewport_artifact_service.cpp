@@ -68,6 +68,7 @@ namespace lfs::vis {
     }
 
     void ViewportArtifactService::clearViewportOutput() {
+        depth_sampler_ = {};
         setMetadata({});
         rendered_size_ = {0, 0};
         lazy_capture_ = {};
@@ -82,6 +83,7 @@ namespace lfs::vis {
                                                         const lfs::rendering::FrameMetadata& metadata,
                                                         const glm::ivec2& rendered_size,
                                                         const bool viewport_output_updated) {
+        depth_sampler_ = {};
         setMetadata(makeCachedRenderMetadata(metadata));
         rendered_size_ = rendered_size;
         lazy_capture_ = {};
@@ -101,6 +103,7 @@ namespace lfs::vis {
     void ViewportArtifactService::setLazyCapture(LazyCaptureFn fn,
                                                  const lfs::rendering::FrameMetadata& metadata,
                                                  const glm::ivec2& rendered_size) {
+        depth_sampler_ = {};
         setMetadata(makeCachedRenderMetadata(metadata));
         rendered_size_ = rendered_size;
         invalidateCapture();
@@ -111,6 +114,7 @@ namespace lfs::vis {
         LazyCaptureFn fn,
         const lfs::rendering::FrameMetadata& metadata,
         const glm::ivec2& rendered_size) {
+        depth_sampler_ = {};
         setMetadata(makeCachedRenderMetadata(metadata));
         rendered_size_ = rendered_size;
         lazy_captured_image_.reset();
@@ -135,7 +139,10 @@ namespace lfs::vis {
         const int x,
         const int y,
         const glm::ivec2& fallback_viewport_size,
-        const std::optional<SplitViewPanelId> panel) const {
+        const std::optional<SplitViewPanelId> panel, const bool nonblocking) const {
+        if (depth_sampler_)
+            return depth_sampler_(x, y, panel, nonblocking);
+
         int viewport_width = rendered_size_.x;
         int viewport_height = rendered_size_.y;
         if (viewport_width <= 0 || viewport_height <= 0) {

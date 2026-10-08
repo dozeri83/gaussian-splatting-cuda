@@ -1,9 +1,11 @@
 /* SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
+#include "core/camera.hpp"
 #include "core/event_bridge/event_bridge.hpp"
 #include "core/event_bridge/localization_manager.hpp"
 #include "core/event_bus.hpp"
 #include "core/events.hpp"
+#include "core/point_cloud.hpp"
 #include "core/services.hpp"
 #include "gui/bounds_gizmo.hpp"
 #include "gui/editor/python_editor.hpp"
@@ -11,14 +13,18 @@
 #include "gui/gui_focus_state.hpp"
 #include "gui/gui_input.hpp"
 #include "gui/gui_manager.hpp"
+#include "gui/line_renderer.hpp"
+#include "gui/line_renderer_overlays.hpp"
 #include "gui/panel_input_utils.hpp"
 #include "gui/rml_modal_overlay.hpp"
 #include "gui/rml_sequencer_overlay.hpp"
 #include "gui/rmlui/elements/python_editor_element.hpp"
+#include "gui/rmlui/elements/scene_graph_element.hpp"
 #include "gui/rmlui/elements/terminal_element.hpp"
 #include "gui/rmlui/rml_input_utils.hpp"
 #include "gui/rotation_gizmo.hpp"
 #include "gui/scale_gizmo.hpp"
+#include "gui/scene_panel_native.hpp"
 #include "gui/translation_gizmo.hpp"
 #include "input/frame_input_buffer.hpp"
 #include "input/input_controller.hpp"
@@ -27,9 +33,11 @@
 #include "operation/undo_history.hpp"
 #include "operator/operator_registry.hpp"
 #include "rendering/coordinate_conventions.hpp"
+#include "rendering/viewport_frame_desc.hpp"
 #include "sequencer/sequencer_controller.hpp"
 #include "test_view_targets.hpp"
 #include "tools/unified_tool_registry.hpp"
+#include "visualizer/app_store.hpp"
 #include "visualizer_impl.hpp"
 #include "window/window_manager.hpp"
 #include <RmlUi/Core.h>
@@ -37,9 +45,11 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <future>
 #include <glm/gtc/type_ptr.hpp>
 #include <gtest/gtest.h>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -503,6 +513,7 @@ namespace lfs::vis {
 namespace lfs::vis {
     class WindowInputDispatchTest : public ::testing::Test {
     protected:
+        virtual bool keepSceneHandlers() const { return false; }
         void SetUp() override {
             ASSERT_TRUE(SDL_Init(SDL_INIT_VIDEO));
             ViewerOptions options;
@@ -511,8 +522,10 @@ namespace lfs::vis {
             viewer_ = std::make_unique<VisualizerImpl>(options);
             window_ = viewer_->getWindowManager();
             gui_ = viewer_->getGuiManager();
-            lfs::event::EventBridge::instance().clear_all();
-            lfs::core::event::bus().clear_all();
+            if (!keepSceneHandlers()) {
+                lfs::event::EventBridge::instance().clear_all();
+                lfs::core::event::bus().clear_all();
+            }
             window_->window_ = SDL_CreateWindow("Input dispatch", 400, 300, SDL_WINDOW_HIDDEN);
             ASSERT_NE(window_->window_, nullptr);
             ASSERT_TRUE(manager().initWithRenderInterface(window_->window_, 1.f,
@@ -551,6 +564,10 @@ namespace lfs::vis {
             });
         }
         void TearDown() override {
+            gui::cancelTranslationGizmoDrag();
+            gui::cancelRotationGizmoDrag();
+            gui::cancelScaleGizmoDrag();
+            gui::cancelBoundsGizmoDrag();
             revert_.clear();
             gui_->startup_overlay_.shutdown();
             controller_.reset();
@@ -561,6 +578,8 @@ namespace lfs::vis {
             gui::guiFocusState().reset();
         }
         gui::RmlUIManager& manager() { return gui_->rmlui_manager_; }
+        // GuiManager keeps these listeners alive until their Rml context is shut down.
+        gui::RmlViewportOverlay& viewportOverlay() { return gui_->rml_viewport_overlay_; }
         void dispatch(SDL_Event event) {
             event.common.timestamp = ++timestamp_;
             event.key.windowID = SDL_GetWindowID(window_->window_);
@@ -623,6 +642,7 @@ namespace lfs::vis {
             window_->pumping_events_ = false;
         }
         void poll() { window_->pollEvents(); }
+        FrameInputBuffer& frameInput() { return window_->frame_input_; }
         void wait(double timeout) { window_->waitEvents(timeout); }
         SDL_Window* nativeWindow() { return window_->window_; }
         gui::RmlModalOverlay& modal() { return *gui_->rml_modal_overlay_; }
@@ -642,6 +662,10 @@ namespace lfs::vis {
             key(SDL_SCANCODE_SPACE);
             ASSERT_TRUE(overlay.isLanguageSelectOpen());
             EXPECT_TRUE(overlay.content_dirty_);
+        }
+        void setGizmoViewportLayout(const gui::ViewportLayout& layout, const bool hidden = true) {
+            gui_->ui_hidden_ = hidden;
+            gui_->viewport_layout_ = layout;
         }
         bool startupVisible() { return gui_->startup_overlay_.isVisible(); }
         bool languageOpen() { return gui_->startup_overlay_.isLanguageSelectOpen(); }
@@ -776,7 +800,9 @@ namespace lfs::vis {
                                        BoundsScale };
         enum class TransformDragFinish { Escape,
                                          RightClick,
-                                         LeftRelease };
+                                         LeftRelease,
+                                         ReleaseAtStart,
+                                         ZeroLengthRelease };
 
         static bool sameMatrixBits(const glm::mat4& lhs, const glm::mat4& rhs) {
             return std::memcmp(glm::value_ptr(lhs), glm::value_ptr(rhs), sizeof(glm::mat4)) == 0;
@@ -786,9 +812,10 @@ namespace lfs::vis {
             auto& scene_manager = *viewer_->getSceneManager();
             auto& scene = viewer_->getScene();
             const bool bounds_scale = mode == TransformDragMode::BoundsScale;
+            const std::string node_name = "Cancel drag " + std::to_string(static_cast<int>(mode));
             const core::NodeId node_id = bounds_scale
-                                             ? scene.addSplat("Cancel drag", lfs::test::licht::make_splat(3))
-                                             : scene.addGroup("Cancel drag");
+                                             ? scene.addSplat(node_name, lfs::test::licht::make_splat(3))
+                                             : scene.addGroup(node_name);
             ASSERT_NE(node_id, core::NULL_NODE);
             scene_manager.changeContentType(SceneManager::ContentType::SplatFiles);
             scene_manager.selectNode(node_id);
@@ -878,6 +905,42 @@ namespace lfs::vis {
             frame.mouse_released[0] = false;
             gizmo.renderNodeTransformGizmo(ui, layout);
 
+            if (finish == TransformDragFinish::ZeroLengthRelease) {
+                controller_->handleMouseButton(static_cast<int>(input::AppMouseButton::LEFT), input::ACTION_RELEASE,
+                                               start.x, start.y);
+                frame.mouse_down[0] = false;
+                frame.mouse_released[0] = true;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+                frame.mouse_released[0] = false;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+                EXPECT_TRUE(sameMatrixBits(before, scene.getNodeTransform(node_id)));
+                EXPECT_EQ(op::undoHistory().undoCount(), undo_before);
+                return;
+            }
+
+            if (finish == TransformDragFinish::ReleaseAtStart) {
+                frame.mouse_x = start.x + 28.0f;
+                frame.mouse_y = start.y;
+                frame.mouse_clicked[0] = false;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+                ASSERT_FALSE(sameMatrixBits(before, scene.getNodeTransform(node_id)))
+                    << "pointer motion did not change the selected node transform";
+
+                controller_->handleMouseButton(static_cast<int>(input::AppMouseButton::LEFT), input::ACTION_RELEASE,
+                                               start.x, start.y);
+                frame.mouse_x = start.x;
+                frame.mouse_y = start.y;
+                frame.mouse_down[0] = false;
+                frame.mouse_released[0] = true;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+                frame.mouse_released[0] = false;
+                gizmo.renderNodeTransformGizmo(ui, layout);
+
+                EXPECT_TRUE(sameMatrixBits(before, scene.getNodeTransform(node_id)));
+                EXPECT_EQ(op::undoHistory().undoCount(), undo_before);
+                return;
+            }
+
             bool changed = false;
             for (const glm::vec2 delta : {glm::vec2(28.0f, 0.0f), glm::vec2(0.0f, 28.0f),
                                           glm::vec2(20.0f, 20.0f), glm::vec2(-24.0f, 0.0f)}) {
@@ -928,6 +991,101 @@ namespace lfs::vis {
         gui::rml_input::TextInputEscapeRevertController revert_;
     };
 
+    TEST_F(WindowInputDispatchTest, NodeDeletionPreservesTransformToolThroughReselectionAndHistory) {
+        auto& sm = *viewer_->getSceneManager();
+        auto& scene = viewer_->getScene();
+        auto& editor = viewer_->getEditorContext();
+        auto& gizmo = gui_->gizmo();
+        gizmo.setupEvents();
+        int index = 0;
+        for (const auto tool : {ToolType::Translate, ToolType::Rotate, ToolType::Scale}) {
+            for (const auto pivot : {PivotMode::Origin, PivotMode::BoundsCenter}) {
+                for (const bool remove_selected : {true, false}) {
+                    SCOPED_TRACE(static_cast<int>(tool));
+                    SCOPED_TRACE(remove_selected);
+                    const auto survivor_name = "Survivor " + std::to_string(index);
+                    const auto removed_name = "Removed " + std::to_string(index++);
+                    const auto survivor = scene.addSplat(survivor_name, lfs::test::licht::make_splat(3));
+                    const auto removed = scene.addSplat(removed_name, lfs::test::licht::make_splat(3));
+                    sm.changeContentType(SceneManager::ContentType::SplatFiles);
+                    sm.selectNode(remove_selected ? removed : survivor);
+                    editor.update(&sm, viewer_->getTrainerManager());
+                    core::events::tools::SetToolbarTool{.tool_mode = static_cast<int>(tool)}.emit();
+                    gizmo.setPivotMode(pivot);
+                    const auto operation = gizmo.getOperation();
+                    const auto tool_id = app_store().active_tool.get();
+                    ASSERT_EQ(editor.getActiveTool(), tool);
+                    ASSERT_FALSE(tool_id.empty());
+                    const auto check_tool = [&] {
+                        EXPECT_EQ(editor.getActiveTool(), tool);
+                        EXPECT_EQ(app_store().active_tool.get(), tool_id);
+                        EXPECT_EQ(UnifiedToolRegistry::instance().getActiveTool(), tool_id);
+                        EXPECT_EQ(gizmo.getOperation(), operation);
+                        EXPECT_EQ(gizmo.getPivotMode(), pivot);
+                    };
+                    op::undoHistory().clear();
+                    ASSERT_TRUE(sm.removeNodeWithResult(removed, false));
+                    ASSERT_EQ(scene.getNode(removed_name), nullptr);
+                    check_tool();
+                    sm.selectNode(survivor);
+                    editor.update(&sm, viewer_->getTrainerManager());
+                    ASSERT_TRUE(editor.canTransformSelectedNode());
+                    check_tool();
+                    ASSERT_TRUE(op::undoHistory().undo().success);
+                    ASSERT_NE(scene.getNode(removed_name), nullptr);
+                    check_tool();
+                    ASSERT_TRUE(op::undoHistory().redo().success);
+                    ASSERT_EQ(scene.getNode(removed_name), nullptr);
+                    sm.selectNode(survivor_name);
+                    editor.update(&sm, viewer_->getTrainerManager());
+                    check_tool();
+                }
+            }
+        }
+        op::undoHistory().clear();
+        core::events::state::SceneCleared{}.emit();
+        EXPECT_EQ(editor.getActiveTool(), ToolType::None);
+        EXPECT_TRUE(app_store().active_tool.get().empty());
+        EXPECT_EQ(gizmo.getOperation(), gui::GizmoOperation::Translate);
+    }
+
+    TEST_F(WindowInputDispatchTest, UnrelatedDeletionPreservesCropToolAndVolumeDeletionLeavesIt) {
+        auto& sm = *viewer_->getSceneManager();
+        auto& scene = viewer_->getScene();
+        auto& editor = viewer_->getEditorContext();
+        auto& gizmo = gui_->gizmo();
+        gizmo.setupEvents();
+        int index = 0;
+        for (const bool ellipsoid : {false, true}) {
+            for (const auto operation : {gui::GizmoOperation::Translate, gui::GizmoOperation::Rotate,
+                                         gui::GizmoOperation::Scale}) {
+                SCOPED_TRACE(ellipsoid);
+                SCOPED_TRACE(static_cast<int>(operation));
+                const auto suffix = std::to_string(index++);
+                const auto parent = scene.addSplat("Crop parent " + suffix, lfs::test::licht::make_splat(3));
+                const auto other = scene.addSplat("Other " + suffix, lfs::test::licht::make_splat(3));
+                const auto volume = ellipsoid ? scene.addEllipsoid("Volume " + suffix, parent)
+                                              : scene.addCropBox("Volume " + suffix, parent);
+                sm.changeContentType(SceneManager::ContentType::SplatFiles);
+                sm.selectNode(volume);
+                editor.update(&sm, viewer_->getTrainerManager());
+                gizmo.setOperation(operation);
+                ASSERT_EQ(editor.getActiveOperator(), "builtin.cropbox");
+                ASSERT_TRUE(sm.removeNodeWithResult(other, false));
+                EXPECT_EQ(editor.getActiveOperator(), "builtin.cropbox");
+                EXPECT_EQ(app_store().active_tool.get(), "builtin.cropbox");
+                EXPECT_EQ(UnifiedToolRegistry::instance().getActiveTool(), "builtin.cropbox");
+                EXPECT_EQ(gizmo.getOperation(), operation);
+                EXPECT_EQ(sm.getSelectedNodeIds(), std::vector<core::NodeId>{volume});
+                ASSERT_TRUE(sm.removeNodeWithResult(volume, false));
+                EXPECT_EQ(sm.getSelectedNodeIds(), std::vector<core::NodeId>{parent});
+                EXPECT_FALSE(editor.hasActiveOperator());
+                EXPECT_TRUE(UnifiedToolRegistry::instance().getActiveTool().empty());
+                op::undoHistory().clear();
+            }
+        }
+    }
+
 #define TRANSFORM_DRAG_CANCEL_TEST(test_name, drag_mode, finish_mode) \
     TEST_F(WindowInputDispatchTest, test_name) {                      \
         exerciseTransformDrag(TransformDragMode::drag_mode,           \
@@ -947,7 +1105,344 @@ namespace lfs::vis {
     TRANSFORM_DRAG_CANCEL_TEST(RightClickCancelsBoundsScaleAndAddsNoUndo, BoundsScale, RightClick)
     TRANSFORM_DRAG_CANCEL_TEST(LeftReleaseCommitsBoundsScaleAndAddsOneUndo, BoundsScale, LeftRelease)
 
+    TEST_F(WindowInputDispatchTest, SameFrameReleaseAppliesFinalTranslatePosition) {
+        exerciseTransformDrag(TransformDragMode::Translate, TransformDragFinish::ReleaseAtStart);
+    }
+
+    TEST_F(WindowInputDispatchTest, SameFrameReleaseAppliesFinalRotatePosition) {
+        exerciseTransformDrag(TransformDragMode::Rotate, TransformDragFinish::ReleaseAtStart);
+    }
+
+    TEST_F(WindowInputDispatchTest, SameFrameReleaseAppliesFinalScalePosition) {
+        exerciseTransformDrag(TransformDragMode::Scale, TransformDragFinish::ReleaseAtStart);
+    }
+
+    TEST_F(WindowInputDispatchTest, SameFrameReleaseAppliesFinalBoundsPosition) {
+        exerciseTransformDrag(TransformDragMode::BoundsScale, TransformDragFinish::ReleaseAtStart);
+    }
+
+    TEST_F(WindowInputDispatchTest, ZeroLengthGizmoClickDragsAddNoUndoEntry) {
+        for (const auto mode : {TransformDragMode::Translate, TransformDragMode::Rotate,
+                                TransformDragMode::Scale, TransformDragMode::BoundsScale}) {
+            SCOPED_TRACE(static_cast<int>(mode));
+            exerciseTransformDrag(mode, TransformDragFinish::ZeroLengthRelease);
+        }
+    }
+
 #undef TRANSFORM_DRAG_CANCEL_TEST
+
+    TEST_F(WindowInputDispatchTest, CropScaleHandleKeepsLocalMinimumUnderNestedParents) {
+        auto& sm = *viewer_->getSceneManager();
+        auto& scene = sm.getScene();
+        auto& gizmo = gui_->gizmo();
+        auto& camera = viewer_->getViewport().camera;
+        camera.t = {0.0f, 0.0f, 12.0f};
+        camera.pivot = {0.0f, 0.0f, 0.0f};
+        camera.R = rendering::makeVisualizerLookAtRotation(camera.t, camera.pivot);
+        gui::UIContext ui{.viewer = viewer_.get(), .editor = &viewer_->getEditorContext()};
+        const gui::ViewportLayout layout{.view = viewer_->activeView().id, .pos = {0.0f, 0.0f}, .size = {400.0f, 300.0f}};
+        setGizmoViewportLayout(layout);
+        const auto render_frame = [&] {
+            gui::beginScaleGizmoFrame();
+            gui::beginBoundsGizmoFrame();
+            gizmo.renderCropBoxGizmo(ui, layout);
+        };
+        auto& frame = frameInput();
+        for (const bool nested : {false, true}) {
+            SCOPED_TRACE(nested);
+            const auto outer = scene.addGroup(nested ? "Outer" : "Root");
+            const auto inner = scene.addGroup(nested ? "Nested inner" : "Root inner", outer);
+            if (nested) {
+                auto transform = glm::rotate(glm::mat4(1.0f), 0.2f, glm::vec3(1, 0, 0));
+                transform = glm::rotate(transform, -0.12f, glm::vec3(0, 1, 0));
+                transform = glm::rotate(transform, 0.25f, glm::vec3(0, 0, 1));
+                scene.setNodeTransform(outer, glm::scale(transform, glm::vec3(1.25f, 0.82f, 1.1f)));
+            }
+            const auto model = scene.addSplat(nested ? "Nested model" : "Root model", lfs::test::licht::make_splat(3), inner);
+            const auto volume = scene.addCropBox(nested ? "Nested box" : "Root box", model);
+            core::CropBoxData data;
+            data.min = glm::vec3(-0.05f);
+            data.max = glm::vec3(0.05f);
+            if (!nested) {
+                data.min.y = -1e-5f;
+                data.max.y = 1e-5f;
+            }
+            scene.setCropBoxData(volume, data);
+            sm.changeContentType(SceneManager::ContentType::SplatFiles);
+            sm.selectNode(volume);
+            viewer_->getEditorContext().update(&sm, viewer_->getTrainerManager());
+            UnifiedToolRegistry::instance().setActiveTool("builtin.cropbox");
+            gizmo.setCropToolShape("box");
+            gizmo.setOperation(gui::GizmoOperation::Scale);
+            gizmo.setTransformSpace(TransformSpace::World);
+            gizmo.updateToolState(ui, false);
+            for (int drag = 0; drag < 3; ++drag) {
+                frame.mouse_down[0] = frame.mouse_clicked[0] = frame.mouse_released[0] = false;
+                bool found = false;
+                for (int y = 105; y <= 195 && !found; ++y) {
+                    frame.mouse_x = 290.0f;
+                    frame.mouse_y = static_cast<float>(y);
+                    render_frame();
+                    found = gui::isScaleGizmoHovered();
+                }
+                ASSERT_TRUE(found);
+                const glm::vec2 start(frame.mouse_x, frame.mouse_y);
+                const auto drag_to = [&](const glm::vec2 end, const bool reverse = false) {
+                    frame.mouse_x = start.x;
+                    frame.mouse_y = start.y;
+                    frame.mouse_down[0] = frame.mouse_clicked[0] = true;
+                    render_frame();
+                    EXPECT_TRUE(gui::isScaleGizmoActive());
+                    frame.mouse_clicked[0] = false;
+                    if (reverse) {
+                        frame.mouse_x = start.x - 200.0f;
+                        render_frame();
+                    }
+                    frame.mouse_x = end.x;
+                    frame.mouse_y = end.y;
+                    render_frame();
+                    frame.mouse_down[0] = false;
+                    frame.mouse_released[0] = true;
+                    render_frame();
+                    frame.mouse_released[0] = false;
+                };
+                if (drag == 0 && !nested) {
+                    op::undoHistory().clear();
+                    drag_to(start + glm::vec2(24.0f, 0.0f), true);
+                    const auto grown = *scene.getNodeById(volume)->cropbox;
+                    EXPECT_EQ(grown.min, glm::vec3(-0.05f * 1.25f, data.min.y, data.min.z));
+                    EXPECT_EQ(grown.max, glm::vec3(0.05f * 1.25f, data.max.y, data.max.z));
+                    ASSERT_TRUE(op::undoHistory().undo().success);
+                    EXPECT_EQ(scene.getNodeById(volume)->cropbox->min, data.min);
+                    ASSERT_TRUE(op::undoHistory().redo().success);
+                    EXPECT_EQ(scene.getNodeById(volume)->cropbox->min, grown.min);
+                    ASSERT_TRUE(op::undoHistory().undo().success);
+                }
+                drag_to(start - glm::normalize(start - glm::vec2(200.0f, 150.0f)) * 200.0f);
+                const auto* node = scene.getNodeById(volume);
+                ASSERT_NE(node, nullptr);
+                const glm::vec3 half = (node->cropbox->max - node->cropbox->min) * 0.5f;
+                EXPECT_NEAR(half.x, 0.0005f, 1e-8f);
+                EXPECT_NEAR(half.y, nested ? 0.0005f : data.max.y, 1e-8f);
+                EXPECT_EQ(half.z, 0.05f);
+            }
+            gizmo.deactivateAllTools();
+            op::undoHistory().clear();
+        }
+    }
+
+    TEST_F(WindowInputDispatchTest, CropToolGizmoDrawsInEveryIndependentSplitPanel) {
+        auto& sm = *viewer_->getSceneManager();
+        auto& scene = sm.getScene();
+        auto& gizmo = gui_->gizmo();
+        auto* const rendering = viewer_->getRenderingManager();
+        ASSERT_NE(rendering, nullptr);
+        auto& screens = viewer_->screens();
+        const auto first = screens.activeView();
+        const auto second = screens.screen().split(screen::AreaId{first}, screen::SplitAxis::Columns, 0.5f).value;
+        ASSERT_NE(second, kNoView);
+        screens.screen().setActiveView(screen::AreaId{first});
+        gui_->screenHost().init({.screens = &screens, .rml = &manager(), .scene_manager = &sm});
+        gui_->screenHost().layout({0.0f, 0.0f, 400.0f, 300.0f}, 1.0f);
+        for (const auto id : {first, second}) {
+            auto& camera = screens.view3D(id)->camera.camera;
+            camera.t = {id == first ? 0.0f : 6.0f, 0.0f, 12.0f};
+            camera.pivot = {0.0f, 0.0f, 0.0f};
+            camera.R = rendering::makeVisualizerLookAtRotation(camera.t, camera.pivot);
+        }
+
+        const auto model = scene.addSplat("Split model", lfs::test::licht::make_splat(3));
+        const auto box = scene.addCropBox("Split box", model);
+        core::CropBoxData data;
+        data.min = glm::vec3(-0.5f);
+        data.max = glm::vec3(0.5f);
+        scene.setCropBoxData(box, data);
+        const auto ellipsoid = scene.addEllipsoid("Split ellipsoid", model);
+        sm.changeContentType(SceneManager::ContentType::SplatFiles);
+
+        gui::UIContext ui{.viewer = viewer_.get(), .editor = &viewer_->getEditorContext()};
+        UnifiedToolRegistry::instance().setActiveTool("builtin.cropbox");
+        for (const auto& [shape, volume] : {std::pair{"box", box}, std::pair{"ellipsoid", ellipsoid}}) {
+            sm.selectNode(volume);
+            viewer_->getEditorContext().update(&sm, viewer_->getTrainerManager());
+            gizmo.setCropToolShape(shape);
+            for (const auto operation :
+                 {gui::GizmoOperation::Translate, gui::GizmoOperation::Rotate, gui::GizmoOperation::Scale}) {
+                SCOPED_TRACE(std::string(shape) + " " + std::to_string(static_cast<int>(operation)));
+                gizmo.setOperation(operation);
+                gizmo.updateToolState(ui, false);
+                (void)gui::consumeLineRendererCommands();
+                // GuiManager renders each independent view with its own target and camera.
+                for (const auto id : {first, second}) {
+                    const auto target = viewer_->findView(id);
+                    ASSERT_TRUE(target.valid());
+                    const gui::ViewportLayout layout{.view = id, .pos = target.pos, .size = target.size};
+                    gizmo.renderCropBoxGizmo(ui, layout);
+                    gizmo.renderEllipsoidGizmo(ui, layout);
+                }
+                // Every split panel draws the gizmo, each clipped to its own rectangle.
+                std::set<std::pair<int, int>> clips;
+                for (const auto& command : gui::consumeLineRendererCommands()) {
+                    if (command.clip_rect)
+                        clips.emplace(command.clip_rect->x, command.clip_rect->x + command.clip_rect->width);
+                }
+                ASSERT_EQ(clips.size(), 2u);
+                EXPECT_GE(clips.begin()->first, 0);
+                EXPECT_LE(clips.begin()->second, std::next(clips.begin())->first);
+                EXPECT_LE(std::next(clips.begin())->second, 400);
+            }
+        }
+        gizmo.deactivateAllTools();
+        ASSERT_TRUE(screens.screen().close(screen::AreaId{second}));
+        op::undoHistory().clear();
+    }
+
+    TEST(OverlayDrawListClip, PrimitivesStayInsideTheirClipRect) {
+        (void)gui::consumeLineRendererCommands();
+        const auto color = gui::overlayColor(255, 0, 0, 255);
+        gui::NativeOverlayDrawList draw_list;
+        draw_list.PushClipRect({0.0f, 0.0f}, {200.0f, 300.0f});
+        draw_list.AddLine({50.0f, 150.0f}, {350.0f, 150.0f}, color, 3.0f);
+        draw_list.AddTriangleFilled({150.0f, 100.0f}, {350.0f, 150.0f}, {150.0f, 200.0f}, color);
+        draw_list.AddCircleFilled({195.0f, 60.0f}, 20.0f, color);
+        draw_list.AddCircle({195.0f, 240.0f}, 20.0f, color, 16, 2.0f);
+        draw_list.PopClipRect();
+
+        ViewportFrameDesc params;
+        params.viewport_pos = {0.0f, 0.0f};
+        params.viewport_size = {400.0f, 300.0f};
+        gui::detail::appendLineRendererOverlays(params);
+
+        ASSERT_FALSE(params.ui_shape_overlay_triangles.empty());
+        for (const auto& vertex : params.ui_shape_overlay_triangles)
+            EXPECT_LE(vertex.screen_position.x, 200.0f + 1e-3f);
+        ASSERT_FALSE(params.overlay_triangles.empty());
+        for (const auto& vertex : params.overlay_triangles)
+            EXPECT_LE((vertex.position.x + 1.0f) * 0.5f * params.viewport_size.x, 200.0f + 1e-3f);
+    }
+
+    // Catches gizmo hover that outlives the crop gizmo: the deleted volume's last hover
+    // made every later viewport press look like a gizmo grab, so orbit never started.
+    TEST_F(WindowInputDispatchTest, ApplyingCropWhileHoveringItsGizmoKeepsViewportOrbit) {
+        auto& scene_manager = *viewer_->getSceneManager();
+        auto& scene = viewer_->getScene();
+        const core::NodeId splat_id = scene.addSplat("Crop orbit", lfs::test::licht::make_splat(3));
+        ASSERT_NE(splat_id, core::NULL_NODE);
+        scene_manager.changeContentType(SceneManager::ContentType::SplatFiles);
+        const core::NodeId cropbox_id = scene.addCropBox("Crop orbit_cropbox", splat_id);
+        ASSERT_NE(cropbox_id, core::NULL_NODE);
+        scene_manager.selectNode(cropbox_id);
+        viewer_->getEditorContext().update(&scene_manager, viewer_->getTrainerManager());
+        UnifiedToolRegistry::instance().setActiveTool("builtin.cropbox");
+        auto& gizmo = gui_->gizmo();
+        gizmo.setCropToolShape("box");
+        gizmo.setOperation(gui::GizmoOperation::Translate);
+
+        auto& camera = viewer_->getViewport().camera;
+        camera.t = {0.0f, 0.0f, 12.0f};
+        camera.pivot = {0.0f, 0.0f, 0.0f};
+        camera.R = rendering::makeVisualizerLookAtRotation(camera.t, camera.pivot);
+
+        gui::UIContext ui{.viewer = viewer_.get(), .editor = &viewer_->getEditorContext()};
+        const gui::ViewportLayout layout{.view = viewer_->activeView().id, .pos = {0.0f, 0.0f}, .size = {400.0f, 300.0f}};
+        setGizmoViewportLayout(layout);
+        gizmo.updateToolState(ui, false);
+        auto& frame = frameInput();
+        frame.mouse_down[0] = frame.mouse_clicked[0] = frame.mouse_released[0] = false;
+        bool hovered = false;
+        for (int y = 48; y <= 252 && !hovered; y += 4) {
+            for (int x = 48; x <= 352 && !hovered; x += 4) {
+                frame.mouse_x = static_cast<float>(x);
+                frame.mouse_y = static_cast<float>(y);
+                gizmo.renderCropBoxGizmo(ui, layout);
+                hovered = gui::isTranslationGizmoHovered();
+            }
+        }
+        ASSERT_TRUE(hovered) << "no crop gizmo handle found under the pointer";
+
+        gizmo.applyActiveCropTool();
+        ASSERT_EQ(scene.getNodeById(cropbox_id), nullptr);
+        ASSERT_EQ(UnifiedToolRegistry::instance().getActiveTool(), "");
+        gizmo.updateToolState(ui, false);
+        gizmo.renderCropBoxGizmo(ui, layout);
+        gizmo.renderNodeTransformGizmo(ui, layout);
+        gui::guiFocusState().want_capture_mouse = false;
+
+        Viewport orbit_viewport(400, 300);
+        TestViewTargets orbit_views{orbit_viewport};
+        InputController orbit_controller(nullptr, orbit_views);
+        orbit_controller.updateViewportBounds(0.0f, 0.0f, 400.0f, 300.0f);
+        orbit_controller.handleMouseButton(static_cast<int>(input::AppMouseButton::MIDDLE), input::ACTION_PRESS,
+                                           60.0, 250.0);
+        EXPECT_TRUE(orbit_controller.isCameraDragging());
+    }
+
+    // A translate drag ends with the pointer still over the handle. That hover must not
+    // swallow a middle-button orbit, and it must not outlive the pointer leaving the gizmo.
+    TEST_F(WindowInputDispatchTest, TranslateReleaseHoverKeepsMiddleOrbitAndClearsOnLeave) {
+        auto& scene_manager = *viewer_->getSceneManager();
+        auto& scene = viewer_->getScene();
+        const core::NodeId node_id = scene.addGroup("Orbit after translate");
+        ASSERT_NE(node_id, core::NULL_NODE);
+        scene_manager.selectNode(node_id);
+        viewer_->getEditorContext().update(&scene_manager, viewer_->getTrainerManager());
+        viewer_->getEditorContext().setActiveTool(ToolType::Translate);
+        UnifiedToolRegistry::instance().setActiveTool("builtin.translate");
+        auto& gizmo = gui_->gizmo();
+        gizmo.setOperation(gui::GizmoOperation::Translate);
+        gizmo.setTransformSpace(TransformSpace::World);
+        gizmo.setPivotMode(PivotMode::Origin);
+
+        auto& camera = viewer_->getViewport().camera;
+        camera.t = {0.0f, 0.0f, 12.0f};
+        camera.pivot = {0.0f, 0.0f, 0.0f};
+        camera.R = rendering::makeVisualizerLookAtRotation(camera.t, camera.pivot);
+
+        gui::UIContext ui{.viewer = viewer_.get(), .editor = &viewer_->getEditorContext()};
+        const gui::ViewportLayout layout{.view = viewer_->activeView().id, .pos = {0.0f, 0.0f}, .size = {400.0f, 300.0f}};
+        setGizmoViewportLayout(layout, false);
+        gui_->screenHost().init({.screens = &viewer_->screens(), .rml = &manager(), .scene_manager = &scene_manager});
+        gui_->screenHost().layout({0.0f, 0.0f, 400.0f, 300.0f}, 1.0f);
+        gizmo.updateToolState(ui, false);
+        auto& frame = frameInput();
+        const auto render_at = [&](const float x, const float y, const bool down, const bool clicked) {
+            frame.mouse_x = x;
+            frame.mouse_y = y;
+            frame.mouse_down[0] = down;
+            frame.mouse_clicked[0] = clicked;
+            frame.mouse_released[0] = false;
+            gui::beginTranslationGizmoFrame();
+            gui::guiFocusState().want_capture_mouse = false;
+            gizmo.renderNodeTransformGizmo(ui, layout);
+        };
+
+        render_at(236.0f, 150.0f, false, false);
+        ASSERT_TRUE(gui::isTranslationGizmoHovered());
+        render_at(236.0f, 150.0f, true, true);
+        render_at(266.0f, 150.0f, true, false);
+        ASSERT_TRUE(gui::isTranslationGizmoActive());
+        render_at(266.0f, 150.0f, false, false);
+        ASSERT_FALSE(gui::isTranslationGizmoActive());
+        ASSERT_TRUE(gui::isTranslationGizmoHovered());
+        gui::guiFocusState().want_capture_mouse = false;
+
+        Viewport orbit_viewport(400, 300);
+        TestViewTargets orbit_views{orbit_viewport};
+        InputController orbit_controller(nullptr, orbit_views);
+        orbit_controller.updateViewportBounds(0.0f, 0.0f, 400.0f, 300.0f);
+        orbit_controller.handleMouseButton(static_cast<int>(input::AppMouseButton::MIDDLE), input::ACTION_PRESS,
+                                           266.0, 150.0);
+        EXPECT_TRUE(orbit_controller.isCameraDragging());
+        orbit_controller.handleMouseButton(static_cast<int>(input::AppMouseButton::MIDDLE), input::ACTION_RELEASE,
+                                           266.0, 150.0);
+
+        context_->ProcessMouseMove(60, 260, 0);
+        EXPECT_TRUE(gui_->passiveMouseMoveNeedsRender(60.0f, 260.0f));
+        render_at(60.0f, 260.0f, false, false);
+        EXPECT_FALSE(gui::isTranslationGizmoHovered());
+        gui::guiFocusState().want_capture_mouse = false;
+        EXPECT_FALSE(gui_->passiveMouseMoveNeedsRender(60.0f, 260.0f));
+    }
 
     TEST_F(WindowInputDispatchTest, TranslateXAxisCenterlineDragSurvivesSmallViewTilts) {
         for (const float tilt : {0.0f, 1.0f, 2.0f, 3.0f, 5.0f}) {
@@ -1227,7 +1722,7 @@ namespace lfs::vis {
 
 namespace lfs::vis {
     TEST_F(WindowInputDispatchTest, ExplicitOcclusionBlocksViewportPressAndItsRelease) {
-        gui::RmlViewportOverlay overlay;
+        auto& overlay = viewportOverlay();
         overlay.init(&manager());
         overlay.setViewportBounds({0, 0}, {400, 300}, {0, 0});
         auto* context = Rml::GetContext("viewport_overlay");
@@ -1858,5 +2353,234 @@ namespace lfs::vis {
         EXPECT_EQ(listener_.ends, 1);
         EXPECT_EQ(listener_.cancelled_ends, 0);
         listener_.callback = {};
+    }
+} // namespace lfs::vis
+
+namespace lfs::vis {
+    class ScenePanelRefreshTest : public WindowInputDispatchTest {
+    protected:
+        bool keepSceneHandlers() const override { return true; }
+
+        void checkMutation(const bool cached, const bool add_group, const bool from_menu = false,
+                           const bool point_cloud = false) {
+            auto& scene_manager = *viewer_->getSceneManager();
+            auto& scene = scene_manager.getScene();
+            const auto original = point_cloud
+                                      ? scene.addPointCloud("Original", std::make_shared<core::PointCloud>(
+                                                                            core::Tensor::zeros({2, 3}, core::Device::CPU),
+                                                                            core::Tensor::ones({2, 3}, core::Device::CPU)))
+                                      : scene.addGroup("Original");
+            gui::NativeScenePanel panel(&manager());
+            gui::PanelDrawContext ctx;
+            ctx.scene = &scene;
+            ctx.scene_generation = python::get_scene_generation();
+            ctx.frame_serial = 1;
+            panel.preload(ctx);
+            auto* context = manager().getContext("scene_panel_native");
+            ASSERT_NE(context, nullptr);
+            auto* tree = dynamic_cast<gui::SceneGraphElement*>(
+                context->GetDocument(0)->GetElementById("tree-container"));
+            ASSERT_NE(tree, nullptr);
+            ASSERT_EQ(tree->nodeCount(), 1u);
+            auto& ledger = viewer_->getRenderingManager()->frameDemandLedger();
+            const auto consume = [&] {
+                static_cast<void>(app_store().store().drain_dirty_into_frame());
+                return ledger.plan(FrameClock::now());
+            };
+            static_cast<void>(consume());
+
+            // The frame context was captured before the action mutated the scene.
+            if (from_menu) {
+                const auto action = add_group ? std::string("scene_panel:add_group_root")
+                                              : "scene_panel:duplicate:" + std::to_string(original);
+                menu().request({{"Create node", action}}, 0, 0);
+                auto* menu_context = manager().getContext("global_context_menu");
+                ASSERT_NE(menu_context, nullptr);
+                auto* item = menu_context->GetDocument(0)->QuerySelector("[data-ctx-action]");
+                ASSERT_NE(item, nullptr);
+                item->DispatchEvent("click", {});
+            } else {
+                if (add_group)
+                    scene_manager.addGroupNode("Added");
+                else
+                    ASSERT_FALSE(scene_manager.duplicateNodeTree(original).empty());
+                EXPECT_TRUE(consume().present);
+            }
+            gui::PanelInputState input;
+            input.mouse_clicked[0] = from_menu;
+            gui::PanelDirectRenderRequest request;
+            request.input = cached ? nullptr : &input;
+            request.mode = cached ? gui::PanelDirectRenderMode::Cached : gui::PanelDirectRenderMode::Preload;
+            request.width = 400;
+            request.height = 300;
+            panel.renderDirect(request, ctx);
+            EXPECT_EQ(tree->nodeCount(), 2u);
+            if (from_menu)
+                EXPECT_TRUE(consume().present);
+
+            // A fresh idle frame must neither retain stale rows nor request more frames.
+            ctx.scene_generation = python::get_scene_generation();
+            ++ctx.frame_serial;
+            request.mode = gui::PanelDirectRenderMode::Cached;
+            request.input = nullptr;
+            panel.renderDirect(request, ctx);
+            EXPECT_EQ(tree->nodeCount(), 2u);
+            EXPECT_TRUE(consume().empty());
+            EXPECT_FALSE(ledger.nextDeadline(FrameClock::now()).has_value());
+        }
+    };
+
+    TEST_F(ScenePanelRefreshTest, UnchangedPanelStaysIdle) {
+        auto& scene = viewer_->getSceneManager()->getScene();
+        scene.addGroup("Existing");
+        gui::NativeScenePanel panel(&manager());
+        gui::PanelDrawContext ctx;
+        ctx.scene = &scene;
+        ctx.scene_generation = python::get_scene_generation();
+        panel.preload(ctx);
+        auto& ledger = viewer_->getRenderingManager()->frameDemandLedger();
+        static_cast<void>(app_store().store().drain_dirty_into_frame());
+        static_cast<void>(ledger.plan(FrameClock::now()));
+        const auto start = std::chrono::steady_clock::now();
+        constexpr int repeats = 10000;
+        for (int i = 0; i < repeats; ++i) {
+            panel.renderDirect({.mode = gui::PanelDirectRenderMode::Cached,
+                                .width = 400,
+                                .height = 300},
+                               ctx);
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        RecordProperty("idle_update_ns", std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count() / repeats);
+        EXPECT_TRUE(ledger.plan(FrameClock::now()).empty());
+        EXPECT_FALSE(ledger.nextDeadline(FrameClock::now()).has_value());
+        const auto sync_start = std::chrono::steady_clock::now();
+        for (int i = 0; i < repeats; ++i)
+            panel.preload(ctx);
+        const auto sync_elapsed = std::chrono::steady_clock::now() - sync_start;
+        RecordProperty("live_sync_ns", std::chrono::duration_cast<std::chrono::nanoseconds>(sync_elapsed).count() / repeats);
+        EXPECT_TRUE(ledger.plan(FrameClock::now()).empty());
+    }
+
+    TEST_F(ScenePanelRefreshTest, CameraMenusOnlyOfferActionsWithTargets) {
+        auto& scene_manager = *viewer_->getSceneManager();
+        auto& scene = scene_manager.getScene();
+        const auto empty = scene.addCameraGroup("Empty", core::NULL_NODE, 99);
+        const auto empty_nested = scene.addCameraGroup("Empty nested", core::NULL_NODE, 0);
+        scene.addGroup("Not a camera", empty_nested);
+        const auto full = scene.addCameraGroup("Full", core::NULL_NODE, 0);
+        const auto add_camera = [&](const std::string& name, const core::NodeId parent,
+                                    const std::filesystem::path& image_path, const int uid) {
+            return scene.addCamera(name, parent, std::make_shared<core::Camera>(core::Tensor::eye(3, core::Device::CPU), core::Tensor::zeros({3}, core::Device::CPU), 100.f, 110.f, 32.f, 24.f, core::Tensor{}, core::Tensor{}, core::CameraModelType::PINHOLE, name, image_path, std::filesystem::path{}, 64, 48, uid));
+        };
+        const auto no_image = add_camera("No image", core::NULL_NODE, {}, 41);
+        const auto with_image = add_camera("With image", core::NULL_NODE, "image.png", 42);
+        const auto child = add_camera("Child", full, {}, 43);
+        gui::NativeScenePanel panel(&manager());
+        gui::PanelDrawContext ctx;
+        ctx.scene = &scene;
+        const auto open_menu = [&](const core::NodeId id) {
+            menu().request({}, 0, 0);
+            ctx.scene_generation = python::get_scene_generation();
+            ++ctx.frame_serial;
+            panel.preload(ctx);
+            panel.renderDirect({.mode = gui::PanelDirectRenderMode::Preload,
+                                .width = 400,
+                                .height = 600},
+                               ctx);
+            auto* context = manager().getContext("scene_panel_native");
+            if (!context) {
+                ADD_FAILURE() << "Missing Scene panel";
+                return std::string{};
+            }
+            auto* document = context->GetDocument(0);
+            document->Show();
+            auto* tree = dynamic_cast<gui::SceneGraphElement*>(document->GetElementById("tree-container"));
+            if (!tree) {
+                ADD_FAILURE() << "Missing scene tree";
+                return std::string{};
+            }
+            tree->SetProperty("height", "500px");
+            context->SetDimensions({400, 600});
+            context->Update();
+            static_cast<void>(tree->syncFromScene(ctx));
+            context->Update();
+            auto* row = document->QuerySelector("[data-node-id='" + std::to_string(id) + "']");
+            if (!row) {
+                ADD_FAILURE() << "Missing Scene row " << id << " height=" << tree->GetClientHeight();
+                return std::string{};
+            }
+            row->DispatchEvent("mousedown", {{"button", Rml::Variant(1)}, {"mouse_x", Rml::Variant(10.f)}, {"mouse_y", Rml::Variant(10.f)}});
+            auto* menu_context = manager().getContext("global_context_menu");
+            if (!menu_context || !menu_context->GetDocument(0)) {
+                ADD_FAILURE() << "Missing context menu";
+                return std::string{};
+            }
+            return menu_context->GetDocument(0)->GetInnerRML();
+        };
+        auto html = open_menu(no_image);
+        EXPECT_EQ(html.find("scene_panel:go_to_image:"), std::string::npos);
+        EXPECT_NE(html.find("scene_panel:go_to_camera:"), std::string::npos);
+        html = open_menu(with_image);
+        EXPECT_NE(html.find("scene_panel:go_to_image:42"), std::string::npos);
+        EXPECT_NE(html.find("scene_panel:go_to_camera:42"), std::string::npos);
+        for (const auto id : {empty, empty_nested}) {
+            html = open_menu(id);
+            EXPECT_EQ(html.find("scene_panel:enable_all_train:"), std::string::npos);
+            EXPECT_EQ(html.find("scene_panel:disable_all_train:"), std::string::npos);
+            EXPECT_EQ(html.find("scene_panel:duplicate:"), std::string::npos);
+        }
+        html = open_menu(full);
+        EXPECT_NE(html.find("scene_panel:enable_all_train:"), std::string::npos);
+        EXPECT_NE(html.find("scene_panel:disable_all_train:"), std::string::npos);
+        EXPECT_EQ(html.find("scene_panel:duplicate:"), std::string::npos);
+        auto* menu_context = manager().getContext("global_context_menu");
+        ASSERT_NE(menu_context, nullptr);
+        auto* doc = menu_context->GetDocument(0);
+        ASSERT_NE(doc, nullptr);
+        auto* disable = doc->QuerySelector("[data-ctx-action='scene_panel:disable_all_train:" + std::to_string(full) + "']");
+        ASSERT_NE(disable, nullptr);
+        disable->DispatchEvent("click", {});
+        panel.preload(ctx);
+        EXPECT_FALSE(scene.getNodeById(child)->training_enabled);
+        open_menu(full);
+        auto* enable = doc->QuerySelector("[data-ctx-action='scene_panel:enable_all_train:" + std::to_string(full) + "']");
+        ASSERT_NE(enable, nullptr);
+        enable->DispatchEvent("click", {});
+        panel.preload(ctx);
+        EXPECT_TRUE(scene.getNodeById(child)->training_enabled);
+
+        scene_manager.selectNodesById({empty, empty_nested});
+        html = open_menu(empty);
+        EXPECT_EQ(html.find("scene_panel:enable_all_selected_train"), std::string::npos);
+        EXPECT_EQ(html.find("scene_panel:disable_all_selected_train"), std::string::npos);
+        scene_manager.selectNodesById({empty, with_image});
+        html = open_menu(empty);
+        EXPECT_NE(html.find("scene_panel:enable_all_selected_train"), std::string::npos);
+        EXPECT_NE(html.find("scene_panel:disable_all_selected_train"), std::string::npos);
+    }
+
+    TEST_F(ScenePanelRefreshTest, ContextMenuDuplicateRefreshesLiveTree) {
+        checkMutation(false, false, true);
+    }
+    TEST_F(ScenePanelRefreshTest, ContextMenuDuplicateRefreshesCachedTree) {
+        checkMutation(true, false, true);
+    }
+    TEST_F(ScenePanelRefreshTest, ContextMenuPointCloudDuplicateRefreshesLiveTreeThenStaysIdle) {
+        checkMutation(false, false, true, true);
+    }
+    TEST_F(ScenePanelRefreshTest, ContextMenuPointCloudDuplicateRefreshesCachedTreeThenStaysIdle) {
+        checkMutation(true, false, true, true);
+    }
+    TEST_F(ScenePanelRefreshTest, ContextMenuAddGroupRefreshesCachedTree) {
+        checkMutation(true, true, true);
+    }
+    TEST_F(ScenePanelRefreshTest, DuplicateRefreshesLiveTreeWithCapturedFrameContext) {
+        checkMutation(false, false);
+    }
+    TEST_F(ScenePanelRefreshTest, DuplicateRefreshesCachedTreeWithCapturedFrameContext) {
+        checkMutation(true, false);
+    }
+    TEST_F(ScenePanelRefreshTest, AddGroupRefreshesCachedTreeWithCapturedFrameContext) {
+        checkMutation(true, true);
     }
 } // namespace lfs::vis

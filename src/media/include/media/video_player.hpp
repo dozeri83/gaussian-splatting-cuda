@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "core/export.hpp"
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -12,7 +14,7 @@
 
 namespace lfs::io {
 
-    class VideoPlayer {
+    class LFS_MEDIA_API VideoPlayer {
     public:
         VideoPlayer();
         ~VideoPlayer();

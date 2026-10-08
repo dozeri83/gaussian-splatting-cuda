@@ -62,7 +62,7 @@ def card_geometry(card_width):
     return {
         "thumbnail_width": float(card_width),
         "thumbnail_height": thumbnail_height,
-        "height": thumbnail_height + 40.0,
+        "height": thumbnail_height + 48.0,
     }
 
 

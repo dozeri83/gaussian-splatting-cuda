@@ -1014,8 +1014,11 @@ namespace lfs::vis {
             // Pivot placement is a viewport-global double-click gesture and must
             // remain available when an editing gizmo is merely hovered. Active
             // gizmo manipulation still owns the pointer until the drag finishes.
+            // Gizmos only grab the left button, so hovering one never blocks
+            // camera navigation on the other buttons.
             if (isTransformGizmoUsing() ||
-                (over_transform_gizmo && bound_action != input::Action::CAMERA_SET_PIVOT)) {
+                (is_left_button && over_transform_gizmo &&
+                 bound_action != input::Action::CAMERA_SET_PIVOT)) {
                 return;
             }
 
@@ -1459,6 +1462,10 @@ namespace lfs::vis {
         glm::dvec2 current_pos{x, y};
         const double delta_x = x - last_mouse_pos_.x;
         const double delta_y = y - last_mouse_pos_.y;
+        if (align_tool_ && align_tool_->isEnabled() && (delta_x != 0.0 || delta_y != 0.0)) {
+            if (auto* rendering = services().renderingOrNull())
+                rendering->markDirty(DirtyFlag::OVERLAY, FrameReason::Overlay, "align_cursor_moved");
+        }
 
         // Dispatch to modal operators first - if consumed, don't continue
         bool over_gui = false;
@@ -2752,7 +2759,6 @@ namespace lfs::vis {
             if (!drone_viewport && active_movement_viewport->camera.hasDroneMotion())
                 drone_viewport = active_movement_viewport;
             if (drone_viewport && (keys_active || drone_viewport->camera.hasDroneMotion())) {
-                drone_viewport->camera.setSceneExtent(sceneExtent());
                 drone_viewport->camera.advanceDrone(
                     delta_time,
                     keys_active && keys_movement_[0],
@@ -2780,7 +2786,6 @@ namespace lfs::vis {
         } else {
             auto* const movement_viewport = keys_active ? active_movement_viewport : wasdMomentumViewport();
             if (movement_viewport && (keys_active || movement_viewport->camera.hasWasdMomentum())) {
-                movement_viewport->camera.setSceneExtent(sceneExtent());
                 movement_viewport->camera.advanceWasd(
                     delta_time,
                     keys_active && keys_movement_[0],

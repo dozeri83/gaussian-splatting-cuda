@@ -145,6 +145,8 @@ namespace lfs::vis {
             std::shared_ptr<core::Tensor> depth;
         };
         virtual lfs::Result<OutputTensors> readOutputTensors(RenderTargetId) const;
+        // Keeps a published image alive until all copied frame descriptions release it.
+        virtual std::shared_ptr<void> retainOutputImage(SceneImageViewHandle) { return {}; }
         virtual bool hasRenderTarget(RenderTargetId) const = 0;
         virtual bool releaseRenderTarget(RenderTargetId) = 0;
         virtual void releaseSceneResources() = 0;
@@ -159,6 +161,13 @@ namespace lfs::vis {
     };
     class LFS_VIS_API PointSceneRenderer {
     public:
+        static constexpr float kDepthSamplePending = -2.0f;
+        struct DepthSampleRequest {
+            glm::ivec2 pixel{0, 0};
+            glm::ivec2 source_size{0, 0};
+            RenderTargetId target;
+            bool nonblocking = false;
+        };
         struct RenderResult {
             SceneImageHandle image;
             SceneImageViewHandle image_view;
@@ -246,6 +255,7 @@ namespace lfs::vis {
         };
 
         virtual ~PointSceneRenderer() = default;
+        virtual lfs::Result<float> sampleDepthAtPixel(const DepthSampleRequest&) = 0;
         virtual bool takeRefinementRequest() { return false; }
         virtual std::expected<RenderResult, std::string> render(const RenderRequest&, RenderTargetId) = 0;
         virtual std::expected<std::shared_ptr<core::Tensor>, std::string> readOutputImage(RenderTargetId) = 0;

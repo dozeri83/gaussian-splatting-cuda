@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include "core/export.hpp"
+#include "media/cuda_frame.hpp"
 #include "media/hdr_renderer.hpp"
 #include <cstddef>
 #include <cstdint>
@@ -21,7 +22,7 @@ namespace lfs::media::detail {
         virtual ~GpuJpegEncoder() = default;
         virtual std::size_t capacity() const noexcept = 0;
         virtual bool canConvertHardware() const noexcept = 0;
-        virtual void convertHardware(const AVFrame*, std::uint8_t* optional_readback) = 0;
+        virtual void convertHardware(const CudaVideoFrame&, std::uint8_t* optional_readback) = 0;
         virtual void finishHardware() = 0;
         virtual void* queueHardware(std::size_t index) = 0;
         virtual void* queueHost(std::size_t index, const std::uint8_t*) = 0;
@@ -31,6 +32,9 @@ namespace lfs::media::detail {
     using HdrFactory = std::unique_ptr<io::HdrRenderer> (*)();
     LFS_MEDIA_API void registerGpuJpegFactory(GpuJpegFactory) noexcept;
     LFS_MEDIA_API void registerHdrFactory(HdrFactory) noexcept;
+    // Registered by GPU hosts independently of the optional JPEG encoder.
+    LFS_MEDIA_API void registerCudaVideoDecodeBackend() noexcept;
+    LFS_MEDIA_API bool hasCudaVideoDecodeBackend() noexcept;
     LFS_MEDIA_API bool hasGpuJpegBackend() noexcept;
     LFS_MEDIA_API bool hasHdrBackend() noexcept;
     LFS_MEDIA_API std::unique_ptr<GpuJpegEncoder> createGpuJpegEncoder(const JpegSettings&);

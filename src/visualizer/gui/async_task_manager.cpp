@@ -155,7 +155,8 @@ namespace lfs::vis::gui {
     };
 
     [[nodiscard]] BorrowExportPlan makeBorrowSingleIdentityExportPlan(const lfs::vis::SceneManager& scene_manager,
-                                                                      const std::vector<std::string>& node_names) {
+                                                                      const std::vector<std::string>& node_names,
+                                                                      const ExportFormat format) {
         BorrowExportPlan plan;
         if (node_names.size() != 1)
             return plan;
@@ -166,6 +167,10 @@ namespace lfs::vis::gui {
             return plan;
 
         if (node->model->has_deleted_mask())
+            return plan;
+
+        // Only RAD stores an LOD tree; other formats need the merge to flatten it to its leaves.
+        if (format != ExportFormat::RAD && node->model->lod_tree && node->model->lod_tree->has_tree())
             return plan;
 
 #if LFS_BUILD_TRAINER
@@ -469,7 +474,6 @@ namespace lfs::vis::gui {
             .shadow_map_resolution = render_settings.mesh_shadow_resolution,
             .is_emphasized = is_selected,
             .dim_non_emphasized = render_settings.desaturate_unselected && any_selected,
-            .flash_intensity = 0.0f,
             .background_color = render_settings.background_color,
             .transparent_background = environmentBackgroundEnabled(render_settings)};
     }
@@ -727,7 +731,6 @@ namespace lfs::vis::gui {
                         .backface_culling = options.backface_culling,
                         .is_emphasized = options.is_emphasized,
                         .dim_non_emphasized = options.dim_non_emphasized,
-                        .flash_intensity = options.flash_intensity,
                         .wireframe_overlay = options.wireframe_overlay,
                         .wireframe_color = options.wireframe_color,
                         .wireframe_width = options.wireframe_width,
@@ -1855,6 +1858,11 @@ namespace lfs::vis::gui {
                 return;
             }
             if (node && node->type == core::NodeType::SPLAT && node->model) {
+                if (const auto& tree = node->model->lod_tree;
+                    tree && tree->has_tree() && node->model->size() < tree->total_nodes()) {
+                    publishExportFailureState(format, path, LOCF(lichtfeld::Strings::Runtime::EXPORT_STREAMED_LOD, name));
+                    return;
+                }
                 const auto evaluated = apply_modifiers ? node->evaluated_model : nullptr;
                 splats.push_back(ExportSplatSource{
                     .data = evaluated ? evaluated.get() : node->model.get(),
@@ -1867,7 +1875,7 @@ namespace lfs::vis::gui {
             return;
         }
 
-        auto borrow_plan = makeBorrowSingleIdentityExportPlan(*scene_manager, node_names);
+        auto borrow_plan = makeBorrowSingleIdentityExportPlan(*scene_manager, node_names, format);
         if (std::ranges::any_of(splats, [](const auto& source) { return source.owner != nullptr; })) {
             borrow_plan.storage_mode = core::Scene::MergeStorageMode::Clone;
             borrow_plan.model_mutex = nullptr;

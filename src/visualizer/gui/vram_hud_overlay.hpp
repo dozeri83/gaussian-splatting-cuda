@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/export.hpp"
 #include "diagnostics/vram_ledger_model.hpp"
 #include "diagnostics/vram_profiler.hpp"
 #include "diagnostics/vram_timeline.hpp"
@@ -27,7 +28,7 @@ namespace Rml {
 namespace lfs::vis::gui {
     class VramTimelineElement;
 
-    class VramHudOverlay {
+    class LFS_VIS_API VramHudOverlay {
     public:
         struct State {
             bool visible = false;
@@ -35,18 +36,18 @@ namespace lfs::vis::gui {
             lfs::vis::AppStore::PerfHud perf_hud;
         };
 
-        VramHudOverlay();
-        ~VramHudOverlay();
+        LFS_VIS_API VramHudOverlay();
+        LFS_VIS_API ~VramHudOverlay();
 
         VramHudOverlay(const VramHudOverlay&) = delete;
         VramHudOverlay& operator=(const VramHudOverlay&) = delete;
 
-        void onDocumentLoaded(Rml::ElementDocument* document);
-        void onDocumentDestroyed();
-        void setViewportGeometry(float origin_x, float origin_y, float width, float height);
-        [[nodiscard]] bool initializeGeometryAfterLayout();
+        LFS_VIS_API void onDocumentLoaded(Rml::ElementDocument* document);
+        LFS_VIS_API void onDocumentDestroyed();
+        LFS_VIS_API void setViewportGeometry(float origin_x, float origin_y, float width, float height);
+        [[nodiscard]] LFS_VIS_API bool initializeGeometryAfterLayout();
 
-        void setState(State state);
+        LFS_VIS_API void setState(State state);
         [[nodiscard]] bool isVisible() const noexcept { return state_.visible || state_.perf_hud.visible; }
         [[nodiscard]] bool needsAnimationFrame() const noexcept {
             return pointer_captured_;
@@ -349,6 +350,7 @@ namespace lfs::vis::gui {
         float drag_start_size_w_ = 0.0f;
         float drag_start_size_h_ = 0.0f;
         bool dragging_header_ = false;
+        bool header_drag_moved_ = false;
         bool dragging_resize_ = false;
         bool pointer_captured_ = false;
         bool persistence_dirty_ = false;

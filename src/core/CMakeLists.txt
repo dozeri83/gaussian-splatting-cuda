@@ -260,6 +260,7 @@ set(CORE_SOURCES
         octree_lod.cpp
         splat_data.cpp
         splat_data_mirror.cpp
+        splat_data_mirror_centroid.cu
         splat_data_transform.cpp
         splat_exportable_storage.cpp
         sh_value_quant.cpp
@@ -291,6 +292,7 @@ set(CORE_SOURCES
 
 if(NOT LFS_HAS_CUDA)
     list(REMOVE_ITEM CORE_SOURCES
+        splat_data_mirror_centroid.cu
         cuda_error.cpp
         cuda_error_typed.cpp
         device_fault.cpp
@@ -304,8 +306,10 @@ endif()
 
 add_library(lfs_core SHARED ${CORE_SOURCES} ${TENSOR_SOURCES} shared_image_ops.cpp)
 include(${CMAKE_SOURCE_DIR}/cmake/GpuPrograms.cmake)
-target_sources(lfs_core PRIVATE tensor/tensor_vignette.cpp)
+target_sources(lfs_core PRIVATE tensor/tensor_vignette.cpp tensor/tensor_color.cpp)
+lfs_add_gpu_program(lfs_core rgb_to_yuv_program SOURCE tensor/programs/rgb_to_yuv.slang COMPUTE rgbToYuv420p DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tensor/programs/rgb_to_yuv_math.h")
 lfs_add_gpu_program(lfs_core vignette_program SOURCE tensor/programs/vignette.slang COMPUTE vignette)
+lfs_add_gpu_program(lfs_core mirror_centroid_program SOURCE tensor/programs/mirror_centroid.slang COMPUTE mirrorCentroid DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/core/rounded_math.slangh")
 if(LFS_TENSOR_METAL)
     lfs_add_gpu_program(lfs_core image_warp_program
         SOURCE tensor/backend/vulkan/shaders/image_warp.slang COMPUTE imageWarp

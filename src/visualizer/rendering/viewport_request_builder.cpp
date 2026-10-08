@@ -427,21 +427,23 @@ namespace lfs::vis {
             colors[0] = glm::vec4(ctx.settings.selection_color_center_marker, 1.0f);
             colors[lfs::rendering::kSelectionPreviewColorIndex] =
                 glm::vec4(ctx.settings.selection_color_preview, 1.0f);
-            constexpr float kSelectedHoverRedBias = 0.65f;
-            const glm::vec3 selected_hover_color =
-                ctx.settings.selection_color_committed * (1.0f - kSelectedHoverRedBias) +
-                glm::vec3(1.0f, 0.02f, 0.02f) * kSelectedHoverRedBias;
-            colors[lfs::rendering::kSelectionSelectedHoverColorIndex] =
-                glm::vec4(selected_hover_color, 1.0f);
-            if (ctx.scene_manager) {
-                for (const auto& group : ctx.scene_manager->getScene().getSelectionGroups()) {
-                    const auto index = static_cast<std::size_t>(group.id);
-                    if (index < lfs::rendering::kSelectionGroupColorCount) {
-                        colors[index] = glm::vec4(group.color, 1.0f);
-                    }
+            if (!ctx.scene_manager)
+                return;
+
+            const auto& scene = ctx.scene_manager->getScene();
+            for (const auto& group : scene.getSelectionGroups()) {
+                const auto index = static_cast<std::size_t>(group.id);
+                if (index < lfs::rendering::kSelectionGroupColorCount) {
+                    colors[index] = glm::vec4(group.color, 1.0f);
                 }
-            } else {
-                colors[1] = glm::vec4(ctx.settings.selection_color_committed, 1.0f);
+            }
+            if (const auto* const active_group = scene.getSelectionGroup(scene.getActiveSelectionGroup())) {
+                constexpr float kSelectedHoverRedBias = 0.65f;
+                const glm::vec3 selected_hover_color =
+                    active_group->color * (1.0f - kSelectedHoverRedBias) +
+                    glm::vec3(1.0f, 0.02f, 0.02f) * kSelectedHoverRedBias;
+                colors[lfs::rendering::kSelectionSelectedHoverColorIndex] =
+                    glm::vec4(selected_hover_color, 1.0f);
             }
         }
 
@@ -466,6 +468,7 @@ namespace lfs::vis {
         const auto frame_view = applySceneViewJitter(
             ctx.makeFrameView(viewport, render_size), ctx.scene_jitter_pixels);
         const bool selection_overlay_enabled = !ctx.training_active;
+        const bool gaussian_selection_visible = selection_overlay_enabled && ctx.gaussian_selection_visible;
         const bool overlay_visible =
             selection_overlay_enabled && panelMatches(ctx.cursor_preview.panel, render_panel);
         const bool ring_selection_mode = ctx.cursor_preview.selection_mode == SelectionPreviewMode::Rings;
@@ -495,13 +498,14 @@ namespace lfs::vis {
                       .ring_width = ctx.settings.ring_width,
                       .show_center_markers = ctx.settings.show_center_markers},
                  .cursor =
-                     {.enabled = ctx.cursor_preview.active && overlay_visible,
+                     {.enabled = ctx.cursor_preview.active && ctx.cursor_preview.highlight_splats &&
+                                 overlay_visible,
                       .cursor = {ctx.cursor_preview.x, ctx.cursor_preview.y},
                       .radius = ctx.cursor_preview.radius,
                       .saturation_preview = ctx.cursor_preview.saturation_mode,
                       .saturation_amount = ctx.cursor_preview.saturation_amount},
                  .emphasis =
-                     {.mask = selection_overlay_enabled ? ctx.scene_state.selection_mask : nullptr,
+                     {.mask = gaussian_selection_visible ? ctx.scene_state.selection_mask : nullptr,
                       .transient_mask =
                           {.mask = selection_overlay_enabled
                                        ? (ctx.cursor_preview.preview_selection ? ctx.cursor_preview.preview_selection
@@ -509,17 +513,15 @@ namespace lfs::vis {
                                        : nullptr,
                            .additive = selection_overlay_enabled && ctx.cursor_preview.add_mode},
                       .emphasized_node_mask = (selection_overlay_enabled &&
-                                                       (ctx.settings.desaturate_unselected ||
-                                                        ctx.selection_flash_intensity > 0.0f)
+                                                       ctx.settings.desaturate_unselected
                                                    ? ctx.scene_state.selected_node_mask
                                                    : std::vector<bool>{}),
                       .dim_non_emphasized = selection_overlay_enabled && ctx.settings.desaturate_unselected,
-                      .flash_intensity = selection_overlay_enabled ? ctx.selection_flash_intensity : 0.0f,
                       .focused_gaussian_id = (selection_overlay_enabled && ring_selection_mode && overlay_visible)
                                                  ? ctx.cursor_preview.focused_gaussian_id
                                                  : -1},
                  // Same FrameContext snapshot as emphasis.mask — no cross-frame lag.
-                 .has_selection = selection_overlay_enabled && ctx.scene_state.has_selection},
+                 .has_selection = gaussian_selection_visible && ctx.scene_state.has_selection},
             .transparent_background = environmentBackgroundUsesTransparentViewerCompositing(ctx.settings),
             .depth_view = ctx.settings.depth_view,
             .require_exact_depth = ctx.settings.show_camera_frustums ||
@@ -567,7 +569,8 @@ namespace lfs::vis {
             .filters = {},
             .overlay = {}};
         if (!ctx.training_active) {
-            state.overlay.selection_mask = ctx.scene_state.selection_mask;
+            if (ctx.gaussian_selection_visible)
+                state.overlay.selection_mask = ctx.scene_state.selection_mask;
             state.overlay.transient_mask.mask = ctx.cursor_preview.preview_selection
                                                     ? ctx.cursor_preview.preview_selection
                                                     : ctx.cursor_preview.selection_tensor;
@@ -598,7 +601,8 @@ namespace lfs::vis {
             .transparent_background = environmentBackgroundUsesTransparentViewerCompositing(ctx.settings)};
 
         if (!ctx.training_active) {
-            request.overlay.selection_mask = ctx.scene_state.selection_mask;
+            if (ctx.gaussian_selection_visible)
+                request.overlay.selection_mask = ctx.scene_state.selection_mask;
             request.overlay.transient_mask.mask = ctx.cursor_preview.preview_selection
                                                       ? ctx.cursor_preview.preview_selection
                                                       : ctx.cursor_preview.selection_tensor;
@@ -643,7 +647,7 @@ namespace lfs::vis {
 
         overlay.emphasis.mask.reset();
         overlay.has_selection = false;
-        if (ctx.scene_manager) {
+        if (ctx.scene_manager && ctx.gaussian_selection_visible) {
             overlay.emphasis.mask =
                 ctx.scene_manager->getScene().selectionMaskSliceForNode(node.id);
             overlay.has_selection =
@@ -840,7 +844,6 @@ namespace lfs::vis {
                 .backface_culling = settings.mesh_backface_culling,
                 .is_emphasized = mesh.is_selected,
                 .dim_non_emphasized = dim_non_emphasized,
-                .flash_intensity = ctx.selection_flash_intensity,
                 .wireframe_overlay = settings.mesh_wireframe,
                 .wireframe_color = settings.mesh_wireframe_color,
                 .wireframe_width = settings.mesh_wireframe_width,

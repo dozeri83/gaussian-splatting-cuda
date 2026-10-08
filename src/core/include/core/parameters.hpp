@@ -405,6 +405,10 @@ namespace lfs::core {
             void remove_step_scaling();
             [[nodiscard]] int resolved_total_iterations() const;
             [[nodiscard]] bool normal_supervision_active(int iter) const;
+            // The 3DGUT rasterizer renders no depth, so GUT training has no depth supervision.
+            [[nodiscard]] bool depth_supervision_enabled() const {
+                return !gut && use_depth_loss && depth_loss_weight > 0.0f;
+            }
             [[nodiscard]] float scale_reg_at(int iter) const;
             void resolve_mrnf_capacity_defaults();
             // Every test_every-th image is withheld from training for evaluation.
@@ -593,6 +597,9 @@ namespace lfs::core {
 
             // Headless camera-path -> video render mode (see --render-camera-path)
             std::optional<RenderPathConfig> render_path = std::nullopt;
+
+            // eval subcommand: score the model without training, saving or exporting.
+            bool evaluate_only = false;
 
             // Python scripts to execute for custom training callbacks
             std::vector<std::filesystem::path> python_scripts;

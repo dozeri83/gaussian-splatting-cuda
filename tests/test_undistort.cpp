@@ -1723,6 +1723,12 @@ TEST(UndistortImageContract, FullAndRegionRejectSameInvalidSources) {
 }
 
 TEST(UndistortRegion, PreservesProducerOrderingOnRequestedNonblockingStream) {
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0)
+        GTEST_SKIP() << "CUDA device required";
+    const lfs::test::DefaultGpuBackendForTesting cuda_backend(GpuBackend::CUDA);
+    ASSERT_TRUE(cuda_backend.switched());
+
     cudaStream_t producer = nullptr;
     cudaStream_t execution = nullptr;
     cudaStream_t gate_holder = nullptr;

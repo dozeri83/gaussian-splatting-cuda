@@ -901,6 +901,8 @@ namespace lfs::core {
             }
             return;
         }
+        if (data_ == nullptr)
+            return;
         if (device_ == Device::GPU) {
             if (!has_external_storage()) {
                 internal::backend_ops_for(*this).record_stream(

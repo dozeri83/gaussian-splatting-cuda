@@ -60,6 +60,7 @@
 #include "training/training_setup.hpp"
 #include "visualizer/app_store.hpp"
 #include "visualizer/core/data_loading_service.hpp"
+#include "visualizer/gui_capabilities.hpp"
 #include "visualizer/include/visualizer/visualizer.hpp"
 #include "visualizer/post_work_utils.hpp"
 #include "visualizer/preferences.hpp"
@@ -91,6 +92,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <span>
 #include <sstream>
 #include <utility>
@@ -1583,6 +1585,75 @@ namespace {
 
 namespace lfs::vis {
 
+    class SceneGenerationRenderPublicationTest : public VisualizerImplResetTest {};
+
+    TEST_F(SceneGenerationRenderPublicationTest, ContentMutationsScheduleSplatsButMatrixEditsStayResident) {
+        VisualizerImpl viewer(projectOptions());
+        auto* const rendering = viewer.getRenderingManager();
+        auto* const scene_manager = viewer.getSceneManager();
+        ASSERT_NE(rendering, nullptr);
+        ASSERT_NE(scene_manager, nullptr);
+        rendering->retainVisibleViews({rendering->activeViewId()});
+        auto& scene = scene_manager->getScene();
+        auto& ledger = rendering->frameDemandLedger();
+
+        const auto consume_plan = [&] {
+            static_cast<void>(app_store().store().drain_dirty_into_frame());
+            return ledger.plan(FrameClock::now());
+        };
+        const auto expect_splat_request = [&] {
+            const auto plan = consume_plan();
+            EXPECT_NE(plan.view_flags[0] & DirtyFlag::SPLATS, 0u);
+        };
+        const auto expect_no_splat_request = [&] {
+            const auto plan = consume_plan();
+            EXPECT_EQ(plan.view_flags[0] & DirtyFlag::SPLATS, 0u);
+        };
+
+        static_cast<void>(consume_plan());
+        const auto node_id = scene.addSplat("publication_node", lfs::test::licht::make_splat(2));
+        ASSERT_NE(node_id, core::NULL_NODE);
+        expect_splat_request();
+
+        scene.setNodeVisibility(node_id, false);
+        expect_splat_request();
+
+        ASSERT_TRUE(scene_manager->removePLYWithResult("publication_node"));
+        expect_splat_request();
+        ASSERT_EQ(op::undoHistory().undoCount(), 1u);
+        op::undoHistory().undo();
+        ASSERT_NE(scene.getNode("publication_node"), nullptr);
+        expect_splat_request();
+
+        core::events::state::CombinedModelBuildReady{.scene = &scene}.emit();
+        ASSERT_TRUE(viewer.pumpPostedWorkForProjectWrite());
+        expect_splat_request();
+
+        const auto group_id = scene.addGroup("publication_group");
+        ASSERT_NE(group_id, core::NULL_NODE);
+        expect_splat_request();
+        const auto reparented_id = scene.getNodeIdByName("publication_node");
+        ASSERT_TRUE(scene.reparent(reparented_id, group_id));
+        expect_splat_request();
+
+        scene.replaceNodeModel("publication_node", lfs::test::licht::make_splat(3));
+        expect_splat_request();
+
+        auto* const node = scene.getNodeById(reparented_id);
+        ASSERT_NE(node, nullptr);
+        node->model->soft_delete(core::Tensor::ones_bool({node->model->size()}, core::Device::CPU));
+        scene.notifyMutation(core::Scene::MutationType::MODEL_CHANGED);
+        expect_splat_request();
+
+        scene.setNodeTransform("publication_node",
+                               glm::translate(glm::mat4(1.0f), glm::vec3(1.0f, 2.0f, 3.0f)));
+        expect_no_splat_request();
+
+        rendering->pollTrainingRefresh(true, 1);
+        const auto training_plan = consume_plan();
+        EXPECT_NE(training_plan.view_flags[0] & DirtyFlag::SPLATS, 0u);
+    }
+
     class SequencerFrameDemandTest : public VisualizerImplResetTest {
     protected:
         static void SetUpTestSuite() {
@@ -1766,8 +1837,8 @@ namespace lfs::vis {
         const auto script = std::format(R"PY(
 import runpy
 import lichtfeld as lf
-contract = runpy.run_path(r"{}/tests/python/test_ui_api_completeness.py")
-contract["test_selection_submode_follows_native_mode"](lf)
+contract = runpy.run_path(r"{}/tests/python/selection_submode_contract.py")
+contract["check_selection_submode_follows_native_mode"](lf)
 )PY",
                                         PROJECT_ROOT_PATH);
         const int result = PyRun_SimpleString(script.c_str());
@@ -1939,7 +2010,7 @@ contract["test_selection_submode_follows_native_mode"](lf)
         gui->ui_visibility_target_hidden_ = true;
         gui->ui_visibility_target_layout_.pos = {0.0f, 0.0f};
         gui->ui_visibility_target_layout_.size = {960.0f, 540.0f};
-        gui->interactive_transition_guard_until_ =
+        gui->ui_visibility_deadline_ =
             std::chrono::steady_clock::now() - std::chrono::milliseconds(1);
         rendering->setViewportResizeActive(
             true, ViewportResizeRenderPolicy::FullResolution);
@@ -1972,6 +2043,76 @@ contract["test_selection_submode_follows_native_mode"](lf)
         EXPECT_EQ(lfs::event::EventBridge::instance().handler_count(
                       typeid(lfs::core::events::cmd::ResetTraining)),
                   0u);
+    }
+
+    TEST_F(VisualizerImplResetTest, CropApplyPreservesLockedTargetsAndHelpers) {
+        for (const bool ellipsoid : {false, true}) {
+            for (const bool active_tool : {false, true}) {
+                for (const std::string locked_name : {"", "target", "inner", "outer"}) {
+                    SCOPED_TRACE(std::to_string(ellipsoid) + ":" + std::to_string(active_tool) + ":" + locked_name);
+                    VisualizerImpl viewer(projectOptions());
+                    auto& scene = viewer.getScene();
+                    auto* manager = viewer.getSceneManager();
+                    const auto outer = scene.addGroup("outer");
+                    const auto inner = scene.addGroup("inner", outer);
+                    const auto target = scene.addSplat("target", lfs::test::licht::make_splat(4), inner);
+                    const auto helper = ellipsoid ? scene.addEllipsoid("helper", target) : scene.addCropBox("helper", target);
+                    scene.setNodeTransform(helper, glm::mat4(1.0f));
+                    auto* volume = scene.getMutableNode("helper");
+                    if (ellipsoid) {
+                        volume->ellipsoid->radii = glm::vec3(0.5f);
+                        volume->ellipsoid->enabled = false;
+                    } else {
+                        volume->cropbox->min = glm::vec3(-0.5f);
+                        volume->cropbox->max = glm::vec3(0.5f);
+                        volume->cropbox->enabled = false;
+                    }
+                    manager->selectNode(target);
+                    auto& gizmo = viewer.getGuiManager()->gizmo();
+                    gizmo.setCropToolShape(ellipsoid ? "ellipsoid" : "box");
+                    ASSERT_TRUE(gizmo.ensureCropToolStateForRestore());
+                    UnifiedToolRegistry::instance().setActiveTool(active_tool ? "builtin.cropbox" : "");
+                    if (!locked_name.empty())
+                        scene.setNodeLocked(locked_name, true);
+                    op::undoHistory().clear();
+                    const auto before = scene.getNodeById(target)->model->means_raw().cpu().to_vector();
+                    if (active_tool)
+                        gizmo.applyActiveCropTool();
+                    else if (ellipsoid)
+                        lfs::core::events::cmd::ApplyEllipsoid{}.emit();
+                    else
+                        lfs::core::events::cmd::ApplyCropBox{}.emit();
+                    const auto* node = scene.getNodeById(target);
+                    ASSERT_NE(node, nullptr);
+                    EXPECT_EQ(node->model->means_raw().cpu().to_vector(), before);
+                    if (!locked_name.empty()) {
+                        EXPECT_EQ(node->model->visible_count(), 4u);
+                        EXPECT_FALSE(node->payload_diverged);
+                        EXPECT_EQ(op::undoHistory().undoCount(), 0u);
+                        const auto* retained = scene.getNodeById(helper);
+                        EXPECT_NE(retained, nullptr);
+                        if (retained) {
+                            EXPECT_EQ(retained->local_transform.get(), glm::mat4(1.0f));
+                            EXPECT_FALSE(ellipsoid ? retained->ellipsoid->enabled : retained->cropbox->enabled);
+                        }
+                    } else {
+                        EXPECT_EQ(node->model->visible_count(), 1u);
+                        EXPECT_EQ(scene.getNodeById(helper), nullptr);
+                        const auto count = op::undoHistory().undoCount();
+                        for (size_t i = 0; i < count; ++i)
+                            ASSERT_TRUE(op::undoHistory().undo().success);
+                        ASSERT_NE(scene.getNode("helper"), nullptr);
+                        EXPECT_EQ(scene.getNode("target")->model->visible_count(), 4u);
+                        for (size_t i = 0; i < count; ++i)
+                            ASSERT_TRUE(op::undoHistory().redo().success);
+                        EXPECT_EQ(scene.getNode("target")->model->visible_count(), 1u);
+                        EXPECT_EQ(scene.getNode("helper"), nullptr);
+                    }
+                    UnifiedToolRegistry::instance().setActiveTool("");
+                    op::undoHistory().clear();
+                }
+            }
+        }
     }
 
     TEST_F(VisualizerImplResetTest, CropToolRejectsUnrepresentableParentTransformWithoutMutation) {
@@ -2007,6 +2148,61 @@ contract["test_selection_submode_follows_native_mode"](lf)
         EXPECT_EQ(cropbox_after->cropbox->enabled, cropbox_before.enabled);
         EXPECT_EQ(cropbox_after->local_transform.get(), transform_before);
         lfs::vis::UnifiedToolRegistry::instance().setActiveTool("");
+    }
+
+    // Catches tool switches that leave crop mode only while the crop tool is active: undo
+    // reselects a crop volume without crop mode, and the transform tool then kept the volume
+    // selected and visible instead of switching to its splat.
+    TEST_F(VisualizerImplResetTest, ToolSwitchLeavesUndoRestoredCropVolumeForItsParent) {
+        VisualizerImpl viewer(projectOptions());
+        ASSERT_NE(viewer.getGuiManager(), nullptr);
+        auto& scene = viewer.getScene();
+        auto* const scene_manager = viewer.getSceneManager();
+        auto& registry = lfs::vis::UnifiedToolRegistry::instance();
+
+        const auto target_id = scene.addSplat("target", lfs::test::licht::make_splat(2));
+        ASSERT_NE(target_id, lfs::core::NULL_NODE);
+        ASSERT_NE(scene.addCropBox("target_cropbox", target_id), lfs::core::NULL_NODE);
+        scene_manager->selectNode("target_cropbox");
+        ASSERT_EQ(registry.getActiveTool(), "builtin.cropbox");
+
+        op::undoHistory().clear();
+        viewer.getGuiManager()->gizmo().setCropToolShape("ellipsoid");
+        const auto ellipsoid_id = cap::ensureEllipsoid(*scene_manager, viewer.getRenderingManager(), target_id);
+        ASSERT_TRUE(ellipsoid_id) << ellipsoid_id.error();
+        scene_manager->selectNode(*ellipsoid_id);
+        ASSERT_EQ(op::undoHistory().undoCount(), 1u);
+        lfs::core::events::tools::SetToolbarTool{.tool_mode = static_cast<int>(ToolType::Translate)}.emit();
+        ASSERT_EQ(scene_manager->getSelectedNodeName(), "target");
+
+        ASSERT_TRUE(op::undoHistory().undo().success);
+        ASSERT_EQ(scene_manager->getSelectedNodeType(), lfs::core::NodeType::CROPBOX);
+        ASSERT_NE(registry.getActiveTool(), "builtin.cropbox");
+
+        lfs::core::events::tools::SetToolbarTool{.tool_mode = static_cast<int>(ToolType::Translate)}.emit();
+        EXPECT_EQ(scene_manager->getSelectedNodeName(), "target");
+        const auto* const cropbox = scene.getNodeById(scene.getCropBoxForSplat(target_id));
+        ASSERT_NE(cropbox, nullptr);
+        EXPECT_FALSE(static_cast<bool>(cropbox->visible));
+        EXPECT_EQ(registry.getActiveTool(), "builtin.translate");
+        registry.setActiveTool("");
+    }
+
+    // Catches select-all taking the Gaussian path for every tool: outside the Select tool
+    // Ctrl+A selects every model.
+    TEST_F(VisualizerImplResetTest, SelectAllOutsideTheSelectToolSelectsEveryModel) {
+        VisualizerImpl viewer(projectOptions());
+        auto& scene = viewer.getScene();
+        auto* const scene_manager = viewer.getSceneManager();
+        ASSERT_NE(scene.addSplat("first", lfs::test::licht::make_splat(2)), lfs::core::NULL_NODE);
+        ASSERT_NE(scene.addSplat("second", lfs::test::licht::make_splat(2)), lfs::core::NULL_NODE);
+        scene_manager->initSelectionService();
+        lfs::core::events::tools::SetToolbarTool{.tool_mode = static_cast<int>(ToolType::None)}.emit();
+
+        lfs::core::events::cmd::SelectAll{}.emit();
+        const auto selected = scene_manager->getSelectedNodeNames();
+        EXPECT_EQ(std::set<std::string>(selected.begin(), selected.end()),
+                  (std::set<std::string>{"first", "second"}));
     }
 
     TEST_F(VisualizerImplResetTest,
@@ -14877,6 +15073,42 @@ contract["test_selection_submode_follows_native_mode"](lf)
             1234);
     }
 
+    TEST_F(VisualizerImplResetTest, EditableSplatWithDatasetNodeStaysVisibleAfterReopen) {
+        LFS_CUDA_BACKEND_OR_RETURN();
+        const auto path = temporary_.path / "editable-scene.licht";
+        write_splt_project(path, lfs::test::licht::make_splat(3), "Merged", nullptr, {});
+        {
+            auto document = lfs::test::licht::require_result_ptr(
+                lfs::io::project::ProjectDocument::open(path));
+            ASSERT_TRUE(document->edit_scene_graph().upsert_node(
+                lfs::io::project::SceneNodeRecord{
+                    .uuid = lfs::core::generate_uuid_v4(),
+                    .type = "dataset",
+                    .name = "Dataset",
+                    .child_order = 1,
+                }));
+            auto options = lfs::test::licht::deterministic_document_save_options(0x76000021, 2, 3);
+            options.commit.snapshot_uuid = {};
+            ASSERT_TRUE(document->save(path, options));
+        }
+        VisualizerImpl viewer(projectOptions());
+        ASSERT_TRUE(viewer.getParameterManager()->ensureLoaded());
+        ASSERT_TRUE(viewer.getWindowManager()->init());
+        ASSERT_TRUE(viewer.projectOpen(path, ProjectSwitchDisposition::DiscardChanges));
+        viewer.noteGuiSessionRestoreOwnerReady(1);
+        ASSERT_TRUE(waitUntil([&] {
+            viewer.pumpPostedWorkForProjectWrite();
+            const auto info = viewer.projectGetInfo();
+            return info && info->hydration_state == "complete";
+        }));
+        EXPECT_EQ(viewer.getSceneManager()->getContentType(), SceneManager::ContentType::SplatFiles);
+        EXPECT_TRUE(viewer.getScene().getTrainingModelNodeUuid().is_nil());
+        const auto* model = viewer.getSceneManager()->getModelForRendering();
+        ASSERT_NE(model, nullptr);
+        EXPECT_EQ(model->size(), 3u);
+        EXPECT_EQ(viewer.getSceneManager()->buildRenderState().combined_model, model);
+    }
+
     TEST_F(VisualizerImplResetTest,
            DatasetProjectWithoutCheckpointOpensReady) {
         LFS_CUDA_BACKEND_OR_RETURN();
@@ -14887,6 +15119,44 @@ contract["test_selection_submode_follows_native_mode"](lf)
         write_minimal_transforms_dataset(dataset_path);
         write_dataset_project_without_checkpoint(
             project_path, dataset_path);
+
+        {
+            auto document = lfs::test::licht::require_result_ptr(
+                lfs::io::project::ProjectDocument::open(project_path));
+            const auto uuid = lfs::core::generate_uuid_v4();
+            ASSERT_TRUE(document->edit_scene_graph().upsert_node(
+                lfs::io::project::SceneNodeRecord{
+                    .uuid = uuid,
+                    .type = "pointcloud",
+                    .name = "Points",
+                    .child_order = 1,
+                    .payload = lfs::io::project::PayloadBinding{
+                        .fourcc = "PCLD",
+                        .instance_uuid = uuid,
+                        .source_kind = "ply"},
+                }));
+            ASSERT_TRUE(document->set_point_cloud(uuid, lfs::io::project::PointCloudPayload(
+                                                            lfs::test::licht::make_point_cloud(2))));
+            ASSERT_TRUE(document->edit_project().upsert_embed_decision(
+                lfs::io::project::EmbedDecision{
+                    .uuid = uuid,
+                    .node_uuid = uuid,
+                    .payload_fourcc = "PCLD",
+                    .decision = "embedded",
+                    .reason = "dirty tracking fixture"}));
+            ASSERT_TRUE(document->edit_project().upsert_embedded_payload_provenance(
+                lfs::io::project::EmbeddedPayloadProvenance{
+                    .uuid = uuid,
+                    .node_uuid = uuid,
+                    .fourcc = "PCLD",
+                    .import_locator = {.preferred = "assets/points.ply", .base = lfs::io::project::LocatorBase::Project},
+                    .import_fingerprint = lfs::test::licht::fingerprint(42),
+                    .content_xxh3_128 = {}}));
+            auto save_options = lfs::test::licht::deterministic_document_save_options(0x76000022, 2, 3);
+            save_options.commit.snapshot_uuid = {};
+            const auto saved = document->save(project_path, save_options);
+            ASSERT_TRUE(saved) << lfs::format_for_developer(saved.error());
+        }
 
         auto options = projectOptions();
         VisualizerImpl viewer(options);
@@ -14919,6 +15189,51 @@ contract["test_selection_submode_follows_native_mode"](lf)
         EXPECT_EQ(
             viewer.getTrainer()->getParams().optimization.iterations,
             1234);
+
+        // The training panel repeats image-count scaling when a restored
+        // untrained session becomes Ready. This is not a parameter edit.
+        ASSERT_TRUE(viewer.projectGetInfo());
+        EXPECT_FALSE(viewer.projectGetInfo()->dirty);
+        viewer.getParameterManager()->autoScaleSteps(viewer.getScene().getActiveCameraCount());
+        EXPECT_FALSE(viewer.getParameterManager()->isDirty());
+        EXPECT_FALSE(viewer.projectGetInfo()->dirty);
+        EXPECT_FALSE(viewer.project_lifecycle_->hasDirtyProject());
+
+        const auto close_prompts = std::make_shared<size_t>(0);
+        lfs::core::events::cmd::ShowExitConfirmation::when(
+            [close_prompts](const auto&) { ++*close_prompts; });
+        const auto expect_dirty_and_reopen = [&] {
+            EXPECT_TRUE(viewer.projectGetInfo()->dirty);
+            EXPECT_TRUE(viewer.project_lifecycle_->hasDirtyProject());
+            EXPECT_FALSE(viewer.projectOpen(project_path, ProjectSwitchDisposition::RequireClean));
+            const auto prompts_before = *close_prompts;
+            viewer.getWindowManager()->requestClose();
+            EXPECT_FALSE(viewer.allowclose());
+            EXPECT_EQ(*close_prompts, prompts_before + 1);
+            viewer.getGuiManager()->dismissExitConfirmation();
+            viewer.project_lifecycle_->resetCloseSaveAttempt();
+            ASSERT_TRUE(viewer.projectOpen(project_path, ProjectSwitchDisposition::DiscardChanges));
+            ASSERT_TRUE(pumpUntil(viewer.work_queue_mutex_, viewer.work_queue_, [&] {
+                const auto session = viewer.projectTrainingSessionState();
+                return session.hydrated && !session.restoring;
+            }));
+            viewer.getParameterManager()->autoScaleSteps(viewer.getScene().getActiveCameraCount());
+            EXPECT_FALSE(viewer.projectGetInfo()->dirty);
+        };
+
+        viewer.getScene().addGroup("Scene edit");
+        expect_dirty_and_reopen();
+        viewer.getParameterManager()->modifyActiveParams([](auto& params) { ++params.iterations; });
+        expect_dirty_and_reopen();
+        viewer.getScene().setCameraTrainingEnabled("frame_0001.png", false);
+        expect_dirty_and_reopen();
+        auto* points = viewer.getScene().getMutableNode("Points");
+        ASSERT_NE(points, nullptr);
+        ASSERT_NE(points->point_cloud, nullptr);
+        points->point_cloud->means = points->point_cloud->means + 1.0f;
+        viewer.getScene().setPointCloudModified(true);
+        viewer.getScene().notifyMutation(lfs::core::Scene::MutationType::MODEL_CHANGED);
+        expect_dirty_and_reopen();
     }
 
     TEST_F(VisualizerImplResetTest,

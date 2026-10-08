@@ -99,11 +99,12 @@ if(LFS_TENSOR_METAL AND BUILD_TESTS)
     find_program(LFS_HDR_TEST_FFMPEG NAMES ffmpeg)
     add_executable(hdr_tonemap_contracts test_hdr_tonemap_tensor.cpp)
     target_compile_features(hdr_tonemap_contracts PRIVATE cxx_std_23)
-    # FFmpeg's public ABI and headers come from lfs_media through lfs_video.
-    target_include_directories(hdr_tonemap_contracts PRIVATE ${CMAKE_SOURCE_DIR}/src/io)
+    # Fixture construction uses a private FFmpeg link; renderer input is media-owned.
+    target_include_directories(hdr_tonemap_contracts PRIVATE ${CMAKE_SOURCE_DIR}/src/io ${CMAKE_SOURCE_DIR}/src)
     target_compile_definitions(hdr_tonemap_contracts PRIVATE LFS_HDR_TEST_FFMPEG="${LFS_HDR_TEST_FFMPEG}"
         $<$<BOOL:${LFS_USE_VULKAN}>:LFS_USE_VULKAN>)
-    target_link_libraries(hdr_tonemap_contracts PRIVATE lfs_video lfs_core GTest::gtest_main)
+    target_link_libraries(hdr_tonemap_contracts PRIVATE lfs_video lfs_core GTest::gtest_main ${FFMPEG_LIBRARIES})
+    target_include_directories(hdr_tonemap_contracts SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS})
     add_test(NAME HdrTonemapContracts COMMAND hdr_tonemap_contracts)
     # libplacebo is the precise-math reference; MoltenVK defaults to fast math.
     set_tests_properties(HdrTonemapContracts PROPERTIES ENVIRONMENT "MVK_CONFIG_FAST_MATH_ENABLED=0"
@@ -200,7 +201,18 @@ if(BUILD_TESTS)
         COMPUTE waveOps sharedReduce atomics narrowAndWide prepareIndirect markIndirect optionalInput variant)
     lfs_add_gpu_program(gpu_program_contracts program_features_variant SOURCE shaders/program_features.slang
         COMPUTE variant DEFINES LFS_FEATURE_VARIANT=5)
+    add_test(NAME GpuProgramCudaArchitectures COMMAND ${CMAKE_COMMAND}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_gpu_program_cuda.cmake")
     add_test(NAME GpuProgramContracts COMMAND gpu_program_contracts)
+    if(LFS_HAS_CUDA)
+        lfs_gpu_program_cuda_flags(_program_cuda_flags)
+    endif()
+    if(LFS_HAS_CUDA AND "${_program_cuda_flags}" MATCHES "sm_[0-9]")
+        # A driver capable of JIT-compiling PTX would otherwise hide missing SASS.
+        add_test(NAME GpuProgramNativeCodeContracts COMMAND gpu_program_contracts)
+        set_tests_properties(GpuProgramNativeCodeContracts PROPERTIES
+            ENVIRONMENT "CUDA_DISABLE_PTX_JIT=1" LABELS "tensor;gpu" TIMEOUT 120)
+    endif()
     set_tests_properties(GpuProgramContracts PROPERTIES LABELS "tensor;gpu" TIMEOUT 120)
     if(TARGET lfs_tensor_rasterizer)
         add_executable(tensor_rasterizer_contracts
@@ -242,6 +254,29 @@ if(APPLE AND (BUILD_VISUALIZER_TESTS OR BUILD_TESTS))
         LABELS "cpu;macos" TIMEOUT 30 ENVIRONMENT "SDL_VIDEODRIVER=dummy")
 endif()
 
+# Save-path policy and the production native-dialog adapter, without opening an OS picker.
+add_executable(lichtfeld_file_dialog_tests test_file_dialog_path.cpp)
+target_compile_features(lichtfeld_file_dialog_tests PRIVATE cxx_std_23)
+target_include_directories(lichtfeld_file_dialog_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/visualizer
+)
+target_link_libraries(lichtfeld_file_dialog_tests PRIVATE GTest::gtest_main)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET lfs_visualizer AND TARGET PkgConfig::LFS_GTK3)
+    target_sources(lichtfeld_file_dialog_tests PRIVATE
+        test_native_save_dialog.cpp
+        ${CMAKE_SOURCE_DIR}/src/visualizer/gui/utils/native_file_dialog.cpp
+    )
+    target_link_libraries(lichtfeld_file_dialog_tests PRIVATE
+        lfs_io lfs_logger SDL3::SDL3 nfd::nfd PkgConfig::LFS_GTK3
+    )
+    target_link_options(lichtfeld_file_dialog_tests PRIVATE
+        "-Wl,--wrap=NFD_Init" "-Wl,--wrap=NFD_Quit" "-Wl,--wrap=NFD_SaveDialogU8_With_Impl"
+    )
+endif()
+add_test(NAME lichtfeld.file_dialog_paths COMMAND lichtfeld_file_dialog_tests)
+set_tests_properties(lichtfeld.file_dialog_paths PROPERTIES LABELS "fast;cpu;io" TIMEOUT 30)
+
 # =============================================================================
 # CPU-only visualizer tests (no LibTorch)
 # =============================================================================
@@ -257,6 +292,9 @@ if(BUILD_VISUALIZER_TESTS OR BUILD_TESTS)
     endif()
 
     set(LICHTFELD_VISUALIZER_TEST_SOURCES
+        test_align_transform.cpp
+        test_orthographic_zoom.cpp
+        test_ui_visibility_transition.cpp
         test_menu_bar_title.cpp
         test_point_cloud_updates.cpp
 
@@ -272,6 +310,7 @@ if(BUILD_VISUALIZER_TESTS OR BUILD_TESTS)
         test_trackpad_navigation.cpp
         test_training_manager_capacity.cpp
         test_vram_hud_geometry.cpp
+        test_vram_hud_header_click.cpp
     )
     if(NOT LFS_HAS_CUDA)
         # CUDA builds run these in lichtfeld_tests.
@@ -297,6 +336,7 @@ if(BUILD_VISUALIZER_TESTS OR BUILD_TESTS)
         lfs_python_runtime
         GTest::gtest_main
         Zep::Zep
+        SDL3::SDL3
     )
     if(APPLE)
         # On macOS the visualizer resolves CPython from the host process. The app
@@ -552,6 +592,8 @@ else()
 endif()
 
 add_executable(lichtfeld_format_tests ${LICHT_FORMAT_TARGET_FILES})
+target_link_libraries(lichtfeld_format_tests PRIVATE ${FFMPEG_LIBRARIES})
+target_include_directories(lichtfeld_format_tests SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS})
 target_include_directories(lichtfeld_format_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core/include
     ${CMAKE_SOURCE_DIR}/src/io/include
@@ -772,11 +814,13 @@ if(NOT LFS_HAS_CUDA)
         list(APPEND TEST_SOURCES test_video_videotoolbox.cpp test_mcp_render_capture_utils.cpp)
     endif()
     add_executable(lichtfeld_tests ${TEST_SOURCES})
+    target_link_libraries(lichtfeld_tests PRIVATE ${FFMPEG_LIBRARIES})
+    target_include_directories(lichtfeld_tests SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS})
     target_compile_definitions(lichtfeld_tests PRIVATE PROJECT_ROOT_PATH="${CMAKE_SOURCE_DIR}" TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
     if(APPLE)
         target_sources(lichtfeld_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/io/stb_image_impl.cpp)
-        # lfs_video already links FFmpeg; linking it a second time lets CMake
-        # merge the duplicated "-framework X" pairs into a broken link line.
+        # lfs_video uses opaque media frames. Fixture-only FFmpeg libraries
+        # are linked privately above, preserving package framework qualifiers.
         target_include_directories(lichtfeld_tests SYSTEM PRIVATE
             ${CMAKE_SOURCE_DIR}/external)
         target_link_libraries(lichtfeld_tests PRIVATE lfs_video nlohmann_json::nlohmann_json)
@@ -939,6 +983,7 @@ set(TEST_FILES
     test_splat_affine_transform.cpp
     test_splat_sh_affine.cpp
     test_splat_data_clone.cpp
+    test_splat_data_mirror.cpp
     test_tensor_reduction.cpp
     test_tensor_reduction_alignment.cpp
     test_tensor_integer_and_reduce_policy.cpp
@@ -1110,6 +1155,7 @@ set(TEST_FILES
     test_python_io.cpp
     test_extended_unary_ops_vs_torch.cpp
     test_scene_validity.cpp
+    test_scene_bounds_cache.cpp
     test_training_scene_init_concurrency.cpp
     test_training_init_centering.cpp
     test_scene_consolidation.cpp
@@ -1221,6 +1267,8 @@ set(TEST_FILES
     test_training_progress_publisher.cpp
     test_startup_overlay_geometry.cpp
     test_vram_hud_geometry.cpp
+    test_vram_hud_header_click.cpp
+    test_ui_visibility_transition.cpp
     test_menu_bar_title.cpp
     test_status_bar_mining.cpp
     test_rotated_sh_correctness.cpp
@@ -1297,6 +1345,7 @@ list(APPEND TEST_FILES test_vulkan_gpu_census.cpp)
 list(APPEND TEST_FILES test_output_image_pool.cpp)
 # Epic #1568 / #1567: output slot ring (GPU-free host bookkeeping).
 list(APPEND TEST_FILES test_output_slot_ring.cpp)
+list(APPEND TEST_FILES test_split_output_lifetime.cpp)
 # Epic #1577 / #1574: readback ticket ring (GPU-free host bookkeeping).
 list(APPEND TEST_FILES test_readback_ticket_ring.cpp)
 # Epic #1568 / #1566: payload-generic GpuResourcePool + subrect fit helper.
@@ -1308,8 +1357,10 @@ list(APPEND TEST_FILES test_splat_sh_tensor_layout.cpp)
 list(APPEND TEST_FILES test_tensor_device_runtime.cpp)
 list(APPEND TEST_FILES test_octree_lod.cpp)
 list(APPEND TEST_FILES test_ply_to_rad_lod.cpp)
+list(APPEND TEST_FILES test_png_parallel_writer.cpp)
 list(APPEND TEST_FILES test_rad_gpu_encode.cpp)
 list(APPEND TEST_FILES test_rad_meta_sidecar.cpp)
+list(APPEND TEST_FILES test_rad_spark_paging.cpp)
 
 # Keep the source manifest strict: a stale entry should fail configuration
 # instead of silently dropping coverage from the executable.
@@ -1348,6 +1399,8 @@ list(APPEND TEST_SOURCES
 
 # Create test executable
 add_executable(lichtfeld_tests ${TEST_SOURCES})
+target_link_libraries(lichtfeld_tests PRIVATE ${FFMPEG_LIBRARIES})
+target_include_directories(lichtfeld_tests SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS})
 
 # test_assert_hardening.cpp includes the generated ABI header directly. Ensure
 # the build-time tripwire has run before this target starts compiling.
@@ -1429,6 +1482,7 @@ if(NOT LFS_SIMPLIFY_TEST_PLY_OK)
             "SplatSimplify.RealPlySimplifyDoesNotUndershootRequestedTarget will be skipped.")
     endif()
 endif()
+target_compile_definitions(lichtfeld_tests PRIVATE LFS_SIMPLIFY_TEST_PLY="${LFS_SIMPLIFY_TEST_PLY}")
 
 if(CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED)
     set(LFS_TEST_INTERNAL_LINK_LIBS
@@ -1756,6 +1810,7 @@ set(LFS_PYTHON_FAST_TESTS
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_plugin_localization.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_plugin_system.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_plugin_templates.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_rml_section_toggle.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_plugin_validator.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_preferences_panel.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_registry.py

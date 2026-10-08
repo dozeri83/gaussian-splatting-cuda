@@ -8,6 +8,7 @@
 #include "program_features_variant.hpp"
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <gtest/gtest.h>
 #include <vector>
 
@@ -21,6 +22,75 @@ namespace {
         uint32_t padding = 0;
     };
     class Programs : public testing::TestWithParam<GpuBackend> {};
+
+    TEST(CudaProgramArtifacts, CudaEntriesUseFatbinaryContainers) {
+#if LFS_HAS_CUDA
+        for (const auto entries : {program_contract_entries(), program_features_entries(),
+                                   program_features_variant_entries()}) {
+            for (const auto& entry : entries) {
+                if (entry.backend != GpuBackend::CUDA)
+                    continue;
+                SCOPED_TRACE(entry.name);
+                ASSERT_GE(entry.code.size(), sizeof(uint32_t));
+                uint32_t magic = 0;
+                std::memcpy(&magic, entry.code.data(), sizeof(magic));
+                // Raw nvcc fatbinary header, not a PTX-only text module.
+                EXPECT_EQ(magic, 0xba55ed50u);
+            }
+        }
+#else
+        GTEST_SKIP() << "CUDA backend not built";
+#endif
+    }
+
+    TEST(CudaProgramArtifacts, EmbeddedComputeProgramsLoadOnTheDevice) {
+#if LFS_HAS_CUDA
+        if (!gpu_backend_available(GpuBackend::CUDA))
+            GTEST_SKIP() << "CUDA device unavailable";
+        const GpuBackendScope scope(GpuBackend::CUDA);
+        for (const auto entries : {program_contract_entries(), program_features_entries(),
+                                   program_features_variant_entries()}) {
+            const auto loaded = M::load(entries, GpuBackend::CUDA);
+            ASSERT_TRUE(loaded) << loaded.error().detail();
+        }
+#else
+        GTEST_SKIP() << "CUDA backend not built";
+#endif
+    }
+
+    TEST(VulkanProgramLifetime, CachedComputeAndRasterSurviveBackendRestart) {
+        if (!gpu_backend_available(GpuBackend::Vulkan))
+            GTEST_SKIP();
+        GpuBackendScope scope(GpuBackend::Vulkan);
+        auto loaded = M::load(program_contract_entries(), GpuBackend::Vulkan);
+        ASSERT_TRUE(loaded) << loaded.error().detail();
+        auto module = std::move(*loaded);
+        for (int cycle = 0; cycle < 2; ++cycle) {
+            SCOPED_TRACE(cycle);
+            {
+                auto input = Tensor::ones({64}, Device::GPU);
+                auto output = Tensor::zeros({64}, Device::GPU);
+                const Params params{.count = 64, .scale = 2, .bias = 3};
+                const std::array bindings{M::Binding{0, &input}, M::Binding{8, &output, M::Access::ReadWrite}};
+                auto result = module->dispatch({.function = "transform", .arguments = {std::as_bytes(std::span(&params, 1)), bindings}, .groups = {1, 1, 1}});
+                ASSERT_TRUE(result) << result.error().detail();
+                EXPECT_FLOAT_EQ(output.to(Device::CPU).sum().item<float>(), 320);
+                ASSERT_TRUE(module->supports_raster());
+                std::array<float, 12> positions{-1, 1, 0.5f, 1, 1, 1, 0.5f, 1, -1, -1, 0.5f, 1};
+                auto vertices = Tensor::from_blob(positions.data(), {3, 4}, Device::CPU, DataType::Float32).to(Device::GPU);
+                auto colors = Tensor::ones({3, 4}, Device::GPU);
+                auto color = Tensor::zeros({8, 8, 4}, Device::GPU);
+                auto depth = Tensor::ones({8, 8}, Device::GPU);
+                const std::array raster_bindings{M::Binding{0, &vertices}, M::Binding{8, &colors}};
+                result = module->draw({.vertex = "vertexMain", .fragment = "fragmentMain", .arguments = {std::as_bytes(std::span(&params, 1)), raster_bindings}, .color = &color, .depth = &depth, .vertex_count = 3, .clear_color = true, .clear_depth = true});
+                ASSERT_TRUE(result) << result.error().detail();
+                EXPECT_GT(color.to(Device::CPU).sum().item<float>(), 0);
+            }
+            ASSERT_TRUE(shutdown_gpu_backend(GpuBackend::Vulkan));
+        }
+        // Destruction after the second device shutdown must also be safe.
+        module.reset();
+    }
 
     TEST_P(Programs, SameSlangComputeMatchesCpuAndTensorTimeline) {
         if (!gpu_backend_available(GetParam()))

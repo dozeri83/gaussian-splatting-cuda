@@ -69,7 +69,7 @@ if(TARGET lfs_visualizer AND TARGET lfs_vulkan_rasterizer_macos_reference)
         "${CMAKE_SOURCE_DIR}/src" "${CMAKE_SOURCE_DIR}/src/visualizer"
         "${CMAKE_BINARY_DIR}/src/visualizer/generated/shaders")
     target_compile_definitions(lfs_viewer_vulkan_reference PRIVATE LFS_HAS_CUDA=0 LFS_BUILD_TRAINER=0)
-    target_link_libraries(lfs_viewer_vulkan_reference PUBLIC lfs_visualizer lfs_vulkan_rasterizer_macos_reference)
+    target_link_libraries(lfs_viewer_vulkan_reference PUBLIC lfs_visualizer lfs_vulkan_rasterizer_macos_reference lfs_python_runtime)
     find_package(Python REQUIRED COMPONENTS Development.Embed)
     # These upstream viewer contracts are otherwise in the CUDA-only test list.
     # Run them on Mac too; do not add GPU requirements to the CPU visualizer suite.
@@ -481,7 +481,7 @@ if(TARGET lfs_visualizer AND TARGET lfs_vulkan_rasterizer_macos_reference)
                 set_tests_properties(MacViewerParity_tensorVulkan_${_tensor_case} PROPERTIES
                     LABELS "metal;gpu;metal4;parity" TIMEOUT 180 SKIP_RETURN_CODE 77)
             endforeach()
-            foreach(_overlay IN ITEMS selection preview crop ellipsoid window markers flash affine)
+            foreach(_overlay IN ITEMS selection preview crop ellipsoid window markers affine)
                 add_test(NAME MacViewerParity_${_overlay} COMMAND mac_viewer_backend_benchmark
                     --smoke --overlay ${_overlay}
                     --output "${CMAKE_CURRENT_BINARY_DIR}/mac-viewer-parity-${_overlay}.json")

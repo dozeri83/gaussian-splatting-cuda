@@ -186,6 +186,9 @@ namespace lfs::training {
         // Main training method with stop token support
         [[nodiscard]] lfs::Status train(std::stop_token stop_token = {});
 
+        // Scores the model at the current iteration and writes the report; nothing is trained or saved.
+        [[nodiscard]] lfs::Status evaluate_current_model();
+
         // Control methods for GUI interaction
         void request_pause() { pause_requested_ = true; }
         void request_resume() { pause_requested_ = false; }
@@ -495,7 +498,8 @@ namespace lfs::training {
         // Returns empty tensor if no background image is set
         lfs::core::Tensor get_background_image_for_camera(int width, int height);
         void clearBackgroundImageCache();
-        lfs::core::Tensor get_edge_weight_map(int camera_uid, const lfs::core::Tensor& gt_image);
+        lfs::core::Tensor get_edge_weight_map(int camera_uid, const lfs::core::Tensor& gt_image,
+                                              const lfs::core::Tensor& photometric_mask);
         void clearEdgeWeightCache();
         core::Tensor get_thin_structure_map(int camera_uid, const core::Tensor& image, float weight);
         void clear_thin_structure_cache();
@@ -646,6 +650,7 @@ namespace lfs::training {
         [[nodiscard]] PPISPControllerPool* controller_pool_for_save(int iteration) const;
         lfs::core::Tensor applyPPISPForEval(const lfs::core::Tensor& rgb, const lfs::core::Camera& cam) const;
         void log_eval_appearance() const;
+        void evaluate_at(int iteration);
         [[nodiscard]] lfs::core::param::TrainingParameters params_for_project_snapshot() const;
         [[nodiscard]] std::function<std::uint64_t(std::uint64_t)> release_image_cache_for_snapshot() const;
         [[nodiscard]] TrainingProgress::Phase get_progress_phase(

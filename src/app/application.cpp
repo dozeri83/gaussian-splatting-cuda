@@ -123,6 +123,15 @@ namespace lfs::app {
             return destination;
         }
 
+        // Without -o, final exports go next to the project the run saves into.
+        [[nodiscard]] core::param::TrainingParameters with_export_folder(
+            core::param::TrainingParameters params,
+            const std::filesystem::path& project_folder) {
+            if (params.dataset.output_path.empty())
+                params.dataset.output_path = project_folder;
+            return params;
+        }
+
         // Empty for a plain dataset-folder run, which keeps the default
         // output_path/project.licht destination.
         [[nodiscard]] std::filesystem::path headless_dataset_project_destination(
@@ -1071,7 +1080,7 @@ namespace lfs::app {
                                 rebound.error()));
                         return 1;
                     }
-                    record_final_export(training::export_final_splats(*trainer, *params));
+                    record_final_export(training::export_final_splats(*trainer, with_export_folder(*params, params->resume_project->parent_path())));
                     trainer->shutdown();
                     static_cast<void>(
                         trainer.release());
@@ -1117,7 +1126,7 @@ namespace lfs::app {
                         }
                         return 1;
                     }
-                    record_final_export(training::export_final_splats(*trainer, *params));
+                    record_final_export(training::export_final_splats(*trainer, with_export_folder(*params, ckpt_params_result->dataset.output_path)));
                     trainer->shutdown();
                     static_cast<void>(trainer.release());
                 } else {
@@ -1192,6 +1201,83 @@ namespace lfs::app {
             }
             return exit_code;
 
+#else
+            LOG_ERROR("Training is not included in this build");
+            return 1;
+#endif
+        }
+
+        // eval subcommand: restore the model like a resume (or load a splat file as saved) and score it.
+        int runHeadlessEvaluation(std::unique_ptr<lfs::core::param::TrainingParameters> params) {
+#if LFS_BUILD_TRAINER
+            lfs::event::CommandCenterBridge::instance().set(&lfs::training::CommandCenter::instance());
+            core::Scene scene;
+            std::unique_ptr<training::Trainer> trainer;
+
+            if (params->resume_project) {
+                auto project = loadTrainingProject(*params, scene);
+                if (!project) {
+                    LOG_ERROR("Failed to load the project: {}", lfs::format_for_developer(project.error()));
+                    return 1;
+                }
+                std::optional<io::project::RecoverySession> recovery_session;
+                if (const auto* session = project->document.recovery_session()) {
+                    recovery_session = *session;
+                }
+                auto installed = training::installTrainerFromProjectCheckpoint(
+                    scene, project->document.document(), project->checkpoint_uuid, project->params,
+                    core::path_to_utf8(*params->resume_project), project->iteration, recovery_session);
+                if (!installed) {
+                    LOG_ERROR("Failed to restore the project model: {}", installed.error());
+                    return 1;
+                }
+                trainer = std::move(installed->trainer);
+            } else if (params->resume_checkpoint) {
+                const auto ckpt_params = loadCheckpointParams(*params, scene);
+                if (!ckpt_params) {
+                    LOG_ERROR("Failed to load checkpoint: {}", ckpt_params.error());
+                    return 1;
+                }
+                trainer = std::make_unique<training::Trainer>(scene);
+                if (const auto result = trainer->initialize(*ckpt_params); !result) {
+                    LOG_ERROR("Failed to initialize trainer: {}", result.error());
+                    return 1;
+                }
+                if (const auto loaded = trainer->load_checkpoint(*params->resume_checkpoint); !loaded) {
+                    LOG_ERROR("Failed to restore checkpoint state: {}", loaded.error());
+                    return 1;
+                }
+            } else {
+                if (const auto result = training::loadTrainingDataIntoScene(*params, scene); !result) {
+                    LOG_ERROR("Failed to load the dataset: {}", result.error());
+                    return 1;
+                }
+                if (const auto result = training::initializeTrainingModel(*params, scene); !result) {
+                    LOG_ERROR("Failed to load the model: {}", result.error());
+                    return 1;
+                }
+                trainer = std::make_unique<training::Trainer>(scene);
+                if (const auto result = trainer->initialize(*params); !result) {
+                    LOG_ERROR("Failed to initialize trainer: {}", result.error());
+                    return 1;
+                }
+                auto& model = trainer->get_strategy_mutable().get_model();
+                model.set_active_sh_degree(model.get_max_sh_degree());
+            }
+
+            trainer->set_lpips_weights_path(prepare_lpips_weights(!params->no_download));
+            core::Tensor::trim_memory_pool();
+            const auto result = trainer->evaluate_current_model();
+            trainer->shutdown();
+            static_cast<void>(trainer.release());
+            if (!result) {
+                LOG_ERROR("Evaluation failed: {}", lfs::format_for_developer(result.error()));
+                return 1;
+            }
+            LOG_INFO("Evaluation written to {}", core::path_to_utf8(params->dataset.output_path));
+            core::teardown_gpu_before_exit();
+            core::mark_clean_exit();
+            core::flush_and_exit(0);
 #else
             LOG_ERROR("Training is not included in this build");
             return 1;
@@ -1775,6 +1861,7 @@ namespace lfs::app {
                         .request_logging = config.request_logging,
                     });
                     return true; },
+                .mcp_port_override = mcp_port_override,
             });
             viewer->setShutdownRequestedCallback([&mcp_http]() {
                 vis::setRuntimeServiceControls({});
@@ -1850,6 +1937,10 @@ namespace lfs::app {
                 core::teardown_gpu_before_exit();
             }
             return result;
+        }
+
+        if (params->evaluate_only) {
+            return runHeadlessEvaluation(std::move(params));
         }
 
         if (params->dataset_project) {

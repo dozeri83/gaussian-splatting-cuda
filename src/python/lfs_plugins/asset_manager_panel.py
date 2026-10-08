@@ -72,6 +72,11 @@ PRECISE_SCROLL_STEP = 32.0
 ASSET_LIST_ROW_HEIGHT_DP = 40.0
 ASSET_GALLERY_ROW_HEIGHT_DP = 230.0
 ASSET_CARD_PREFERRED_WIDTH_DP = 208.0
+# Match the inspector gutters in asset_manager.rcss.
+ASSET_INSPECTOR_GUTTER_DP = 12.0
+ASSET_INSPECTOR_SCROLLBAR_DP = 4.0
+ASSET_STACKED_THUMBNAIL_MAX_WIDTH_DP = 240.0
+ASSET_INFO_THUMBNAIL_DEFAULT_WIDTH_DP = 160.0
 ASSET_WINDOW_OVERSCAN_ROWS = 1
 ASSET_WINDOW_BATCH_ROWS = 1
 ASSET_LIST_FALLBACK_ROWS = 24
@@ -303,6 +308,7 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         # on_unmount flips this false and mount generations guard callbacks.
         self._panel_mounted = True
         self._mount_generation = 0
+        self._open_request = 0
         self._backend_load_active = False
         self._catalog_load_failed = False
         self._catalog_notice = ""
@@ -1844,11 +1850,14 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         placeholder_title_changed = placeholder.get_attribute("title", "") != placeholder_title
         if placeholder_title_changed:
             placeholder.set_attribute("title", placeholder_title)
+        # Leave 12 dp gutters and 4 dp for the side inspector's scrollbar.
         # Side inspectors use their content width. The stacked inspector caps
         # its poster so opening it never consumes the whole results viewport.
-        width = (max(0.0, self._inspector_width - 12.0) if self._layout_class in ("wide", "medium")
-                 else min(240.0, max(0.0, self._content_width - 24.0))
-                 if self._layout_class in ("compact", "narrow") else 160.0)
+        gutters = 2.0 * ASSET_INSPECTOR_GUTTER_DP
+        width = (max(0.0, self._inspector_width - gutters - ASSET_INSPECTOR_SCROLLBAR_DP)
+                 if self._layout_class in ("wide", "medium")
+                 else min(ASSET_STACKED_THUMBNAIL_MAX_WIDTH_DP, max(0.0, self._content_width - gutters))
+                 if self._layout_class in ("compact", "narrow") else ASSET_INFO_THUMBNAIL_DEFAULT_WIDTH_DP)
         geometry = (width, width * 10.0 / 16.0)
         geometry_changed = geometry != self._info_thumbnail_geometry
         if created or geometry_changed:
@@ -3203,6 +3212,18 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
     def _load_asset(self, asset_id: str) -> None:
         if not asset_id:
             return
+        self._open_request += 1
+        request = self._open_request
+        generation = self._mount_generation
+        with self._folder_scan_lock:
+            self._folder_scan_rerun_pending = False
+            self._folder_scan_rerun_target = None
+            cancel = self._folder_scan_cancel
+            verify_cancel = self._catalog_verify_cancel
+        if cancel is not None:
+            cancel.set()
+        if verify_cancel is not None:
+            verify_cancel.set()
         if asset_id.startswith("recent:"):
             asset = self._asset_dict(asset_id)
             if not asset or not asset.get("recent_only"):
@@ -3222,10 +3243,33 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
             self._select_asset_id(asset_id)
             self._gallery_command("pull_open")
             return
-        project = self._library_command("verify_asset", asset_id)
-        if project is None:
-            return
-        asset = project.to_dict() if hasattr(project, "to_dict") else (self._asset_dict(asset_id) or {})
+        service, index = self._library_service, self._asset_index
+
+        def complete(asset, error) -> None:
+            if request != self._open_request or generation != self._mount_generation:
+                return
+            self._row_catalog_generation += 1
+            if error:
+                self._set_catalog_notice(error)
+                self._request_model_update()
+            if asset is not None:
+                self._open_verified_asset(asset_id, asset)
+
+        def worker() -> None:
+            asset, error = None, ""
+            try:
+                project = service.verify(asset_id) if service else index.verify_asset(asset_id)
+                if project is not None:
+                    asset = project.to_dict()
+                error = str(getattr(index, "last_error", "") or "")
+            except Exception as exc:
+                _log.exception("Project open verification failed")
+                error = str(exc)
+            self._schedule_ui(lambda: complete(asset, error))
+
+        threading.Thread(target=worker, daemon=True, name="AssetManagerOpen").start()
+
+    def _open_verified_asset(self, asset_id: str, asset: Dict[str, Any]) -> None:
         if not self._project_available(asset):
             self.refresh_catalog(scan_folders=False)
             return
@@ -4935,6 +4979,11 @@ class AssetManagerPanel(GalleryAssetMixin, Panel):
         self._outer_panel_width_save_deadline = 0.0
 
     def _refresh_after_project_write(self) -> bool:
+        # The scanner can hold the catalog lock while committing a batch. Keep
+        # the last observed generation until it finishes, then refresh the save.
+        with self._folder_scan_lock:
+            if self._folder_scan_active or self._catalog_verify_active:
+                return False
         poll_write = getattr(lf, "project_poll_write", None)
         if not callable(poll_write) or not self._asset_index:
             return False

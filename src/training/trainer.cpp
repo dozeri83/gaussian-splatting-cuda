@@ -2075,6 +2075,8 @@ namespace lfs::training {
     }
 
     void Trainer::recordParamsReady() {
+        if (scene_)
+            scene_->invalidateBounds();
         std::lock_guard<std::mutex> lock(stream_sync_mutex_);
         if (!params_ready_event_) {
             return;
@@ -5586,7 +5588,8 @@ namespace lfs::training {
 
     lfs::core::Tensor Trainer::get_edge_weight_map(
         const int camera_uid,
-        const lfs::core::Tensor& gt_image) {
+        const lfs::core::Tensor& gt_image,
+        const lfs::core::Tensor& photometric_mask) {
         LFS_ASSERT_MSG(gt_image.is_valid() && gt_image.device() == lfs::core::Device::GPU &&
                            gt_image.ndim() == 3 && gt_image.shape()[0] >= 3,
                        "edge-weight input must be CUDA CHW image data");
@@ -5623,8 +5626,10 @@ namespace lfs::training {
             edge_map_buffer_ = lfs::core::Tensor::empty_exact(map_shape, lfs::core::DataType::Float32);
         }
         edge_map_buffer_.set_stream(stream);
-        training_ops_->training_image->canny(gt_image, edge_map_buffer_);
-        training_ops_->refine->normalize_positive_median(edge_map_buffer_);
+        losses::compute_edge_weight_map(
+            gt_image, photometric_mask,
+            params_.optimization.mask_mode == lfs::core::param::MaskMode::SegmentAndIgnore,
+            edge_map_buffer_);
 
         lfs::core::Tensor map;
         const bool cacheable = map_bytes <= EDGE_WEIGHT_CACHE_BUDGET_BYTES;
@@ -6216,7 +6221,25 @@ namespace lfs::training {
                     if (edge_score_scratch.is_valid() &&
                         edge_score_scratch.dtype() == lfs::core::DataType::Float32 &&
                         edge_score_scratch.numel() == static_cast<size_t>(model.size())) {
-                        edge_weight_map = get_edge_weight_map(cam->uid(), source_gt);
+                        const auto mask_mode = params_.optimization.mask_mode;
+                        const bool mask_excludes_pixels =
+                            (mask_mode == lfs::core::param::MaskMode::Segment ||
+                             mask_mode == lfs::core::param::MaskMode::Ignore ||
+                             mask_mode == lfs::core::param::MaskMode::SegmentAndIgnore) &&
+                            (cam->has_mask() || (params_.optimization.use_alpha_as_mask && cam->has_alpha()));
+                        lfs::core::Tensor photometric_mask;
+                        if (mask_excludes_pixels) {
+                            photometric_mask =
+                                !composite_target_alpha_ && pipelined_mask_.is_valid() && pipelined_mask_.numel() > 0
+                                    ? pipelined_mask_
+                                    : cam->load_and_get_mask(
+                                          params_.dataset.resize_factor,
+                                          params_.dataset.max_width,
+                                          params_.optimization.invert_masks,
+                                          params_.optimization.mask_threshold,
+                                          mask_mode != lfs::core::param::MaskMode::SegmentAndIgnore);
+                        }
+                        edge_weight_map = get_edge_weight_map(cam->uid(), source_gt, photometric_mask);
                         edge_weight_scoring_active_ = true;
                     } else if (edge_weight_scoring_active_) {
                         clearEdgeWeightCache();
@@ -8371,6 +8394,63 @@ namespace lfs::training {
         return result;
     }
 
+    void Trainer::evaluate_at(const int iteration) {
+        prepare_evaluation_workspaces();
+        evaluator_->print_evaluation_header(iteration);
+        lfs::diagnostics::VramProfiler::instance().mark("evaluation");
+        eval_ppisp_applied_.store(0);
+        eval_ppisp_exif_.store(0);
+        eval_ppisp_nearest_.store(0);
+        const auto evaluation_image_loader = getActiveImageLoader();
+        auto metrics = evaluator_->evaluate(iteration,
+                                            strategy_->get_model(),
+                                            val_dataset_,
+                                            background_,
+                                            evaluation_image_loader.get());
+        if (!metrics.valid) {
+            auto error = lfs::make_error(lfs::ErrorInit{
+                .code = lfs::ErrorCode::FailedPrecondition,
+                .domain = lfs::ErrorDomain::Training,
+                .user_message = "Evaluation produced no valid metrics.",
+                .detail = std::format(
+                    "Evaluation at iteration {} skipped every view or produced no valid metric values",
+                    iteration),
+                .detection = LFS_SOURCE_SITE_CURRENT(),
+            });
+            LOG_ERROR("{}", lfs::format_for_developer(error));
+            if (!deferred_evaluation_error_)
+                deferred_evaluation_error_ = std::move(error);
+        }
+        if (PerfBenchCollector::enabled() && metrics.valid) {
+            PerfBenchCollector::instance().set_psnr(metrics.psnr);
+        }
+        log_eval_appearance();
+        LOG_INFO("{}", metrics.to_string());
+        if (training_ops_ != nullptr && training_ops_->photometric != nullptr)
+            training_ops_->photometric->shrink_to_required(photo_saved_);
+    }
+
+    lfs::Status Trainer::evaluate_current_model() {
+        if (!evaluator_ || !evaluator_->is_enabled()) {
+            return lfs::Status::failure(lfs::make_error(lfs::ErrorInit{
+                .code = lfs::ErrorCode::FailedPrecondition,
+                .domain = lfs::ErrorDomain::Training,
+                .user_message = "Evaluation is not enabled.",
+                .detail = "evaluate_current_model needs a trainer initialized with evaluation enabled",
+                .detection = LFS_SOURCE_SITE_CURRENT(),
+            }));
+        }
+        deferred_evaluation_error_.reset();
+        evaluate_at(current_iteration_.load());
+        evaluator_->save_report();
+        if (deferred_evaluation_error_) {
+            auto error = std::move(*deferred_evaluation_error_);
+            deferred_evaluation_error_.reset();
+            return lfs::Status::failure(std::move(error));
+        }
+        return {};
+    }
+
     lfs::Status Trainer::train(std::stop_token stop_token) {
         // A failed evaluation is reported by the run that recorded it.
         deferred_evaluation_error_.reset();
@@ -8427,6 +8507,9 @@ namespace lfs::training {
         lfs::diagnostics::VramProfiler::instance().mark("training_start");
         if (params_.optimization.gut && params_.optimization.use_normal_loss) {
             LOG_WARN("normal loss requested but the 3DGUT backend has no normal channel; normal terms are inactive");
+        }
+        if (params_.optimization.gut && params_.optimization.use_depth_loss) {
+            LOG_WARN("depth loss requested but the 3DGUT backend has no depth channel; depth terms are inactive");
         }
         if (PerfBenchCollector::enabled()) {
             PerfBenchCollector::instance().on_training_start(get_total_iterations());
@@ -8518,9 +8601,7 @@ namespace lfs::training {
                          params_.optimization.depth_loss_mode);
                 params_.optimization.use_depth_loss = false;
             }
-            aux_pipeline_config.load_depths =
-                params_.optimization.use_depth_loss &&
-                params_.optimization.depth_loss_weight > 0.0f;
+            aux_pipeline_config.load_depths = params_.optimization.depth_supervision_enabled();
             if (aux_pipeline_config.load_depths) {
                 size_t cameras_with_depth = 0;
                 for (const auto& cam : train_dataset_->get_cameras()) {
@@ -8884,40 +8965,7 @@ namespace lfs::training {
             if (iter > get_total_iterations() &&
                 evaluator_->is_enabled() &&
                 evaluator_->should_evaluate(current_iteration_.load(), get_total_iterations())) {
-                const int eval_iteration = current_iteration_.load();
-                prepare_evaluation_workspaces();
-                evaluator_->print_evaluation_header(eval_iteration);
-                lfs::diagnostics::VramProfiler::instance().mark("evaluation");
-                eval_ppisp_applied_.store(0);
-                eval_ppisp_exif_.store(0);
-                eval_ppisp_nearest_.store(0);
-                const auto evaluation_image_loader = getActiveImageLoader();
-                auto metrics = evaluator_->evaluate(eval_iteration,
-                                                    strategy_->get_model(),
-                                                    val_dataset_,
-                                                    background_,
-                                                    evaluation_image_loader.get());
-                if (!metrics.valid) {
-                    auto error = lfs::make_error(lfs::ErrorInit{
-                        .code = lfs::ErrorCode::FailedPrecondition,
-                        .domain = lfs::ErrorDomain::Training,
-                        .user_message = "Evaluation produced no valid metrics.",
-                        .detail = std::format(
-                            "Evaluation at iteration {} skipped every view or produced no valid metric values",
-                            eval_iteration),
-                        .detection = LFS_SOURCE_SITE_CURRENT(),
-                    });
-                    LOG_ERROR("{}", lfs::format_for_developer(error));
-                    if (!deferred_evaluation_error_)
-                        deferred_evaluation_error_ = std::move(error);
-                }
-                if (PerfBenchCollector::enabled() && metrics.valid) {
-                    PerfBenchCollector::instance().set_psnr(metrics.psnr);
-                }
-                log_eval_appearance();
-                LOG_INFO("{}", metrics.to_string());
-                if (training_ops_ != nullptr && training_ops_->photometric != nullptr)
-                    training_ops_->photometric->shrink_to_required(photo_saved_);
+                evaluate_at(current_iteration_.load());
             }
 
             clearActiveImageLoader();

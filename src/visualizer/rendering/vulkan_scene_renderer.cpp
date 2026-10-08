@@ -41,6 +41,7 @@ namespace lfs::vis {
                                                                               const rendering::ViewportRenderRequest& request, RenderTargetId target, bool synchronize) override {
                 return renderer_.rerenderSelectionOverlay(context_, model, request, target, synchronize);
             }
+            std::shared_ptr<void> retainOutputImage(SceneImageViewHandle image) override { return renderer_.retainOutputImage(image.native<VkImageView>()); }
             bool nextOutputImagesNeedResize(glm::ivec2 size, RenderTargetId target) const override { return renderer_.nextOutputImagesNeedResize(size, target); }
             std::expected<std::shared_ptr<core::Tensor>, std::string> readColorImage(RenderTargetId target, OutputImageFormat format) const override {
                 switch (format) {
@@ -86,6 +87,8 @@ namespace lfs::vis {
             explicit VulkanPointSceneRenderer(VulkanContext& context) : context_(context) {}
             std::expected<RenderResult, std::string> render(const RenderRequest& request, RenderTargetId target) override { return renderer_.render(context_, request, target); }
             std::expected<std::shared_ptr<core::Tensor>, std::string> readOutputImage(RenderTargetId target) override { return renderer_.readOutputImage(context_, target); }
+            lfs::Result<float> sampleDepthAtPixel(const DepthSampleRequest& request) override { return renderer_.sampleDepthAtPixel(context_, request); }
+            bool takeRefinementRequest() override { return renderer_.takeRefinementRequest(); }
             bool hasRenderTarget(RenderTargetId target) const override { return renderer_.hasRenderTarget(target); }
             bool releaseRenderTarget(RenderTargetId target) override { return renderer_.releaseRenderTarget(target); }
             void reset() override { renderer_.reset(); }

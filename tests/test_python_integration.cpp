@@ -20,6 +20,7 @@
 #include "core/logger.hpp"
 #include "core/property_registry.hpp"
 #include "core/scene.hpp"
+#include "core/services.hpp"
 #include "core/splat_data.hpp"
 #include "core/tensor_backend.hpp"
 #include "core/tensor_completion.hpp"
@@ -33,6 +34,7 @@
 #include "python_test_support.hpp"
 #include "rendering/coordinate_conventions.hpp"
 #include "rendering/screen_overlay_renderer.hpp"
+#include "scene/scene_manager.hpp"
 #include "screen/screen_service.hpp"
 #include "tensor_test_support.hpp"
 #include "visualizer/ipc/render_settings_convert.hpp"
@@ -862,6 +864,27 @@ TEST_F(PythonIntegrationTest, CleanPythonCodeRepairsUnindentedFunctionBlock) {
     EXPECT_NE(result.code.find("    return safe or \"splat\""), std::string::npos);
 }
 
+// Catches Format commenting out valid leading statements that the preamble heuristic does not recognize.
+TEST_F(PythonIntegrationTest, FormatPythonCodeKeepsLeadingStatements) {
+    const auto result = lfs::python::format_python_code("x=[1,2 ,3];print( 'a' ,x)\nfirst, second = 1, 2\n");
+
+    if (formatterUnavailable(result)) {
+        GTEST_SKIP() << result.error;
+    }
+    ASSERT_TRUE(result.success) << result.error;
+    EXPECT_EQ(result.code, "x = [1, 2, 3]\nprint(\"a\", x)\nfirst, second = 1, 2\n");
+}
+
+TEST_F(PythonIntegrationTest, CleanPythonCodeCommentsProsePreambleButKeepsAssignment) {
+    const auto result = lfs::python::clean_python_code("Here is the script:\nscene = lf.get_scene()\n");
+
+    if (formatterUnavailable(result)) {
+        GTEST_SKIP() << result.error;
+    }
+    ASSERT_TRUE(result.success) << result.error;
+    EXPECT_EQ(result.code, "# Here is the script:\nscene = lf.get_scene()\n");
+}
+
 TEST_F(PythonIntegrationTest, FormatPythonCodeReportsSyntaxErrorWithoutUnexpectedResultFallback) {
     const auto result = lfs::python::format_python_code("import os\nif True print('x')\n");
 
@@ -1242,6 +1265,23 @@ result_values = [1.0 if set_ok else 0.0, 1.0 if clear_ok else 0.0]
 
 TEST_F(PythonIntegrationTest, GTComparisonActionsRunOnViewerThread) {
     using namespace std::chrono_literals;
+    lfs::vis::screen::ScreenService screens;
+    lfs::vis::SceneManager scene_manager;
+    lfs::vis::RenderingManager rendering(screens);
+    scene_manager.changeContentType(lfs::vis::SceneManager::ContentType::Dataset);
+    auto& scene = scene_manager.getScene();
+    const auto group = scene.addCameraGroup("Cameras", scene.addGroup("Dataset"), 1);
+    scene.addCamera("source", group, std::make_shared<lfs::core::Camera>(lfs::core::Tensor::eye(3, lfs::core::Device::CPU), lfs::core::Tensor::zeros({size_t{3}}, lfs::core::Device::CPU), 100.0f, 100.0f, 32.0f, 32.0f, lfs::core::Tensor(), lfs::core::Tensor(), lfs::core::CameraModelType::PINHOLE, "source", std::filesystem::path("source.png"), std::filesystem::path{}, 64, 64, 1));
+    struct RestoreManagers {
+        lfs::vis::SceneManager* scene = lfs::vis::services().sceneOrNull();
+        lfs::vis::RenderingManager* rendering = lfs::python::get_rendering_manager();
+        ~RestoreManagers() {
+            lfs::vis::services().set(scene);
+            lfs::python::set_rendering_manager(rendering);
+        }
+    } restore_managers;
+    lfs::vis::services().set(&scene_manager);
+    lfs::python::set_rendering_manager(&rendering);
     TestVisualizer viewer;
     viewer.queue_posted_work = true;
     const ScopedVisualizer scoped_viewer(&viewer);

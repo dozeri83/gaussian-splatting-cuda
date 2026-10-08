@@ -33,7 +33,6 @@ add_library(lfs_video STATIC
         include/io/video/video_encoder_interface.hpp
         include/io/video/video_export_options.hpp
         include/io/video/video_extensions.hpp
-        include/io/video/video_output_extent.hpp
         include/io/video/video_reconstruction.hpp
         video/video_encoder.hpp
         video/video_encoder.cpp
@@ -41,11 +40,9 @@ add_library(lfs_video STATIC
         media_studio_backends.cpp
         hdr_tonemap_tensor.hpp
         hdr_tonemap_tensor.cpp
-        video_player.hpp
-        video_player.cpp
 )
 if(LFS_USE_VULKAN)
-    target_sources(lfs_video PRIVATE hdr_libplacebo.cpp hdr_libplacebo_av.c)
+    target_sources(lfs_video PRIVATE hdr_libplacebo.cpp)
 else()
     target_sources(lfs_video PRIVATE hdr_libplacebo_unavailable.cpp)
 endif()
@@ -343,7 +340,7 @@ target_link_libraries(lfs_io
         ${WEBP_DECODE_LIB}     # WebP for SOG decompression
         ${WEBP_ENCODE_LIB}     # WebP for SOG/HTML export
         ${ARCHIVE_LIB}         # LibArchive for SOG bundle support
-        ZLIB::ZLIB             # gzip/msgpack payloads inside NuRec USDZ
+        ZLIB::ZLIB             # gzip/msgpack payloads inside NuRec USDZ, deflated SSOG members
         $<IF:$<TARGET_EXISTS:libdeflate::libdeflate_shared>,libdeflate::libdeflate_shared,libdeflate::libdeflate_static> # fast DEFLATE for RAD
         zstd::libzstd          # .licht project container chunk compression
         OpenSSL::Crypto

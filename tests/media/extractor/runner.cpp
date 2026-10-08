@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "core/logger.hpp"
 #include "core/path_utils.hpp"
-#include "io/video_player.hpp"
 #include "media/file_frame_sink.hpp"
 #include "media/media_probe.hpp"
 #include "media/video_frame_extractor.hpp"
+#include "media/video_player.hpp"
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -14,6 +15,7 @@ int runProbeUnitContracts();
 int runFrameSinkUnitContracts();
 int runSharedCoreContracts();
 nlohmann::json runJpegBackendContracts(const nlohmann::json&);
+nlohmann::json runEncodeSessionContracts(const nlohmann::json&);
 
 // Test adapter only: decoding, selection, geometry, codecs and metadata execute
 // the production sources directly. The JSON protocol is not a public CLI.
@@ -31,21 +33,37 @@ int main(int argc, char** argv) {
             return runSharedCoreContracts();
         std::ifstream input(lfs::core::utf8_to_path(argv[1]));
         const auto request = json::parse(input);
+        if (request.value("operation", "extract") == "encode-session") {
+            std::cout << runEncodeSessionContracts(request).dump() << '\n';
+            return 0;
+        }
         if (request.value("operation", "extract") == "jpeg-backend") {
             std::cout << runJpegBackendContracts(request).dump() << '\n';
             return 0;
         }
         if (request.value("operation", "extract") == "preview") {
-            VideoPlayer player;
+            struct DecodeObservation {
+                bool hardware = false;
+                lfs::core::LogHandlerToken token;
+                DecodeObservation() : token(lfs::core::Logger::get().add_log_handler([this](auto, const auto&, std::string_view message) { if(message.starts_with("VideoPlayer: NVDEC decoder:")) hardware=true; })) {}
+                ~DecodeObservation() { lfs::core::Logger::get().remove_log_handler(token); }
+            } observed;
+            auto owner = std::make_unique<VideoPlayer>();
+            auto& player = *owner;
             const bool success = player.open(lfs::core::utf8_to_path(request.at("input").get<std::string>()));
-            json output{{"success", success}, {"error", player.takeError()}};
+            json output{{"success", success}, {"error", player.takeError()}, {"hardware_decode", observed.hardware}};
             if (success) {
+                for (const double seconds : request.value("seek", std::vector<double>{}))
+                    player.seek(seconds);
                 output["rotation"] = player.rotation();
                 output["gpu_rotation"] = player.currentFrameHasGpuRotation();
                 output["size"] = json::array({player.width(), player.height()});
                 const auto* pixels = player.currentFrameData();
                 const size_t size = static_cast<size_t>(player.width()) * player.height() * player.currentFrameChannels();
                 output["pixels"] = std::vector<unsigned char>(pixels, pixels + size);
+                output["time"] = player.currentTime();
+                owner.reset();
+                output["closed"] = true;
             }
             std::cout << output.dump() << '\n';
             return 0;

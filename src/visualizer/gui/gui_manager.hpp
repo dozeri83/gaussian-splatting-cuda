@@ -56,6 +56,7 @@
 struct SDL_Cursor;
 
 namespace lfs::vis {
+    class OrthographicZoomTest;
     class WindowInputDispatchTest;
     class VisualizerImpl;
     class SequencerFrameDemandTest_PropagatesPlaybackStreamAndPreviewDemand_Test;
@@ -70,7 +71,11 @@ namespace lfs::vis {
     class VisualizerImplResetTest_StartupOffersRecoveryAfterUncleanShutdown_Test;
     class VisualizerImplResetTest_StartupWithCleanLastSessionLeavesBlankSession_Test;
     class VisualizerImplResetTest_UiVisibilityWaitsForMatchingFrame_Test;
+    class UiVisibilityTransitionTest_UiVisibilityWaitsForMatchingFrame_Test;
     class VisualizerImplResetTest_UiVisibilityTimeoutCommitsRequestedLayout_Test;
+    class UiVisibilityTransitionTest_UiVisibilityTimeoutCommitsRequestedLayout_Test;
+    class UiVisibilityTransitionTest_UiVisibilityFinishesWithoutWaitingForFullscreenGuard_Test;
+    class UiVisibilityTransitionTest_UiVisibilityRequestsFreshFrameWithoutCooldown_Test;
     class VisualizerImplResetTest_RecoveryDismissalPersistsAndNewerCandidateIsOffered_Test;
     class VisualizerImplResetTest_RecoverThenCleanQuitDoesNotReoffer_Test;
     class VisualizerImplResetTest_RecoverThenDiscardExitRemovesMasterSidecar_Test;
@@ -154,6 +159,7 @@ namespace lfs::vis {
             [[nodiscard]] const GizmoManager& gizmo() const { return gizmo_manager_; }
             [[nodiscard]] bool isSequencerVisible() const { return sequencer_visible_; }
             void setSequencerVisible(bool visible);
+            void focusMainPanelTab(std::string panel_id) { focus_panel_name_ = std::move(panel_id); }
             [[nodiscard]] GlobalContextMenu& globalContextMenu() { return *global_context_menu_; }
             [[nodiscard]] ScreenHost& screenHost() { return screen_host_; }
             [[nodiscard]] const ScreenHost& screenHost() const { return screen_host_; }
@@ -274,7 +280,11 @@ namespace lfs::vis {
             friend class lfs::vis::VisualizerImplResetTest_StartupOffersRecoveryAfterUncleanShutdown_Test;
             friend class lfs::vis::VisualizerImplResetTest_StartupWithCleanLastSessionLeavesBlankSession_Test;
             friend class lfs::vis::VisualizerImplResetTest_UiVisibilityWaitsForMatchingFrame_Test;
+            friend class lfs::vis::UiVisibilityTransitionTest_UiVisibilityWaitsForMatchingFrame_Test;
             friend class lfs::vis::VisualizerImplResetTest_UiVisibilityTimeoutCommitsRequestedLayout_Test;
+            friend class lfs::vis::UiVisibilityTransitionTest_UiVisibilityTimeoutCommitsRequestedLayout_Test;
+            friend class lfs::vis::UiVisibilityTransitionTest_UiVisibilityFinishesWithoutWaitingForFullscreenGuard_Test;
+            friend class lfs::vis::UiVisibilityTransitionTest_UiVisibilityRequestsFreshFrameWithoutCooldown_Test;
             friend class lfs::vis::VisualizerImplResetTest_RecoveryDismissalPersistsAndNewerCandidateIsOffered_Test;
             friend class lfs::vis::VisualizerImplResetTest_RecoverThenCleanQuitDoesNotReoffer_Test;
             friend class lfs::vis::VisualizerImplResetTest_RecoverThenDiscardExitRemovesMasterSidecar_Test;
@@ -291,6 +301,7 @@ namespace lfs::vis {
             [[nodiscard]] ViewportFrameDesc buildViewportFrameDesc(
                 ViewId id, glm::uvec2 extent, std::size_t frame_slot) const;
 
+            friend class lfs::vis::OrthographicZoomTest;
             void setupEventHandlers();
             void applyDefaultStyle();
             void initMenuBar();
@@ -410,7 +421,7 @@ namespace lfs::vis {
             PerfSampler perf_sampler_;
             std::chrono::steady_clock::time_point last_hud_sample_{};
             bool last_hud_expanded_ = false;
-            std::chrono::steady_clock::time_point ui_toggle_next_allowed_at_{};
+            std::chrono::steady_clock::time_point ui_visibility_deadline_{};
             bool ui_toggle_pending_ = false;
             bool ui_visibility_resize_active_ = false;
             bool ui_visibility_layout_committed_ = false;
