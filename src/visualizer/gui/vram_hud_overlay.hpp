@@ -28,7 +28,7 @@ namespace Rml {
 namespace lfs::vis::gui {
     class VramTimelineElement;
 
-    class VramHudOverlay {
+    class LFS_VIS_API VramHudOverlay {
     public:
         struct State {
             bool visible = false;
