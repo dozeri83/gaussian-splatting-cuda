@@ -157,5 +157,14 @@ RGB-to-YUV CPU regressions run inside the existing MCP contract runner and compa
 with the frozen dev tensor producer (rounding boundaries, nonfinite values, strides
 and storage reuse). They do not register or initialize GPU backends. Native runner
 contracts separately check CUDA/Vulkan bytes, timeline ordering and plane sentinels;
-the existing macOS HDR target covers Metal/Vulkan conversion. Program caches retire
-through the core GPU shutdown hook.
+the existing macOS HDR target covers Metal/Vulkan conversion. Vulkan program
+resources retire at context shutdown, after queued work finishes and before the
+device is destroyed. The implementation in dev keeps cached program descriptors
+and rebuilds their resources lazily for the next context. `GpuProgramContracts`
+includes the upstream regression for using a retained module after backend restart.
+
+CPU probe contracts also describe synthetic VideoToolbox/CUDA frame metadata
+without initializing hardware. They check the VideoToolbox `data[3]` handle,
+missing handles, and the absence of CPU plane pointers in hardware views.
+The descriptor's hardware handle is a borrowed identity, not a device/sync-aware
+import contract. Current HDR adapters still require a downloaded software frame.
