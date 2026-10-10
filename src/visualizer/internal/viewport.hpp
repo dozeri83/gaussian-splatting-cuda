@@ -175,6 +175,10 @@ class Viewport {
             dolly(lfs::vis::input::wheelZoomFraction(delta, zoomSpeed), carry_pivot);
         }
 
+        void zoomToward(const glm::vec3& anchor, float delta, bool carry_pivot = false) {
+            dollyToward(anchor, lfs::vis::input::wheelZoomFraction(delta, zoomSpeed), carry_pivot);
+        }
+
         // Moves toward the pivot by `fraction` of the camera-to-pivot distance;
         // a negative fraction moves away.
         void dolly(float fraction, bool carry_pivot = false) {
@@ -196,6 +200,30 @@ class Viewport {
             if (fraction > 0.0f && glm::dot(pivot - t, forward) < kMinDistance) {
                 pivot = t + forward * kMinDistance;
             }
+        }
+
+        // Moves toward a world-space anchor (the surface under the cursor) by
+        // `fraction` of the camera-to-anchor distance. Camera and pivot scale
+        // about the anchor, so it stays fixed on screen while the orbit
+        // distance shrinks by the same fraction as a centered dolly.
+        void dollyToward(const glm::vec3& anchor, float fraction, bool carry_pivot = false) {
+            // Never step onto or past the anchor; close to it, fall back to the
+            // centered dolly so zooming in can still push through the surface.
+            constexpr float kMaxAnchorFraction = 0.9f;
+            constexpr float kMinDistance = 0.1f;
+            if (fraction > 0.0f && glm::length(anchor - t) < kMinDistance) {
+                dolly(fraction, carry_pivot);
+                return;
+            }
+            fraction = std::min(fraction, kMaxAnchorFraction);
+
+            const glm::vec3 movement = fraction * (anchor - t);
+            t += movement;
+            if (carry_pivot) {
+                pivot += movement;
+                return;
+            }
+            pivot += fraction * (anchor - pivot);
         }
 
         // WASD movement carried by an exponentially-damped velocity: holding a

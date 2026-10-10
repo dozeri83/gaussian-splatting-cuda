@@ -1855,9 +1855,10 @@ namespace lfs::vis {
             target_viewport.camera.rotate_roll(delta);
         } else if (swipe == Swipe::Zoom) {
             zoomViewportBy(target_viewport,
-                           input::swipeZoomFactor(delta, trackpad_.zoom_speed));
+                           input::swipeZoomFactor(delta, trackpad_.zoom_speed),
+                           surfacePointUnderCursor(mouse_x, mouse_y));
         } else if (scroll_action == input::Action::CAMERA_ZOOM) {
-            zoomViewport(target_viewport, delta);
+            zoomViewport(target_viewport, delta, surfacePointUnderCursor(mouse_x, mouse_y));
         } else {
             return;
         }
@@ -1888,7 +1889,8 @@ namespace lfs::vis {
         target_viewport.camera.finishGlide();
 
         zoomViewportBy(target_viewport,
-                       input::pinchZoomFactor(scale, trackpad_.zoom_speed));
+                       input::pinchZoomFactor(scale, trackpad_.zoom_speed),
+                       surfacePointUnderCursor(mouse_x, mouse_y));
         onCameraMovementStart();
         publishCameraMove(&target_viewport);
     }
@@ -1897,15 +1899,61 @@ namespace lfs::vis {
         trackpad_touches_ = down ? trackpad_touches_ + 1 : std::max(trackpad_touches_ - 1, 0);
     }
 
-    void InputController::zoomViewport(Viewport& target_viewport, const float delta) {
+    void InputController::zoomViewport(Viewport& target_viewport, const float delta,
+                                       const std::optional<glm::vec3>& anchor) {
         constexpr float ORTHO_ZOOM_FACTOR = 0.1f;
-        if (!scaleOrthographicView(target_viewport, 1.0f + delta * ORTHO_ZOOM_FACTOR))
-            target_viewport.camera.zoom(delta, zoomCarriesPivot(camera_navigation_mode_));
+        if (scaleOrthographicView(target_viewport, 1.0f + delta * ORTHO_ZOOM_FACTOR))
+            return;
+        const bool carry_pivot = zoomCarriesPivot(camera_navigation_mode_);
+        if (anchor)
+            target_viewport.camera.zoomToward(*anchor, delta, carry_pivot);
+        else
+            target_viewport.camera.zoom(delta, carry_pivot);
     }
 
-    void InputController::zoomViewportBy(Viewport& target_viewport, const float factor) {
-        if (!scaleOrthographicView(target_viewport, factor))
-            target_viewport.camera.dolly(1.0f - 1.0f / factor, zoomCarriesPivot(camera_navigation_mode_));
+    void InputController::zoomViewportBy(Viewport& target_viewport, const float factor,
+                                         const std::optional<glm::vec3>& anchor) {
+        if (scaleOrthographicView(target_viewport, factor))
+            return;
+        const float fraction = 1.0f - 1.0f / factor;
+        const bool carry_pivot = zoomCarriesPivot(camera_navigation_mode_);
+        if (anchor)
+            target_viewport.camera.dollyToward(*anchor, fraction, carry_pivot);
+        else
+            target_viewport.camera.dolly(fraction, carry_pivot);
+    }
+
+    std::optional<glm::vec3> InputController::surfacePointUnderCursor(const double x, const double y) const {
+        auto* const rendering = services().renderingOrNull();
+        const auto target = views_.viewAt(static_cast<float>(x), static_cast<float>(y));
+        if (!rendering || !target.valid())
+            return std::nullopt;
+        const auto panel = rendering->resolveViewerPanel(target.id,
+                                                         *target.viewport, target.pos, target.size,
+                                                         glm::vec2(static_cast<float>(x), static_cast<float>(y)));
+        if (!panel || !panel->valid())
+            return std::nullopt;
+
+        // Depth lives at render resolution, which may differ from the panel's
+        // on-screen size.
+        const float render_x = (static_cast<float>(x) - panel->x) *
+                               static_cast<float>(panel->render_width) / panel->width;
+        const float render_y = (static_cast<float>(y) - panel->y) *
+                               static_cast<float>(panel->render_height) / panel->height;
+        const float depth = rendering->getDepthAtPixel(target.id, static_cast<int>(render_x),
+                                                       static_cast<int>(render_y), panel->panel);
+        if (!std::isfinite(depth) || depth <= 0.0f)
+            return std::nullopt;
+
+        const auto render_settings = rendering->settingsForView(target.id);
+        Viewport projection_viewport = *panel->viewport;
+        projection_viewport.windowSize = {panel->render_width, panel->render_height};
+        const glm::vec3 world = projection_viewport.unprojectPixel(
+            render_x, render_y, depth, render_settings.focal_length_mm,
+            render_settings.orthographic, render_settings.ortho_scale);
+        if (!Viewport::isValidWorldPosition(world))
+            return std::nullopt;
+        return world;
     }
 
     bool InputController::scaleOrthographicView(Viewport& target_viewport, float factor) {

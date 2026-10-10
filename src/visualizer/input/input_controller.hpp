@@ -227,10 +227,17 @@ namespace lfs::vis {
         void selectCameraByUid(int uid, bool toggle_selection);
         void updateCameraSpeed(bool increase);
         void updateZoomSpeed(bool increase);
-        // Wheel zoom by delta notches at the mouse zoom speed.
-        void zoomViewport(Viewport& target_viewport, float delta);
+        // Wheel zoom by delta notches at the mouse zoom speed. With an anchor
+        // (the surface under the cursor) perspective views zoom toward it;
+        // without one they zoom toward the view center.
+        void zoomViewport(Viewport& target_viewport, float delta,
+                          const std::optional<glm::vec3>& anchor = std::nullopt);
         // Trackpad zoom: a factor above 1 zooms in, independent of the wheel speed.
-        void zoomViewportBy(Viewport& target_viewport, float factor);
+        void zoomViewportBy(Viewport& target_viewport, float factor,
+                            const std::optional<glm::vec3>& anchor = std::nullopt);
+        // World point of the displayed surface under the cursor, from the last
+        // frame's depth; nullopt over background or when depth is unavailable.
+        [[nodiscard]] std::optional<glm::vec3> surfacePointUnderCursor(double x, double y) const;
         // Orthographic views zoom by scaling ortho_scale; false for perspective views.
         bool scaleOrthographicView(Viewport& target_viewport, float factor);
         // Middle-drag style orbit/look by drag pixels, without release momentum.
