@@ -1182,6 +1182,7 @@ _add_dll_dirs()
         }
 
         void run_python_init_once() {
+            std::optional<GilAcquire> external_gil;
             if (!Py_IsInitialized()) {
                 PyImport_AppendInittab("_lfs_output", init_capture_module);
 
@@ -1217,6 +1218,9 @@ _add_dll_dirs()
             } else {
                 LOG_WARN("Python already initialized by external code (e.g., .pyd loading)");
                 g_we_initialized_python = false;
+                // Python entry points may release the GIL before reaching the runner.
+                // Restore the caller's ownership on every exit, including failures.
+                external_gil.emplace();
             }
 
             register_output_module_post_init();
@@ -1255,7 +1259,9 @@ _add_dll_dirs()
                 bridge_ready = ensure_python_bridge_ready_locked();
             }
 
-            set_main_thread_state(PyEval_SaveThread());
+            if (g_we_initialized_python) {
+                set_main_thread_state(PyEval_SaveThread());
+            }
             set_gil_state_ready(true);
             LOG_DEBUG("GIL released, external_init={}", !g_we_initialized_python);
 

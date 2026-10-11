@@ -987,6 +987,11 @@ namespace lfs::core {
         return single_node_model_ ? single_node_model_ : cached_combined_.get();
     }
 
+    std::shared_ptr<const lfs::core::SplatData> Scene::sharePreparedCombinedModel() const {
+        std::lock_guard<std::mutex> lock(combined_model_mutex_);
+        return single_node_model_ ? nullptr : cached_combined_;
+    }
+
     void Scene::discardUnconsolidatedModelCache() const {
         if (consolidated_ || combined_model_build_running_.load(std::memory_order_acquire)) {
             return;
@@ -6207,9 +6212,10 @@ namespace lfs::core {
         if (!node || !node->model)
             return 0;
 
-        // UI/status polling must not touch the live training SplatData while the
-        // trainer is mutating topology under render_mutex_.
-        return node->gaussian_count.load(std::memory_order_acquire);
+        // Training can retain deleted slots. Read published counts only: reading
+        // live tensors would race refinement and synchronize UI/status polling.
+        const size_t count = node->gaussian_count.load(std::memory_order_acquire);
+        return count - std::min(count, node->model->deleted_count());
     }
 
     size_t Scene::getVisibleGaussianCount() const {
@@ -6253,9 +6259,12 @@ namespace lfs::core {
 
             const bool is_training_model_node = node->uuid == training_model_uuid_;
             const auto* model = effectiveModel(*node);
-            const size_t count = (model && !is_training_model_node)
-                                     ? static_cast<size_t>(model->visible_count())
-                                     : node->gaussian_count.load(std::memory_order_acquire);
+            size_t count = node->gaussian_count.load(std::memory_order_acquire);
+            if (model) {
+                count = is_training_model_node
+                            ? count - std::min(count, model->deleted_count())
+                            : static_cast<size_t>(model->visible_count());
+            }
             counts.emplace(node->id, count);
         }
 

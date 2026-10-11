@@ -73,6 +73,7 @@
 #include <numbers>
 #include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -3515,10 +3516,14 @@ namespace lfs::app {
                     if (auto result = apply_render_settings_patch(args, *settings); !result)
                         return json{{"error", result.error()}};
 
-                    vis::update_render_settings(
-                        *settings,
-                        {.scene_upscaler_explicit = args.contains("scene_upscaler"),
-                         .scene_upscaler_preset_explicit = args.contains("scene_upscaler_preset")});
+                    try {
+                        vis::update_render_settings(
+                            *settings,
+                            {.scene_upscaler_explicit = args.contains("scene_upscaler"),
+                             .scene_upscaler_preset_explicit = args.contains("scene_upscaler_preset")});
+                    } catch (const std::invalid_argument& error) {
+                        return mcp::invalid_argument_result(error.what(), "environment_map_path");
+                    }
 
                     auto* const scene_manager = viewer_impl->getSceneManager();
                     auto* const rendering_manager = viewer_impl->getRenderingManager();

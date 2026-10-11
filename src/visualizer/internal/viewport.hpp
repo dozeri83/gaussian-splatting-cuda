@@ -180,7 +180,12 @@ class Viewport {
         void dolly(float fraction, bool carry_pivot = false) {
             const glm::vec3 forward = lfs::rendering::cameraForward(R);
             const float distToPivot = glm::length(pivot - t);
-            const glm::vec3 movement = fraction * distToPivot * forward;
+            float distance = fraction * distToPivot;
+            if (fraction < 0.0f && !carry_pivot) {
+                constexpr float kMaxDistance = lfs::rendering::DEFAULT_FAR_PLANE;
+                distance = std::max(distance, -std::max(0.0f, kMaxDistance - distToPivot));
+            }
+            const glm::vec3 movement = distance * forward;
 
             t += movement;
             if (carry_pivot) {

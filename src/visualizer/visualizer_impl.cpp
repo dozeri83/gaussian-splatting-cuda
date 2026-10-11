@@ -1142,7 +1142,10 @@ namespace lfs::vis {
                     intent.scene_upscaler_explicit && !intent.scene_upscaler_preset_explicit
                         ? SceneUpscalerPresetUpdate::RestoreRememberedForBackend
                         : SceneUpscalerPresetUpdate::UseRequested;
-                rendering_manager_->updateSettings(s, DirtyFlag::ALL, preset_update);
+                if (const auto result = rendering_manager_->updateSettingsFromUser(s, preset_update); !result) {
+                    wakeMainLoop();
+                    throw std::invalid_argument(std::string(result.error().user_message()));
+                }
                 const auto& applied = rendering_manager_->getSettings();
                 if (applied.scene_upscaler != previous_upscaler ||
                     applied.scene_upscaler_preset != previous_preset) {
@@ -1179,6 +1182,10 @@ namespace lfs::vis {
                 const auto preset_update = intent.scene_upscaler_explicit && !intent.scene_upscaler_preset_explicit
                                                ? SceneUpscalerPresetUpdate::RestoreRememberedForBackend
                                                : SceneUpscalerPresetUpdate::UseRequested;
+                if (const auto result = rendering_manager_->validateSettingsFromUser(*settings); !result) {
+                    wakeMainLoop();
+                    throw std::invalid_argument(std::string(result.error().user_message()));
+                }
                 if (!rendering_manager_->updateSettingsForView(target.view, *settings, DirtyFlag::ALL, preset_update))
                     return std::nullopt;
                 const auto applied = rendering_manager_->trySettingsForView(target.view);
@@ -2077,7 +2084,7 @@ namespace lfs::vis {
         });
 
         state::TrainingPaused::when([this](const auto& event) {
-            training_progress_publisher_.publishFinal(event.iteration);
+            training_progress_publisher_.publishFinal(event.iteration, trainer_manager_->getNumSplats());
             auto& store = app_store();
             lfs::core::reactive::BatchUpdate batch(store.store());
             store.training_running.set(false);
@@ -2094,7 +2101,7 @@ namespace lfs::vis {
         });
 
         state::TrainingCompleted::when([this](const auto& event) {
-            training_progress_publisher_.publishFinal(event.iteration);
+            training_progress_publisher_.publishFinal(event.iteration, trainer_manager_->getNumSplats());
             const char* state = !event.success       ? "error"
                                 : event.user_stopped ? "stopped"
                                                      : "completed";
@@ -3406,14 +3413,7 @@ namespace lfs::vis {
         if (trainer_manager_ &&
             (trainer_manager_->isTrainingActive() ||
              trainer_manager_->isCompletionPending())) {
-            cmd::LoadFile{
-                .path = path,
-                .is_dataset = false,
-                .stop_training = true,
-                .discard_changes = true,
-                .replace = true}
-                .emit();
-            return {};
+            return std::unexpected("Cannot replace the scene until training has stopped.");
         }
         return data_loader_->loadPLY(path);
     }

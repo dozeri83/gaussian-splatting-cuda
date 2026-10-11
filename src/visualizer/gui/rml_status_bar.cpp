@@ -20,6 +20,7 @@
 #include "gui/rmlui/rmlui_manager.hpp"
 #include "gui/rmlui/sdl_rml_key_mapping.hpp"
 #include "gui/status_bar_mining.hpp"
+#include "gui/status_bar_training.hpp"
 #include "gui/string_keys.hpp"
 #include "gui/ui_context.hpp"
 #include "input/input_controller.hpp"
@@ -1409,10 +1410,15 @@ namespace lfs::vis::gui {
                 mode_rml = LOC("training_panel.preparing_training");
                 mode_color = colorToRml(p.warning);
                 break;
-            case TrainingState::Finished:
-                mode_rml = LOC(lichtfeld::Strings::Status::COMPLETE) + suffix;
-                mode_color = colorToRml(p.success);
+            case TrainingState::Finished: {
+                const auto reason = tm
+                                        ? tm->getStateMachine().getFinishReason()
+                                        : FinishReason::None;
+                const auto status = finishedTrainingStatus(reason, p);
+                mode_rml = LOC(status.label_key) + suffix;
+                mode_color = colorToRml(status.color);
                 break;
+            }
             case TrainingState::Stopping:
                 mode_rml = LOC(lichtfeld::Strings::Status::STOPPING) + suffix;
                 mode_color = colorToRml(p.text_dim);

@@ -1611,6 +1611,8 @@ namespace lfs::vis::gui {
             params.init_path = std::nullopt;
             params.resume_checkpoint = std::nullopt;
             params.dataset.output_path = output_path;
+            if (!cmd.images_folder.empty())
+                params.dataset.images = cmd.images_folder;
             if (!cmd.init_path.empty())
                 params.init_path = lfs::core::path_to_utf8(cmd.init_path);
             params.add_splat_paths = cmd.add_splat_paths;
@@ -3360,7 +3362,7 @@ namespace lfs::vis::gui {
                              fps = static_cast<float>(export_options.framerate),
                              cam_state = frame_states[frame],
                              clip_time = start_time + static_cast<float>(frame) * time_step]() mutable
-                            -> std::expected<lfs::core::Tensor, std::string> {
+                                -> std::expected<lfs::core::Tensor, std::string> {
                                 if (sequence_uuid) {
                                     auto& sequencer_ui = viewer->getGuiManager()->sequencerUI();
                                     const auto* current = sequencer_ui.controller().plySequence();

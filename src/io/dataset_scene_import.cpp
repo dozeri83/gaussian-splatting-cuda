@@ -183,9 +183,16 @@ namespace lfs::training {
                         return std::unexpected(std::string(attached.error().user_message()));
                     }
 
-                    const auto& cameras = data.cameras;
+                    auto cameras = data.cameras;
                     const bool hold_out = params.optimization.holds_out_eval_images();
                     const int test_every = params.dataset.test_every;
+                    if (hold_out && !params.resume_checkpoint) {
+                        std::sort(cameras.begin(), cameras.end(), [](const auto& lhs, const auto& rhs) {
+                            if (lhs->image_name() != rhs->image_name())
+                                return lhs->image_name() < rhs->image_name();
+                            return lhs->uid() < rhs->uid();
+                        });
+                    }
                     size_t train_count = 0;
                     size_t val_count = 0;
                     size_t mask_count = 0;

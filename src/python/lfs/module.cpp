@@ -398,7 +398,7 @@ namespace {
         if (auto posted = lfs::vis::post_guarded_and_wait<void>(
                 viewer, context,
                 [emit = std::forward<EmitFn>(emit_fn)]() mutable
-                -> lfs::Result<void> {
+                    -> lfs::Result<void> {
                     emit();
                     return {};
                 },
@@ -2030,7 +2030,8 @@ NB_MODULE(lichtfeld, m) {
            std::optional<int> min_track_length,
            bool stop_training,
            bool discard_changes,
-           bool replace) {
+           bool replace,
+           const std::string& images_folder) {
             nb::gil_scoped_release release;
             lfs::core::events::cmd::LoadFile command{
                 .path = python_utf8_path(path),
@@ -2043,7 +2044,8 @@ NB_MODULE(lichtfeld, m) {
                 .apply_auto_crop = apply_auto_crop,
                 .stop_training = stop_training,
                 .discard_changes = discard_changes,
-                .replace = replace};
+                .replace = replace,
+                .images_folder = images_folder};
             emit_project_cmd_marshaled(
                 "python.load_file",
                 [command = std::move(command)] { command.emit(); });
@@ -2057,6 +2059,7 @@ NB_MODULE(lichtfeld, m) {
         nb::arg("stop_training") = false,
         nb::arg("discard_changes") = false,
         nb::arg("replace") = false,
+        nb::arg("images_folder") = "",
         "Load a file (PLY, checkpoint) or dataset into the scene.");
 
     m.def(
@@ -2071,7 +2074,7 @@ NB_MODULE(lichtfeld, m) {
                 .stop_training = stop_training,
                 .discard_changes = discard_changes,
                 .replace = replace,
-                .user_batch = user_batch && paths.size() > 1};
+                .user_batch = user_batch};
             for (const auto& path : paths)
                 command.paths.push_back(python_utf8_path(path));
             nb::gil_scoped_release release;

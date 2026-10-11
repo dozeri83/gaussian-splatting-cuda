@@ -62,6 +62,26 @@ endif()
 # Find GTest
 find_package(GTest CONFIG REQUIRED)
 
+# Exercise a real EXE/DLL boundary: linking the same static runner into both
+# modules would pass same-module tests but split callback and initialization state.
+# Windows CI enables the focused visualizer tests without the full test suite.
+if(WIN32 AND (BUILD_TESTS OR BUILD_VISUALIZER_TESTS) AND TARGET lfs_python_utils)
+    add_library(lichtfeld_python_state_helper SHARED python_runtime_state_helper.cpp)
+    target_compile_features(lichtfeld_python_state_helper PRIVATE cxx_std_23)
+    target_compile_definitions(lichtfeld_python_state_helper PRIVATE LFS_TEST_PYTHON_STATE_EXPORTS)
+    target_link_libraries(lichtfeld_python_state_helper PRIVATE lfs_python_utils)
+
+    add_executable(lichtfeld_python_state_tests test_python_runtime_state.cpp)
+    target_compile_features(lichtfeld_python_state_tests PRIVATE cxx_std_23)
+    target_link_libraries(lichtfeld_python_state_tests PRIVATE
+        lfs_python_utils lichtfeld_python_state_helper GTest::gtest_main)
+    add_test(NAME lichtfeld.python_runtime_state COMMAND lichtfeld_python_state_tests)
+    set_tests_properties(lichtfeld.python_runtime_state PROPERTIES
+        LABELS "python;windows" TIMEOUT 30
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:lfs_python_runtime>;PATH=path_list_prepend:${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/$<IF:$<CONFIG:Debug>,debug/bin,bin>")
+endif()
+
 
 if((BUILD_TESTS OR BUILD_VISUALIZER_TESTS) AND LFS_TENSOR_METAL AND NOT LFS_GRAPHICS_VULKAN_BUILD)
     add_executable(metal_scene_upscaler_contracts
@@ -321,6 +341,7 @@ if(BUILD_VISUALIZER_TESTS OR BUILD_TESTS)
         list(APPEND LICHTFELD_VISUALIZER_TEST_SOURCES
             test_gpu_memory_query.cpp
             test_node_canvas_widgets.cpp
+    test_panel_layout_render_demand.cpp
             test_rml_static_style_boundaries.cpp
             test_viewer_gpu_memory.cpp)
     endif()
@@ -1081,8 +1102,10 @@ set(TEST_FILES
     test_roi_weight_map.cpp
     test_mesh_mask_kernels.cpp
     test_flip.cpp
+    test_compare_images.cpp
     test_roi_weighted_losses.cpp
     test_checkpoint_resume.cpp
+    test_evaluation_split.cpp
     test_component_config_serialization.cpp
     test_training_snapshot_service.cpp
     test_atomic_output.cpp
@@ -1125,6 +1148,7 @@ set(TEST_FILES
     test_video_reconstruction.cpp
     test_video_export_utils.cpp
     test_video_frame_extractor_naming.cpp
+    test_video_cpu_rgb_conversion.cpp
     test_video_cuda_frame_handoff.cpp
     test_video_hdr_logic.cpp
     test_visualizer_post_work.cpp
@@ -1228,7 +1252,11 @@ set(TEST_FILES
     test_context_menu_placement.cpp
     test_rml_static_style_boundaries.cpp
     test_node_canvas_widgets.cpp
+    test_panel_layout_render_demand.cpp
+    test_preferences_hint_layout.cpp
+    test_viewport_select.cpp
     test_sequencer_regressions.cpp
+    test_timeline_save_budget.cpp
     test_tensor_storage_version.cpp
     test_tensor_backend_selection.cpp
     test_tensor_backend_selftest.cpp
@@ -1271,15 +1299,18 @@ set(TEST_FILES
     test_colmap_points3d_text.cpp
     test_colmap_binary_error_taxonomy.cpp
     test_colmap_binary_parallel_parse.cpp
+    test_colmap_camera_import.cpp
     test_splat_simplify.cpp
     test_rml_text_input_handler.cpp
     test_rml_text_input_native_keys.cpp
     test_scene_graph_dnd.cpp
     test_rml_im_mode_layout.cpp
     test_rml_python_listener_lifetime.cpp
+    test_rendering_environment_select.cpp
     test_status_bar_fit.cpp
     test_gallery_file_panel_layout.cpp
     test_histogram_layout.cpp
+    test_setting_row_layout.cpp
     test_rmlui_preview_decode.cpp
     test_training_progress_publisher.cpp
     test_startup_overlay_geometry.cpp
@@ -1660,6 +1691,7 @@ string(CONCAT LFS_NIGHTLY_TEST_FILTER
 string(CONCAT LFS_SLOW_TEST_FILTER
     "*CheckpointResumeTest.TrainSaveLoadResume/tiny_*:"
     "TrainingSetupRegressionTest.*:"
+    "EvaluationSplitTest.*:"
     "PipelinedImageLoaderTest.*:"
     "ImageResizeParallelTest.*:"
     "PythonIOTest.LoadCOLMAPDataset:"
@@ -1802,6 +1834,7 @@ endif()
 # Keep every Python tier explicit so new modules cannot silently drift out of
 # the curated suite.
 set(LFS_PYTHON_FAST_TESTS
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_gallery_storage.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_asset_identity.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_bug_report.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_core_abi_stamp.py
@@ -1814,6 +1847,7 @@ set(LFS_PYTHON_FAST_TESTS
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_import_dialog_panels.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_io_hygiene_regressions.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_keymap_bindings.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/python/test_new_project_panel.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_verified_dead_code_cleanup.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_viewer_spirv.py
     ${CMAKE_CURRENT_SOURCE_DIR}/python/test_layout_composition.py
@@ -1975,6 +2009,22 @@ set_tests_properties(lichtfeld.python.gpu PROPERTIES
     LABELS "fast;gpu"
     TIMEOUT 60
 )
+
+
+# Owns its Xvfb display, GUI process and generated inputs; requires a Linux GPU.
+if(UNIX AND NOT APPLE AND TARGET LichtFeld-Studio)
+    add_test(NAME lichtfeld.python.capture_environment
+        COMMAND ${Python_EXECUTABLE} -m pytest -q
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/test_render_capture_environment.py
+    )
+    set_tests_properties(lichtfeld.python.capture_environment PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        LABELS "gpu;integration"
+        TIMEOUT 300
+        RESOURCE_LOCK lfs_gui_gpu
+        ENVIRONMENT "LFS_EXECUTABLE=$<TARGET_FILE:LichtFeld-Studio>;LFS_TEST_BUILD_DIR=${CMAKE_BINARY_DIR}"
+    )
+endif()
 
 # Custom targets for convenience
 add_custom_target(run_tests

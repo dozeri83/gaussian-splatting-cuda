@@ -62,6 +62,7 @@
 #include <memory>
 #include <mutex>
 #include <numbers>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -1768,6 +1769,56 @@ namespace {
     // The real viewer registers the manager used by the compiled binding.
     // No window loop or SelectionTool is initialized: this is its no-tool lane.
 } // namespace
+TEST_F(PythonIntegrationTest, RejectedRenderSettingsRestoreReusableProxy) {
+    TestVisualizer viewer;
+    viewer.on_viewer_thread = true;
+    const ScopedVisualizer scoped_viewer(&viewer);
+    ViewSettingCallbacks callbacks;
+    auto initial = callbacks.manager.getSettings();
+    initial.environment_map_path = "previous.hdr";
+    callbacks.manager.updateSettings(initial);
+    lfs::vis::set_view_render_settings_callbacks(
+        [&]() -> std::optional<lfs::vis::RenderSettingsTarget> {
+            return lfs::vis::RenderSettingsTarget{callbacks.first, callbacks.views.screenEpoch()};
+        },
+        [&](lfs::vis::RenderSettingsTarget) -> std::optional<lfs::vis::RenderSettingsProxy> {
+            return lfs::vis::to_proxy(callbacks.manager.getSettings());
+        },
+        [&](lfs::vis::RenderSettingsTarget, const lfs::vis::RenderSettingsProxy& candidate,
+            lfs::vis::RenderSettingsUpdateIntent) -> std::optional<lfs::vis::RenderSettingsProxy> {
+            if (candidate.environment_map_path == "invalid.hdr")
+                throw std::invalid_argument("Environment map cannot be read");
+            auto settings = callbacks.manager.getSettings();
+            lfs::vis::apply_proxy(settings, candidate);
+            callbacks.manager.updateSettings(settings);
+            return lfs::vis::to_proxy(callbacks.manager.getSettings());
+        });
+    const lfs::python::GilAcquire gil;
+    std::unique_ptr<PyObject, decltype(&Py_DecRef)> globals(PyDict_New(), Py_DecRef);
+    ASSERT_NE(globals, nullptr);
+    PyDict_SetItemString(globals.get(), "__builtins__", PyEval_GetBuiltins());
+    auto* result = PyRun_String(R"PY(
+import lichtfeld as lf
+settings = lf.get_render_settings()
+try:
+    settings.environment_map_path = 'invalid.hdr'
+except ValueError:
+    pass
+else:
+    raise AssertionError('invalid map was accepted')
+assert settings.environment_map_path == 'previous.hdr'
+settings.environment_rotation_degrees = 90.0
+assert settings.environment_map_path == 'previous.hdr'
+assert settings.environment_rotation_degrees == 90.0
+)PY",
+                                Py_file_input, globals.get(), globals.get());
+    if (!result)
+        ADD_FAILURE() << consumePythonError();
+    Py_XDECREF(result);
+    EXPECT_EQ(callbacks.manager.getSettings().environment_map_path, "previous.hdr");
+    EXPECT_EQ(callbacks.manager.getSettings().environment_rotation_degrees, 90.0f);
+}
+
 // NOTE: Tests that actually execute Python scripts require the lichtfeld module
 // to be importable, which depends on the CommandCenter and training infrastructure.
 // These are better tested via integration tests (running training with --python-script).

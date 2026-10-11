@@ -311,6 +311,8 @@ namespace lfs::vis {
         friend class DepthWindowPanelsInteractionTest;
         friend class DepthWindowGtHookTest;
         friend class P5SessionCaptureTestAccess;
+        friend class VisualizerImplResetTest_DirectSplatLoadRejectsActiveTrainingWithoutConsent_Test;
+        friend class VisualizerImplResetTest_DirectSplatLoadWithoutActiveTrainingStillReplacesScene_Test;
         friend class VisualizerImplResetTest_ActiveProjectPreviewWritePreservesEditsAndQueuesSave_Test;
         friend class VisualizerImplResetTest_AsyncTrainingBindReturnsBeforeSlowWriteAndCoalescesStarts_Test;
         friend class VisualizerImplResetTest_AsyncTrainingBindFailureDoesNotStart_Test;
