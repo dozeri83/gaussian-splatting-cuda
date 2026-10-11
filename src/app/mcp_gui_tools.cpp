@@ -2749,12 +2749,10 @@ namespace lfs::app {
                     auto immediate_params = params;
                     immediate_params.dataset.data_path.clear();
                     return post_and_wait(viewer, [viewer, viewer_impl, params = std::move(immediate_params), path]() -> mcp::SharedSceneToolBackend::LoadDatasetHandler::result_type {
-                        // Loading replaces the trainer. The GUI thread cannot wait for a live
-                        // worker, so the load would stop the run and then fail; refuse first.
-                        if (const auto* const trainer_manager = viewer_impl->getTrainerManager();
-                            trainer_manager && trainer_manager->hasLiveTrainingThread()) {
-                            return std::unexpected(
-                                "Cannot load a dataset while training is running. Stop training and wait for it to finish first.");
+                        // Admission must precede parameter changes and trainer teardown.
+                        if (const auto* trainer = viewer_impl->getTrainerManager();
+                            trainer && (trainer->hasLiveTrainingThread() || trainer->isTrainingActive() || trainer->isCompletionPending())) {
+                            return std::unexpected("Cannot load a dataset while training is active or stopping. Stop training and wait for completion first.");
                         }
                         viewer->setParameters(params);
                         return viewer->loadDataset(path);

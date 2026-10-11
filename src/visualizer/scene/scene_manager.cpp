@@ -136,6 +136,24 @@ namespace lfs::vis {
             return name;
         }
 
+        [[nodiscard]] std::shared_ptr<core::MeshData> cloneMeshData(const core::MeshData& sm) {
+            auto cloned = std::make_shared<core::MeshData>();
+            cloned->vertices = sm.vertices.clone();
+            cloned->indices = sm.indices.clone();
+            if (sm.has_normals())
+                cloned->normals = sm.normals.clone();
+            if (sm.has_tangents())
+                cloned->tangents = sm.tangents.clone();
+            if (sm.has_texcoords())
+                cloned->texcoords = sm.texcoords.clone();
+            if (sm.has_colors())
+                cloned->colors = sm.colors.clone();
+            cloned->materials = sm.materials;
+            cloned->submeshes = sm.submeshes;
+            cloned->texture_images = sm.texture_images;
+            return cloned;
+        }
+
         [[nodiscard]] std::unique_ptr<lfs::core::SplatData> cloneSplatDataToCpu(
             const lfs::core::SplatData& src) {
             auto shN = src.clone_shN_storage();
@@ -579,6 +597,8 @@ namespace lfs::vis {
         LOG_DEBUG("SceneManager initialized");
     }
     SceneManager::~SceneManager() {
+        if (python::get_application_scene() == &scene_)
+            python::set_application_scene(nullptr);
         if (consolidated_compaction_thread_.joinable()) {
             consolidated_compaction_thread_.request_stop();
             consolidated_compaction_thread_.join();
@@ -2039,7 +2059,6 @@ namespace lfs::vis {
 
         const auto history_before = op::SceneGraphMetadataEntry::captureNodes(*this, {name});
         scene_.setNodeVisibility(id, visible);
-        scene_.invalidateCache();
         selection_.invalidateNodeMask();
 
         if (visible) {
@@ -2061,7 +2080,6 @@ namespace lfs::vis {
         }
 
         scene_.setNodeVisibility(id, visible);
-        scene_.invalidateCache();
         selection_.invalidateNodeMask();
         if (visible) {
             if (const auto* updated = scene_.getNodeById(id))
@@ -5423,6 +5441,10 @@ namespace lfs::vis {
             }
         }
 
+        if (node->mesh) {
+            result.mesh = cloneMeshData(*node->mesh);
+        }
+
         if (node->cropbox) {
             result.cropbox = std::make_unique<core::CropBoxData>(*node->cropbox);
         }
@@ -5505,26 +5527,12 @@ namespace lfs::vis {
                 continue;
 
             ClipboardEntry entry;
-            entry.transform = node->local_transform.get();
+            // Clipboard entries are pasted at the scene root; retain their world placement.
+            entry.transform = scene_.getWorldTransform(node->id);
             entry.hierarchy = copyNodeHierarchy(node);
 
             if (node->type == core::NodeType::MESH && node->mesh) {
-                const auto& sm = *node->mesh;
-                auto cloned = std::make_shared<core::MeshData>();
-                cloned->vertices = sm.vertices.clone();
-                cloned->indices = sm.indices.clone();
-                if (sm.has_normals())
-                    cloned->normals = sm.normals.clone();
-                if (sm.has_tangents())
-                    cloned->tangents = sm.tangents.clone();
-                if (sm.has_texcoords())
-                    cloned->texcoords = sm.texcoords.clone();
-                if (sm.has_colors())
-                    cloned->colors = sm.colors.clone();
-                cloned->materials = sm.materials;
-                cloned->submeshes = sm.submeshes;
-                cloned->texture_images = sm.texture_images;
-                entry.mesh = std::move(cloned);
+                entry.mesh = entry.hierarchy->mesh;
             } else if (node->model && node->model->size() > 0) {
                 const auto& model = *node->model;
                 lfs::core::Tensor keep;
@@ -5873,6 +5881,8 @@ namespace lfs::vis {
                                         child.data->shN_value_quantized() ? child.data->shN_value_bounds().gpu()
                                                                           : lfs::core::Tensor{});
                                     child_id = scene_.addSplat(child_name, std::move(paste_data), parent_id);
+                                } else if (child.type == core::NodeType::MESH && child.mesh) {
+                                    child_id = scene_.addMesh(child_name, cloneMeshData(*child.mesh), parent_id);
                                 } else if (child.type == core::NodeType::CROPBOX && child.cropbox) {
                                     child_id = scene_.addCropBox(child_name, parent_id);
                                     if (auto* pasted_cropbox = scene_.getCropBoxData(child_id))
@@ -5896,7 +5906,7 @@ namespace lfs::vis {
                     const auto* pasted_group = scene_.getNodeById(pasted_id);
                     if (pasted_group) {
                         auto* mutable_group = scene_.getMutableNode(pasted_group->name);
-                        mutable_group->local_transform.setQuiet(entry.hierarchy->local_transform);
+                        mutable_group->local_transform.setQuiet(entry.transform);
                         mutable_group->visible.setQuiet(entry.hierarchy->visible);
                         mutable_group->locked.setQuiet(entry.hierarchy->locked);
                         mutable_group->transform_dirty = true;
@@ -5905,21 +5915,7 @@ namespace lfs::vis {
                 }
             } else if (entry.mesh) {
                 name = makeUniqueCounterNodeName(scene_, "Pasted", clipboard_counter_);
-                auto cloned = std::make_shared<core::MeshData>();
-                cloned->vertices = entry.mesh->vertices.clone();
-                cloned->indices = entry.mesh->indices.clone();
-                if (entry.mesh->has_normals())
-                    cloned->normals = entry.mesh->normals.clone();
-                if (entry.mesh->has_tangents())
-                    cloned->tangents = entry.mesh->tangents.clone();
-                if (entry.mesh->has_texcoords())
-                    cloned->texcoords = entry.mesh->texcoords.clone();
-                if (entry.mesh->has_colors())
-                    cloned->colors = entry.mesh->colors.clone();
-                cloned->materials = entry.mesh->materials;
-                cloned->submeshes = entry.mesh->submeshes;
-                cloned->texture_images = entry.mesh->texture_images;
-                pasted_id = scene_.addMesh(name, std::move(cloned));
+                pasted_id = scene_.addMesh(name, cloneMeshData(*entry.mesh));
             } else if (entry.data && entry.data->size() > 0) {
                 name = makeUniqueCounterNodeName(scene_, "Pasted", clipboard_counter_);
                 auto paste_data = std::make_unique<lfs::core::SplatData>(

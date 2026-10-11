@@ -1127,6 +1127,25 @@ NB_MODULE(lichtfeld, m) {
         "Get trainer error message");
 
     m.def(
+        "trainer_error_key",
+        []() -> std::optional<std::string> {
+            const auto* const tm = lfs::python::get_trainer_manager();
+            if (!tm || tm->getLastError().empty())
+                return std::nullopt;
+            const auto error = tm->lastTrainingError();
+            if (error && !error->frames().empty()) {
+                for (const auto& field : error->frames().front().fields.entries()) {
+                    if (field.key == "message_key") {
+                        if (const auto* key = std::get_if<std::string>(&field.value))
+                            return *key;
+                    }
+                }
+            }
+            return std::nullopt;
+        },
+        "Get the optional localization key for the trainer error message");
+
+    m.def(
         "prepare_training_from_scene", []() {
             nb::gil_scoped_release release;
             lfs::core::events::cmd::PrepareTrainingFromScene{}.emit();
@@ -3071,6 +3090,25 @@ NB_MODULE(lichtfeld, m) {
                 lfs::vis::InputController::cameraNavigationModeName(*parsed));
         },
         nb::arg("mode"), "Set the active camera navigation mode");
+    m.def("get_new_project_navigation_up_axis", [] { return lfs::vis::UserPreferences::instance().newProjectNavigationUpAxis(); }, "Get the navigation vertical used only for new projects");
+    m.def("get_new_project_align_grid", [] { return lfs::vis::UserPreferences::instance().alignNewProjectGrid(); }, "Get whether new projects start with a grid perpendicular to their navigation vertical");
+    m.def("set_new_project_navigation_defaults", [](const std::string& axis, bool align_grid) { lfs::vis::UserPreferences::instance().setNewProjectNavigation(axis, align_grid); }, nb::arg("axis"), nb::arg("align_grid"), "Set new-project defaults without modifying the current project");
+    m.def(
+        "get_navigation_up_axis", []() -> std::string {
+            const auto* controller = lfs::vis::InputController::instance();
+            return std::string(lfs::vis::navigationUpAxisName(
+                controller ? controller->navigationUpAxis() : lfs::vis::NavigationUpAxis::LegacyY));
+        },
+        "Get the project navigation vertical: legacy_y or data_z");
+    m.def(
+        "set_navigation_up_axis", [](const std::string& axis, bool align_grid) {
+            const auto parsed = lfs::vis::navigationUpAxisFromName(axis);
+            if (!parsed)
+                throw std::invalid_argument("navigation up axis must be legacy_y or data_z");
+            if (auto* controller = lfs::vis::InputController::instance())
+                controller->setNavigationUpAxis(*parsed, align_grid);
+        },
+        nb::arg("axis"), nb::arg("align_grid") = false, "Set the project navigation vertical without transforming scene data or camera poses; optionally align both panel grids");
     m.def(
         "get_camera_view_snap_enabled", []() -> bool {
             const auto* controller = lfs::vis::InputController::instance();

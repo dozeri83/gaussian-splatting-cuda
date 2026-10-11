@@ -1360,7 +1360,15 @@ class TrainingPanel(Panel):
             session_error = str(session.get("error") or "")
             if session_error and not session.get("hydrated") and not RuntimeState.has_trainer.value:
                 return f"{tr('training_panel.session_restore_failed')}: {session_error}"
-            return lf.trainer_error() or ""
+            message = lf.trainer_error() or ""
+            if not message:
+                return ""
+            key = lf.trainer_error_key()
+            if key == "messages.err_distorted_images":
+                return lf.ui.tr("messages.err_distorted_images")
+            if key == "messages.err_non_pinhole":
+                return lf.ui.tr("messages.err_non_pinhole")
+            return message
 
         model.bind_func("status_iteration", _status_iteration)
         model.bind_func("status_gaussians", _status_gaussians)

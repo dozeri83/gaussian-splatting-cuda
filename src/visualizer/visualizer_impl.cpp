@@ -29,6 +29,7 @@
 #include "gui/panels/windows_console_utils.hpp"
 #include "gui/string_keys.hpp"
 #include "gui/utils/native_file_dialog.hpp"
+#include "io/dataset_scene_import.hpp"
 #include "io/project_chapters.hpp"
 #include "ipc/render_settings_convert.hpp"
 #include "ipc/view_context.hpp"
@@ -925,6 +926,11 @@ namespace lfs::vis {
             }
         });
         callback_cleanup_.add([] { python::set_export_callback(nullptr); });
+    }
+
+    void VisualizerImpl::forEachView(const std::function<void(ViewTarget)>& visit) {
+        for (const auto id : screen_service_.screen().views())
+            visit(findView(id.value));
     }
 
     ViewTarget VisualizerImpl::activeView() {
@@ -3438,6 +3444,23 @@ namespace lfs::vis {
         }
 
         LOG_INFO("Loading dataset: {}", lfs::core::path_to_utf8(path));
+        if (trainer_manager_ &&
+            (trainer_manager_->isTrainingActive() ||
+             trainer_manager_->isCompletionPending())) {
+            return std::unexpected("Cannot replace the scene until training has stopped.");
+        }
+        if (project_lifecycle_ &&
+            project_lifecycle_->hasSourcePath() &&
+            !project_lifecycle_->isBlankProject()) {
+            // Keep invalid imports from discarding the current project. The
+            // loader below still reports validation failures through its events.
+            auto params = data_loader_->getParameters();
+            params.dataset.data_path = path;
+            if (lfs::training::validateDatasetPath(params) &&
+                !resetUntitledSessionForReplaceLoad()) {
+                return std::unexpected("Failed to reset the project for dataset replacement.");
+            }
+        }
         return data_loader_->loadDataset(path);
     }
 
@@ -4000,6 +4023,8 @@ namespace lfs::vis {
     }
 
     void VisualizerImpl::resetProjectState(const bool reset_panel_registry) {
+        if (input_controller_)
+            input_controller_->setNavigationUpAxis(NavigationUpAxis::LegacyY);
         if (trainer_manager_) {
             trainer_manager_->clearRestoredProjectMetrics();
         }

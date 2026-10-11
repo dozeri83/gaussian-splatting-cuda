@@ -431,6 +431,30 @@ class ExtractionContracts(unittest.TestCase):
         for index, frame in enumerate(frames):
             self.assertEqual(fixtures.decoded_rgb(output / frame["file"], FFMPEG), self.reference_frame(index))
 
+    def test_vfr_file_sink_uses_nominal_rate_when_average_differs(self):
+        source = self.root / "variable-rate.mp4"
+        subprocess.run([
+            FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x32:rate=30",
+            "-frames:v", "12", "-vf", "setpts='if(lt(N,6),N,6+(N-6)*2)/(30*TB)'",
+            "-fps_mode", "vfr", "-c:v", "mpeg4", "-q:v", "2", str(source),
+        ], check=True, capture_output=True)
+        probe = json.loads(subprocess.check_output([
+            FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_streams", "-of", "json", str(source),
+        ]))["streams"][0]
+        self.assertEqual(probe["r_frame_rate"], "30/1")
+        self.assertNotEqual(probe["avg_frame_rate"], probe["r_frame_rate"])
+        expected = [1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 15, 17]
+        for sink in ("legacy", "file"):
+            with self.subTest(sink=sink):
+                result, output = self.extract(input=str(source), sink=sink, end=-1.0)
+                self.completed(result)
+                self.assertEqual(sorted(path.name for path in output.glob("*.png")),
+                                 [f"frame_{number:03d}.png" for number in expected])
+                if sink == "legacy":
+                    frames = self.metadata(output)["frames"]
+                    self.assertEqual([frame["source_frame"] for frame in frames], expected)
+                    self.assertTrue(all((output / frame["file"]).exists() for frame in frames))
+
     def test_all_explicit_rotations_preserve_full_pixels(self):
         for rotation in (90, 180, 270):
             with self.subTest(rotation=rotation):

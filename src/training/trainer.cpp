@@ -1497,6 +1497,28 @@ namespace lfs::training {
             params_.optimization.invert_masks = false;
         }
 
+        // AlphaConsistent evaluation does not use masks. With eval_all, the
+        // validation cameras are already included in the training set.
+        const bool validate_eval = !opt.eval_all && opt.mask_mode != lfs::core::param::MaskMode::AlphaConsistent;
+        for (const auto* dataset : {train_dataset_.get(), validate_eval ? val_dataset_.get() : nullptr}) {
+            if (!dataset)
+                continue;
+            for (const auto& cam : dataset->get_cameras()) {
+                if (!cam || cam->has_in_memory_mask() || !cam->has_mask())
+                    continue;
+                // Masks can be enabled after loading. Compare actual file sizes,
+                // since camera metadata may describe a larger source image.
+                const auto [img_w, img_h, img_c] = lfs::core::get_image_info(cam->image_path());
+                const auto [mask_w, mask_h, mask_c] = lfs::core::get_image_info(cam->mask_path());
+                if (img_w != mask_w || img_h != mask_h) {
+                    return std::unexpected(std::format(
+                        "Mask '{}' is {}x{} but image '{}' is {}x{}",
+                        lfs::core::path_to_utf8(cam->mask_path().filename()), mask_w, mask_h,
+                        cam->image_name(), img_w, img_h));
+                }
+            }
+        }
+
         size_t alpha_count = 0;
         size_t masks_found = 0;
         for (const auto& cam : train_dataset_->get_cameras()) {
@@ -3897,6 +3919,8 @@ namespace lfs::training {
         const std::uint64_t request_id,
         const std::string_view message) {
         if (request_id == 0) {
+            // Synchronous and scheduled saves have no tracked request ID.
+            last_project_writer_error_ = message;
             return;
         }
         if (last_completed_project_request_id_ >=
@@ -3926,14 +3950,19 @@ namespace lfs::training {
     void Trainer::abandon_pending_project_requests(
         const std::string_view reason) {
         std::lock_guard lock(project_snapshot_mutex_);
-        if (requested_project_request_id_) {
+        // Zero also denotes an unused slot; only terminalize tracked requests.
+        if (requested_project_request_id_ && *requested_project_request_id_ != 0) {
             fail_project_request_locked(
                 *requested_project_request_id_, reason);
         }
-        fail_project_request_locked(
-            prepared_project_request_id_, reason);
-        fail_project_request_locked(
-            prestaged_project_request_id_, reason);
+        if (prepared_project_request_id_ != 0) {
+            fail_project_request_locked(
+                prepared_project_request_id_, reason);
+        }
+        if (prestaged_project_request_id_ != 0) {
+            fail_project_request_locked(
+                prestaged_project_request_id_, reason);
+        }
         requested_project_path_.reset();
         requested_project_preview_png_.clear();
         requested_project_request_id_.reset();
@@ -5830,16 +5859,26 @@ namespace lfs::training {
                         return lfs::make_error(lfs::ErrorInit{
                             .code = lfs::ErrorCode::InvalidArgument,
                             .domain = lfs::ErrorDomain::Training,
-                            .user_message = "Distorted images detected. Use --gut or --undistort to train on cameras with distortion.",
+                            .user_message = params_.optimization.headless
+                                                ? "Distorted images detected. Use --gut or --undistort to train on cameras with distortion."
+                                                : "Distorted images detected. Enable GUT or Undistort in the Training panel to train on cameras with distortion.",
                             .detection = LFS_SOURCE_SITE_CURRENT(),
+                            .fields = params_.optimization.headless
+                                          ? lfs::SmallFields{}
+                                          : lfs::SmallFields{}.add("message_key", std::string_view("messages.err_distorted_images")),
                         });
                     }
                     if (cam->camera_model_type() != core::CameraModelType::PINHOLE) {
                         return lfs::make_error(lfs::ErrorInit{
                             .code = lfs::ErrorCode::InvalidArgument,
                             .domain = lfs::ErrorDomain::Training,
-                            .user_message = "Use --gut or --undistort to train on cameras with non-pinhole model.",
+                            .user_message = params_.optimization.headless
+                                                ? "Use --gut or --undistort to train on cameras with non-pinhole model."
+                                                : "Enable GUT or Undistort in the Training panel to train on cameras with a non-pinhole model.",
                             .detection = LFS_SOURCE_SITE_CURRENT(),
+                            .fields = params_.optimization.headless
+                                          ? lfs::SmallFields{}
+                                          : lfs::SmallFields{}.add("message_key", std::string_view("messages.err_non_pinhole")),
                         });
                     }
                 }

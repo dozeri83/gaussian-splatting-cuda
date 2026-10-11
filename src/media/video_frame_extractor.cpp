@@ -380,7 +380,9 @@ namespace lfs::io {
             case AV_CODEC_ID_VP8:
                 return "vp8_cuvid";
             case AV_CODEC_ID_VP9:
-                return "vp9_cuvid";
+                // Keep FFmpeg's VP9 presentation timing, including show-existing frames,
+                // while using its CUDA hardware acceleration instead of the CUVID parser.
+                return "vp9";
             case AV_CODEC_ID_AV1:
                 return "av1_cuvid";
             case AV_CODEC_ID_MPEG1VIDEO:
@@ -398,6 +400,7 @@ namespace lfs::io {
 
         struct HwDecoderState {
             AVPixelFormat pixel_format = AV_PIX_FMT_NONE;
+            bool* using_hardware = nullptr;
         };
 
         AVPixelFormat get_hw_format(AVCodecContext* context, const AVPixelFormat* pix_fmts) {
@@ -421,6 +424,22 @@ namespace lfs::io {
                 }
             }
 #endif
+            return AV_PIX_FMT_NONE;
+        }
+
+        AVPixelFormat get_vp9_format(AVCodecContext* context, const AVPixelFormat* formats) {
+            const auto& state = *static_cast<const HwDecoderState*>(context->opaque);
+            const auto hardware_format = get_hw_format(context, formats);
+            auto& using_hardware = *state.using_hardware;
+            using_hardware = hardware_format != AV_PIX_FMT_NONE && hardware_format == state.pixel_format;
+            if (using_hardware)
+                return hardware_format;
+            // Native decoders negotiate hardware support on the first frame, not at open.
+            for (const AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
+                const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(*format);
+                if (descriptor && !(descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL))
+                    return *format;
+            }
             return AV_PIX_FMT_NONE;
         }
 
@@ -1091,6 +1110,11 @@ namespace lfs::io {
                         }
                         codec_ctx->opaque = &hw_decoder_state;
                         codec_ctx->get_format = get_hw_format;
+                        if (codec_id == AV_CODEC_ID_VP9) {
+                            codec_ctx->pkt_timebase = video_stream->time_base;
+                            hw_decoder_state.using_hardware = &using_hw_decode;
+                            codec_ctx->get_format = get_vp9_format;
+                        }
                     } else {
                         const unsigned int hardware_threads = std::max(1U, std::thread::hardware_concurrency());
                         codec_ctx->thread_count = std::min(MAX_SW_DECODE_THREADS,
@@ -1138,6 +1162,10 @@ namespace lfs::io {
                     video_fps = validFrameRate(video_stream->r_frame_rate);
                 if (video_fps <= 0.0)
                     video_fps = 30.0;
+                // Source numbers use the timestamp grid, not the average cadence of a VFR stream.
+                double source_frame_fps = validFrameRate(video_stream->r_frame_rate);
+                if (source_frame_fps <= 0.0)
+                    source_frame_fps = video_fps;
                 double video_duration = validDurationSeconds(fmt_ctx->duration, AVRational{1, AV_TIME_BASE});
                 if (video_duration <= 0.0)
                     video_duration = validDurationSeconds(video_stream->duration, video_stream->time_base);
@@ -1457,7 +1485,7 @@ namespace lfs::io {
                         info.source_component_depth = description->comp[0].depth;
                     info.decode_index = static_cast<uint64_t>(decoded_frame_count - 1);
                     info.relative_seconds = seconds;
-                    info.legacy_source_frame = std::max(1, static_cast<int>(std::llround(seconds * video_fps)) + 1);
+                    info.legacy_source_frame = std::max(1, static_cast<int>(std::llround(seconds * source_frame_fps)) + 1);
                     return info;
                 };
                 const auto emit_rgb = [&](int width, int height, const void* pixels, media::FrameInfo info, double score) {
@@ -1585,7 +1613,7 @@ namespace lfs::io {
 
                 const auto source_frame_for_time = [&](const double frame_time) {
                     return std::max(
-                        1, static_cast<int>(std::llround(frame_time * video_fps)) + 1);
+                        1, static_cast<int>(std::llround(frame_time * source_frame_fps)) + 1);
                 };
 
                 auto reserve_output_filename = [&](const std::filesystem::path& filename,
@@ -2180,7 +2208,15 @@ namespace lfs::io {
                 // Flush remaining window candidates at end of video
                 flush_window();
 
+                // Correct estimates and delayed encoder batches at completion. Synchronous
+                // writes already reported an exact final total; keep that callback sequence.
+                const int completed_count = written_count + skipped_count;
+                if (params.progress_callback &&
+                    (gpu_encoding_enabled || completed_count != estimated_total || completed_count == 0))
+                    params.progress_callback(completed_count, completed_count, skipped_count);
+
                 if (!custom_sink && params.generate_metadata && !saved_frames.empty()) {
+                    const std::filesystem::path meta_path = params.output_dir / "extraction_metadata.json";
                     try {
                         nlohmann::json root;
                         root["schema_version"] = 2;
@@ -2376,8 +2412,6 @@ namespace lfs::io {
                                               {"sharpness_score", f.sharpness_score}});
                         }
 
-                        const std::filesystem::path meta_path =
-                            params.output_dir / "extraction_metadata.json";
                         if (float_output) {
                             media::ExrOutputOptions options;
                             options.overwrite = params.overwrite_metadata;
@@ -2391,13 +2425,16 @@ namespace lfs::io {
                             }
                         } else {
                             std::ofstream meta_file(meta_path, std::ios::binary);
-                            if (meta_file)
-                                meta_file << root.dump(2);
+                            meta_file << root.dump(2);
+                            meta_file.close();
+                            if (!meta_file)
+                                throw std::runtime_error("Could not write output file");
                         }
                     } catch (const std::exception& e) {
                         if (float_output)
                             throw;
-                        LOG_WARN("Failed to write extraction metadata: {}", e.what());
+                        throw std::runtime_error("Failed to write extraction metadata " +
+                                                 lfs::core::path_to_utf8(meta_path) + ": " + e.what());
                     }
                 }
 

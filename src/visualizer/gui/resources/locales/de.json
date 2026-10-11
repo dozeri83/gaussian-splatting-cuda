@@ -824,12 +824,20 @@
     "button.stop": "Training stoppen",
     "button.reset": "Training zurücksetzen",
     "button.add": "Hinzufügen",
-    "button.remove": "Entfernen"
+    "button.remove": "Entfernen",
+    "conflict.strategy_gut_start_message": "GUT kann nicht mit der igs+-Strategie verwendet werden. Wählen Sie eine Aktion, um das Training zu starten.",
+    "conflict.strategy_gut_strategy_message": "Diese Strategie ist nicht mit GUT kompatibel. GUT deaktivieren, um zu wechseln?"
   },
   "rendering": "Rendering",
   "scene": {
     "streamed_badge": "gestreamt",
     "streamed_badge_tooltip": "Gestreamtes Modell: Die Detailstufe folgt der Ansicht. Schreibgeschützt.",
+    "summary_model_one": "{} Modell",
+    "summary_model_few": "{} Modelle",
+    "summary_model_other": "{} Modelle",
+    "summary_node_one": "{} Knoten",
+    "summary_node_few": "{} Knoten",
+    "summary_node_other": "{} Knoten",
     "add_ply": "PLY hinzufügen...",
     "add_group": "Gruppe hinzufügen",
     "add_group_ellipsis": "Gruppe hinzufügen...",
@@ -1083,6 +1091,16 @@
     "input": "Eingabe",
     "key_bindings": "Tastenbelegung",
     "camera_navigation": "Kameranavigation",
+    "new_project_navigation_up": "Vertikale für neue Projekte",
+    "new_project_navigation_help": "Gilt nur für neue Projekte. Bestehende Projekte behalten ihre gespeicherten Einstellungen.",
+    "new_project_align_grid": "Raster in neuen Projekten ausrichten",
+    "navigation_project_hint": "Projekt speichern, um die Auswahl zu behalten. Datenkoordinaten bleiben unverändert.",
+    "navigation_up_axis": "Vertikalachse",
+    "navigation_up_legacy_y": "Y-up (Standard)",
+    "navigation_up_data_z": "+Z oben (Datenkoordinaten)",
+    "navigation_up_help": "Wird im Projekt gespeichert. Ändert nur die Navigation; Datenkoordinaten und Maßstab bleiben unverändert.",
+    "align_navigation_grid": "Raster an Vertikale ausrichten",
+    "align_grid_short": "Ausrichten",
     "navigation_mode": "Navigationsmodus",
     "zoom_speed": "Zoomgeschwindigkeit",
     "zoom_speed_tooltip": "Standardgeschwindigkeit für das Zoomen der Kamera mit dem Mausrad.",
@@ -1534,9 +1552,9 @@
         "custom": "Zuletzt geladenes benutzerdefiniertes HDRI"
       },
       "grid_plane": {
-        "yz": "Gitter in der YZ-Ebene anzeigen (Rechte Ansicht)",
-        "xz": "Gitter in der XZ-Ebene anzeigen (Draufsicht)",
-        "xy": "Gitter in der XY-Ebene anzeigen (Vorderansicht)"
+        "yz": "Gitter in der YZ-Ebene anzeigen",
+        "xz": "Gitter in der XZ-Ebene anzeigen",
+        "xy": "Gitter in der XY-Ebene anzeigen"
       },
       "sh_degree": {
         "0": "Nur diffus — keine blickrichtungsabhängige Beleuchtung",
@@ -1847,7 +1865,8 @@
     "action.view_frame_all": "Alles einpassen",
     "action.toggle_quad_view": "Vier Ansichten umschalten",
     "action.toggle_maximize_area": "Bereich maximieren",
-    "action.toggle_node_editor": "Node-Editor umschalten"
+    "action.toggle_node_editor": "Node-Editor umschalten",
+    "action.toggle_independent_split_view": "Unabhängige geteilte Ansicht umschalten"
   },
   "debug_info": {
     "clear_history": "Verlauf löschen",
@@ -2298,6 +2317,8 @@
     "strategy_default": "Standard",
     "split": "Teilung:",
     "mcp_name": "MCP",
+    "ui_fps_tooltip": "Pro Sekunde angezeigte Benutzeroberflächen-Frames.",
+    "view_fps_tooltip": "Pro Sekunde gerenderte Frames der 3D-Ansicht. Eine statische Ansicht kann 0 anzeigen, während die Oberfläche weiterhin reagiert.",
     "ui": "UI",
     "view": "Ansicht",
     "renderer_backend": "Renderer",
@@ -2651,9 +2672,9 @@
     "solid_color": "Einheitliche Farbe",
     "equirectangular_hdri": "Equirectangular-HDRI",
     "off": "Aus",
-    "grid_plane_yz": "YZ (Rechts)",
-    "grid_plane_xz": "XZ (Oben)",
-    "grid_plane_xy": "XY (Vorne)",
+    "grid_plane_yz": "YZ",
+    "grid_plane_xz": "XZ",
+    "grid_plane_xy": "XY",
     "psnr": "PSNR",
     "psnr_ssim": "PSNR + SSIM",
     "manual": "Manuell",
@@ -2741,7 +2762,9 @@
     "perf_hud_tooltip": "Leistungs-HUD ein- oder ausblenden",
     "input_mouse_tooltip": "Mausnavigation: mittlere Maustaste ziehen dreht die Ansicht, rechte Maustaste ziehen verschiebt, Mausrad zoomt. Klicken zum Wechseln",
     "input_trackpad_tooltip": "Trackpad-Navigation: Wischen mit zwei Fingern dreht die Ansicht, Umschalt+Wischen verschiebt, Aufziehen/Zuziehen oder Strg+Wischen zoomt. Klicken zum Wechseln",
-    "input_automatic_tooltip": "Automatische Navigation: Trackpad-Gesten auf dem Trackpad, Zoom mit dem Mausrad. Klicken zum Wechseln"
+    "input_automatic_tooltip": "Automatische Navigation: Trackpad-Gesten auf dem Trackpad, Zoom mit dem Mausrad. Klicken zum Wechseln",
+    "independent_split_view": "Unabhängige geteilte Ansicht",
+    "exit_independent_split_view": "Unabhängige geteilte Ansicht verlassen"
   },
   "runtime": {
     "environment_map_failed": "Die Umgebungskarte „{}“ konnte nicht gelesen werden. Die bisherige Umgebung wurde beibehalten.",
@@ -2927,12 +2950,13 @@
     "right_click_to_add": "Rechtsklick zum Hinzufügen...",
     "training_complete": "Training abgeschlossen",
     "training_stopped": "Training gestoppt",
+    "training_stopped_body": "Training wurde bei Iteration {} vom Benutzer gestoppt.\n\nSpeichern Sie das Projekt, um diesen Zustand zu behalten. Öffnen Sie das gespeicherte Projekt erneut, um das Training fortzusetzen.",
     "training_error": "Trainingsfehler",
     "param_manager_unavailable": "ParameterManager nicht verfügbar",
     "failed_to_load_params": "Parameter laden fehlgeschlagen:",
-    "err_distorted_images": "Verzerrte Bilder erkannt. Aktivieren Sie --gut oder --undistort, um mit verzerrten Kameras zu trainieren.",
+    "err_distorted_images": "Verzerrte Bilder erkannt. Aktivieren Sie GUT oder Entzerren im Trainingspanel, um mit Kameras mit Verzerrung zu trainieren.",
     "err_ortho_not_supported": "Training mit orthographischem Kameramodell wird noch nicht unterstützt.",
-    "err_non_pinhole": "Aktivieren Sie --gut oder --undistort, um mit Nicht-Pinhole-Kameras zu trainieren."
+    "err_non_pinhole": "Aktivieren Sie GUT oder Entzerren im Trainingspanel, um mit Kameras ohne Lochkameramodell zu trainieren."
   },
   "projects.gallery.sidebar.title": "Galerie",
   "projects.gallery.sidebar.refresh": "Galerie prüfen",
@@ -5208,5 +5232,6 @@
   "node_editor.capture_view": "Ansicht speichern",
   "node_editor.curve_hint": "Punkte ziehen; klicken zum Hinzufügen, doppelklicken oder Entf zum Löschen.",
   "node_editor.ramp_hint": "Marken ziehen; klicken zum Hinzufügen, doppelklicken oder Entf zum Löschen. Marke auswählen, um RGBA zu ändern.",
-  "node_editor.keyframe_hint": "Schlüsselbild einfügen · Strg+Klick oder I beim Darüberfahren"
+  "node_editor.keyframe_hint": "Schlüsselbild einfügen · Strg+Klick oder I beim Darüberfahren",
+  "toolbar.asset_manager": "Projekte"
 }

@@ -326,7 +326,40 @@ namespace lfs::vis {
     }
 
     void RenderingManager::handleSceneChanged(const uint32_t mutation_flags) {
-        markDirty(dirtyMaskForSceneMutations(mutation_flags), lfs::vis::FrameReason::SceneChange);
+        auto dirty = dirtyMaskForSceneMutations(mutation_flags);
+        using Mutation = lfs::core::Scene::MutationType;
+        if (hasSceneMutation(mutation_flags, Mutation::VISIBILITY_CHANGED) ||
+            hasSceneMutation(mutation_flags, Mutation::NODE_REPARENTED)) {
+            // Hold across cancellation and mode change to exclude drag release sequences.
+            // Acquire transition before settings/history locks; release settings before
+            // pushing history.
+            const auto transition_lock = acquireDepthWindowTransitionLock(view_source_.activeView());
+            const SplitViewMode current_mode = getSettings().split_view_mode;
+            if (splitViewUsesPLYComparison(current_mode)) {
+                if (auto* const scene_manager = services().sceneOrNull()) {
+                    const auto visible_nodes = scene_manager->getScene().getVisibleSplatNodeSlots();
+                    if (visible_nodes.size() < 2) {
+                        cancelDepthWindowDragBeforeSplitModeChange(
+                            current_mode, SplitViewMode::Disabled);
+                    }
+                }
+            }
+
+            SplitViewService::ModeChangeResult result;
+            {
+                std::lock_guard<std::mutex> lock(settings_mutex_);
+                auto settings = activeSettingsLocked();
+                const SplitViewMode previous_mode = settings.split_view_mode;
+                result = this->state().split_view_service_.handleVisiblePLYsChanged(settings, services().sceneOrNull());
+                applyDepthWindowModeTransitionLocked(previous_mode, result.current_mode);
+                storeActiveSettingsLocked(settings);
+            }
+            applySplitModeChange(result);
+            if (result.mode_changed) {
+                dirty |= DirtyFlag::SPLIT_VIEW;
+            }
+        }
+        markDirty(dirty, lfs::vis::FrameReason::SceneChange);
     }
 
     void RenderingManager::handleSceneCleared() {
@@ -385,8 +418,8 @@ namespace lfs::vis {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             auto settings = activeSettingsLocked();
             const SplitViewMode previous_mode = settings.split_view_mode;
-            result = this->state().split_view_service_.handlePLYRemoved(settings,
-                                                                        services().sceneOrNull());
+            result = this->state().split_view_service_.handleVisiblePLYsChanged(settings,
+                                                                                services().sceneOrNull());
             applyDepthWindowModeTransitionLocked(previous_mode, result.current_mode);
             markDirty(DirtyFlag::SPLATS | DirtyFlag::MESH | DirtyFlag::OVERLAY | DirtyFlag::SPLIT_VIEW, lfs::vis::FrameReason::SceneChange);
 

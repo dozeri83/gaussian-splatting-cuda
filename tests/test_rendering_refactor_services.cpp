@@ -4604,6 +4604,120 @@ namespace lfs::vis {
         EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::Disabled);
     }
 
+    TEST_F(RenderingManagerEventsTest, HidingComparisonModelDisablesSplitAndResetsOffset) {
+        SceneManager scene_manager;
+        services().set(&scene_manager);
+        screen::ScreenService manager_views;
+        RenderingManager manager{manager_views};
+        auto& scene = scene_manager.getScene();
+        scene.addSplat("first", makeTestSplat(0.0f));
+        const auto second = scene.addSplat("second", makeTestSplat(1.0f));
+        lfs::core::events::cmd::ToggleSplitView{}.emit();
+        auto settings = manager.getSettings();
+        settings.split_view_offset = 3;
+        settings.split_position = 0.35f;
+        manager.updateSettings(settings);
+        manager.retainVisibleViews({manager_views.activeView()});
+        (void)manager.frameDemandLedger().plan(FrameClock::now());
+
+        scene.setNodeVisibility(second, false);
+
+        EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::Disabled);
+        EXPECT_EQ(manager.getSettings().split_view_offset, 0u);
+        EXPECT_FLOAT_EQ(manager.getSettings().split_position, 0.35f);
+        EXPECT_TRUE(manager.frameDemandLedger().plan(FrameClock::now()).present);
+        EXPECT_TRUE(manager.frameDemandLedger().plan(FrameClock::now()).empty());
+        scene.setNodeVisibility(second, true);
+        EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::Disabled);
+        lfs::core::events::cmd::ToggleSplitView{}.emit();
+        EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::PLYComparison);
+    }
+
+    TEST_F(RenderingManagerEventsTest, ComparisonUsesEffectiveVisibilityAfterGroupChanges) {
+        SceneManager scene_manager;
+        services().set(&scene_manager);
+        screen::ScreenService manager_views;
+        RenderingManager manager{manager_views};
+        auto& scene = scene_manager.getScene();
+        const auto group = scene.addGroup("group");
+        scene.addSplat("first", makeTestSplat(0.0f));
+        const auto second = scene.addSplat("second", makeTestSplat(1.0f));
+        ASSERT_TRUE(scene.reparent(second, group));
+        lfs::core::events::cmd::ToggleSplitView{}.emit();
+        scene.setNodeVisibility(group, false);
+        EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::Disabled);
+
+        ASSERT_TRUE(scene.reparent(second, lfs::core::NULL_NODE));
+        lfs::core::events::cmd::ToggleSplitView{}.emit();
+        ASSERT_EQ(manager.getSettings().split_view_mode, SplitViewMode::PLYComparison);
+        ASSERT_TRUE(scene.reparent(second, group));
+        EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::Disabled);
+    }
+
+    TEST_F(RenderingManagerEventsTest, VisibilityKeepsComparisonWhileTwoModelsRemain) {
+        SceneManager scene_manager;
+        services().set(&scene_manager);
+        screen::ScreenService manager_views;
+        RenderingManager manager{manager_views};
+        auto& scene = scene_manager.getScene();
+        scene.addSplat("first", makeTestSplat(0.0f));
+        scene.addSplat("second", makeTestSplat(1.0f));
+        const auto third = scene.addSplat("third", makeTestSplat(2.0f));
+        lfs::core::events::cmd::ToggleSplitView{}.emit();
+        auto settings = manager.getSettings();
+        settings.split_view_offset = 1;
+        settings.split_position = 0.35f;
+        manager.updateSettings(settings);
+        for (const bool visible : {false, true}) {
+            scene.setNodeVisibility(third, visible);
+            EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::PLYComparison);
+            EXPECT_EQ(manager.getSettings().split_view_offset, 1u);
+            EXPECT_FLOAT_EQ(manager.getSettings().split_position, 0.35f);
+        }
+        scene.removeNode("third");
+        lfs::core::events::state::PLYRemoved{}.emit();
+        EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::PLYComparison);
+        scene.removeNode("second");
+        lfs::core::events::state::PLYRemoved{}.emit();
+        EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::Disabled);
+    }
+
+    TEST_F(RenderingManagerEventsTest, VisibilityPreservesOtherViewModes) {
+        SceneManager scene_manager;
+        addDatasetCameraWithImage(scene_manager);
+        services().set(&scene_manager);
+        screen::ScreenService manager_views;
+        RenderingManager manager{manager_views};
+        auto& scene = scene_manager.getScene();
+        const auto model = scene.addSplat("model", makeTestSplat(0.0f));
+        const auto active = manager_views.activeView();
+        for (const bool independent : {false, true}) {
+            if (independent) {
+                const auto second = manager_views.screen().split(
+                    screen::AreaId{active}, screen::SplitAxis::Columns, 0.5f);
+                ASSERT_TRUE(manager_views.viewSettings(second.value).has_value());
+            }
+            const auto view_ids = manager_views.screen().views();
+            for (const auto mode : {SplitViewMode::Disabled, SplitViewMode::GTComparison}) {
+                auto settings = manager.getSettings();
+                settings.split_view_mode = mode;
+                manager.updateSettings(settings);
+                const auto before = manager.getSettings();
+                for (const bool visible : {false, true}) {
+                    scene.setNodeVisibility(model, visible);
+                    const auto after = manager.getSettings();
+                    EXPECT_EQ(manager_views.activeView(), active);
+                    EXPECT_EQ(manager_views.screen().views(), view_ids);
+                    EXPECT_EQ(after.split_view_mode, before.split_view_mode);
+                    EXPECT_EQ(after.equirectangular, before.equirectangular);
+                    EXPECT_EQ(after.show_camera_frustums, before.show_camera_frustums);
+                    EXPECT_EQ(after.split_view_offset, before.split_view_offset);
+                    EXPECT_EQ(after.split_position, before.split_position);
+                }
+            }
+        }
+    }
+
     TEST_F(RenderingManagerEventsTest, RejectedPlyComparisonPreservesIndependentView) {
         SceneManager scene_manager;
         services().set(&scene_manager);

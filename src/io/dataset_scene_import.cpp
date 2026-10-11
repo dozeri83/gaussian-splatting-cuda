@@ -120,10 +120,12 @@ namespace lfs::training {
             } else if (data.point_cloud && data.point_cloud->size() > 0) {
                 point_cloud = data.point_cloud;
             } else {
+                LOG_WARN("No sparse points available; using random initialization with {} points and extent {}",
+                         params.optimization.init_num_pts, params.optimization.init_extent);
+                point_cloud = createRandomPointCloud(params);
                 if (verbose) {
-                    LOG_INFO("No point cloud, using random initialization");
+                    LOG_INFO("Adding {} random points to scene", point_cloud->size());
                 }
-                point_cloud = createRandomPointCloud();
             }
 
             scene.setInitialPointCloud(point_cloud);
@@ -465,6 +467,7 @@ namespace lfs::training {
             migrated.set_active_sh_degree(active_sh, std::move(shN_bounds));
             if (deleted.is_valid()) {
                 migrated.deleted() = std::move(deleted);
+                migrated.refresh_deleted_count();
             }
             if (densification_info.is_valid()) {
                 migrated._densification_info = std::move(densification_info);

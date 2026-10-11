@@ -26,7 +26,7 @@ def test_project_folder_remove_label_uses_sentence_case_in_all_locales():
         "zh": "移除文件夹",
     }
     locales = Path(__file__).resolve().parents[2] / "src/visualizer/gui/resources/locales"
-    assert {path.stem: json.loads(path.read_text())["projects"]["action.remove_folder"]
+    assert {path.stem: json.loads(path.read_text(encoding="utf-8"))["projects"]["action.remove_folder"]
             for path in locales.glob("*.json")} == expected
 
 
@@ -399,6 +399,23 @@ def preferences_panel_module(monkeypatch):
         return False
 
     lf_stub.get_render_settings = lambda: state.render_settings
+    state.navigation_up_axis = "legacy_y"
+    state.navigation_up_calls = []
+    state.new_project_axis = "legacy_y"
+    state.new_project_align_grid = True
+    state.new_project_navigation_calls = []
+    lf_stub.get_new_project_navigation_up_axis = lambda: state.new_project_axis
+    lf_stub.get_new_project_align_grid = lambda: state.new_project_align_grid
+    def set_new_project_navigation_defaults(axis, align_grid):
+        state.new_project_axis = axis
+        state.new_project_align_grid = align_grid
+        state.new_project_navigation_calls.append((axis, align_grid))
+    lf_stub.set_new_project_navigation_defaults = set_new_project_navigation_defaults
+    lf_stub.get_navigation_up_axis = lambda: state.navigation_up_axis
+    def set_navigation_up_axis(axis, align_grid=False):
+        state.navigation_up_axis = axis
+        state.navigation_up_calls.append((axis, align_grid))
+    lf_stub.set_navigation_up_axis = set_navigation_up_axis
     lf_stub.get_camera_navigation_mode = lambda: "orbit"
     lf_stub.set_camera_navigation_mode = lambda _mode: None
     lf_stub.get_camera_view_snap_enabled = lambda: False
@@ -1306,6 +1323,9 @@ def test_input_reset_restores_bindings_and_refreshes_rows(
     panel._refresh_selection = lambda: None
     panel._set_zoom_speed(42)
     panel._set_navigation_speed(73)
+    panel._set_navigation_up_index("1")
+    panel._set_new_project_align_grid(False)
+    state.navigation_up_axis = "data_z"
     defaults = {"forward": "W", "backward": "S", "left": "A"}
     bindings = {"forward": "S", "backward": "Unbound", "left": "A"}
     reset_calls = []
@@ -1350,6 +1370,10 @@ def test_input_reset_restores_bindings_and_refreshes_rows(
     reset_input = confirmed and reset_scope != "bindings"
     assert state.zoom_speed == (11 if reset_input else 42)
     assert state.navigation_speed == (10 if reset_input else 73)
+    assert panel._navigation_up_index() == ("0" if reset_input else "1")
+    assert state.new_project_align_grid is reset_input
+    assert state.navigation_up_axis == "data_z"
+    assert state.navigation_up_calls == []
 
 
 @pytest.mark.parametrize("section", ["general", "appearance", "interface", "mcp", "portal"])
@@ -1372,3 +1396,20 @@ def test_other_section_resets_preserve_key_bindings(preferences_panel_module, se
     assert panel._keymap._last_state_key == ("custom bindings",)
     assert state.zoom_speed == 42
     assert state.navigation_speed == 73
+
+
+def test_navigation_defaults_do_not_modify_current_project(preferences_panel_module):
+    module, state = preferences_panel_module
+    panel = module.PreferencesPanel()
+    panel._refresh_selection = lambda: None
+    assert panel._navigation_up_index() == "0"
+    panel._set_navigation_up_index("1")
+    assert state.new_project_navigation_calls == [("data_z", True)]
+    assert panel._navigation_up_index() == "1"
+    panel._set_navigation_up_index("invalid")
+    panel._set_navigation_up_index("2")
+    assert len(state.new_project_navigation_calls) == 1
+    panel._set_new_project_align_grid(False)
+    assert state.new_project_navigation_calls[-1] == ("data_z", False)
+    assert state.navigation_up_calls == []
+    assert state.navigation_up_axis == "legacy_y"

@@ -820,12 +820,20 @@
     "button.stop": "Stop Training",
     "button.reset": "Reset Training",
     "button.add": "Add",
-    "button.remove": "Remove"
+    "button.remove": "Remove",
+    "conflict.strategy_gut_start_message": "GUT cannot be used with igs+ strategy. Choose an action to start training.",
+    "conflict.strategy_gut_strategy_message": "This strategy is incompatible with GUT. Disable GUT to switch?"
   },
   "rendering": "Rendering",
   "scene": {
     "streamed_badge": "streamed",
     "streamed_badge_tooltip": "Streamed model: detail follows the view. Read-only.",
+    "summary_model_one": "{} model",
+    "summary_model_few": "{} models",
+    "summary_model_other": "{} models",
+    "summary_node_one": "{} node",
+    "summary_node_few": "{} nodes",
+    "summary_node_other": "{} nodes",
     "add_ply": "Add PLY...",
     "add_group": "Add Group",
     "add_group_ellipsis": "Add Group...",
@@ -1079,6 +1087,16 @@
     "input": "Input",
     "key_bindings": "Key Bindings",
     "camera_navigation": "Camera Navigation",
+    "new_project_navigation_up": "Vertical for new projects",
+    "new_project_navigation_help": "Applies only to new projects. Existing projects keep their saved settings.",
+    "new_project_align_grid": "Align grid in new projects",
+    "navigation_project_hint": "Save the project to keep this choice. Data coordinates stay unchanged.",
+    "navigation_up_axis": "Up axis",
+    "navigation_up_legacy_y": "Y-up (default)",
+    "navigation_up_data_z": "+Z-up (data coordinates)",
+    "navigation_up_help": "Saved in this project. Changes navigation only; data coordinates and scale stay unchanged.",
+    "align_navigation_grid": "Align grid to navigation vertical",
+    "align_grid_short": "Align",
     "navigation_mode": "Navigation Mode",
     "zoom_speed": "Zoom speed",
     "zoom_speed_tooltip": "Default speed for zooming the camera with the mouse wheel.",
@@ -1532,9 +1550,9 @@
         "custom": "Last loaded custom HDRI"
       },
       "grid_plane": {
-        "yz": "Show grid on the YZ plane (right view)",
-        "xz": "Show grid on the XZ plane (top view)",
-        "xy": "Show grid on the XY plane (front view)"
+        "yz": "Show grid on the YZ plane",
+        "xz": "Show grid on the XZ plane",
+        "xy": "Show grid on the XY plane"
       },
       "sh_degree": {
         "0": "Diffuse only — no view-dependent lighting",
@@ -1845,7 +1863,8 @@
     "action.view_frame_all": "Frame All",
     "action.toggle_quad_view": "Toggle Four Views",
     "action.toggle_maximize_area": "Maximize Area",
-    "action.toggle_node_editor": "Toggle Node Editor"
+    "action.toggle_node_editor": "Toggle Node Editor",
+    "action.toggle_independent_split_view": "Toggle Independent Split View"
   },
   "debug_info": {
     "clear_history": "Clear History",
@@ -2296,6 +2315,8 @@
     "strategy_default": "Default",
     "split": "Split:",
     "mcp_name": "MCP",
+    "ui_fps_tooltip": "Interface frames presented per second.",
+    "view_fps_tooltip": "3D viewport frames rendered per second. A static view can show 0 while the interface remains responsive.",
     "ui": "UI",
     "view": "View",
     "renderer_backend": "Renderer",
@@ -2650,9 +2671,9 @@
     "solid_color": "Solid Color",
     "equirectangular_hdri": "Equirectangular HDRI",
     "off": "Off",
-    "grid_plane_yz": "YZ (Right)",
-    "grid_plane_xz": "XZ (Top)",
-    "grid_plane_xy": "XY (Front)",
+    "grid_plane_yz": "YZ",
+    "grid_plane_xz": "XZ",
+    "grid_plane_xy": "XY",
     "psnr": "PSNR",
     "psnr_ssim": "PSNR + SSIM",
     "manual": "Manual",
@@ -2740,7 +2761,9 @@
     "perf_hud_tooltip": "Show or hide the performance HUD",
     "input_mouse_tooltip": "Mouse navigation: middle-drag orbits, right-drag pans, wheel zooms. Click to change",
     "input_trackpad_tooltip": "Trackpad navigation: two-finger swipe orbits, Shift+swipe pans, pinch or Ctrl+swipe zooms. Click to change",
-    "input_automatic_tooltip": "Automatic navigation: trackpad gestures on the trackpad, wheel zoom on the mouse. Click to change"
+    "input_automatic_tooltip": "Automatic navigation: trackpad gestures on the trackpad, wheel zoom on the mouse. Click to change",
+    "independent_split_view": "Independent Split View",
+    "exit_independent_split_view": "Exit Independent Split View"
   },
   "runtime": {
     "environment_map_failed": "Could not read environment map \"{}\". The previous environment was kept.",
@@ -2926,12 +2949,13 @@
     "right_click_to_add": "Right-click to add...",
     "training_complete": "Training Complete",
     "training_stopped": "Training Stopped",
+    "training_stopped_body": "Training stopped by user at iteration {}.\n\nSave the project to keep this state. Reopen the saved project to resume training.",
     "training_error": "Training Error",
     "param_manager_unavailable": "ParameterManager not available",
     "failed_to_load_params": "Failed to load params:",
-    "err_distorted_images": "Distorted images detected. Enable --gut or --undistort to train on cameras with distortion.",
+    "err_distorted_images": "Distorted images detected. Enable GUT or Undistort in the Training panel to train on cameras with distortion.",
     "err_ortho_not_supported": "Training on cameras with ortho model is not supported yet.",
-    "err_non_pinhole": "Enable --gut or --undistort to train on cameras with non-pinhole model."
+    "err_non_pinhole": "Enable GUT or Undistort in the Training panel to train on cameras with a non-pinhole model."
   },
   "projects.gallery.sidebar.title": "Gallery",
   "projects.gallery.sidebar.refresh": "Check gallery",
@@ -5208,5 +5232,6 @@
   "node_editor.capture_view": "Capture view",
   "node_editor.curve_hint": "Drag points to shape the curve. Click to add; double-click or Delete to remove.",
   "node_editor.ramp_hint": "Drag stops to move them. Click to add; double-click or Delete to remove. Select a stop to edit RGBA.",
-  "node_editor.keyframe_hint": "Insert keyframe · Ctrl+click or I while hovering"
+  "node_editor.keyframe_hint": "Insert keyframe · Ctrl+click or I while hovering",
+  "toolbar.asset_manager": "Projects"
 }

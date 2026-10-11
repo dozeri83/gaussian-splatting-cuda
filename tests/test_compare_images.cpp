@@ -8,12 +8,12 @@
 #include "io/pipelined_image_loader.hpp"
 #include "training/metrics/compare_images.hpp"
 
+#include "core/tensor_backend.hpp"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
-#include <torch/torch.h>
 
 namespace fs = std::filesystem;
 using lfs::core::Camera;
@@ -206,13 +206,41 @@ TEST(CompareImages, ClassifiesTheTestLens) {
               TestLens::Reference);
 }
 
+TEST(CompareImages, DownscaledReferencePreservesExplicitPinholeGrid) {
+    if (!lfs::core::gpu_backend_available(lfs::core::default_gpu_backend()))
+        GTEST_SKIP() << "GPU backend unavailable";
+    install_image_loader();
+    const auto root = fresh_directory("lfs_compare_explicit_grid");
+    const auto reference = root / "reference";
+    const auto test = root / "test";
+    const auto write_dataset = [](const fs::path& dataset, const std::string& calibration) {
+        fs::create_directories(dataset / "images");
+        fs::create_directories(dataset / "sparse" / "0");
+        const std::vector<uint8_t> pixels(320 * 240 * 3, 128);
+        ASSERT_TRUE(lfs::core::save_png(dataset / "images" / "view.png", pixels.data(), 320, 240, 3, 8, 1));
+        std::ofstream(dataset / "sparse" / "0" / "cameras.txt") << "1 " << calibration << '\n';
+        std::ofstream(dataset / "sparse" / "0" / "images.txt") << "1 1 0 0 0 0 0 0 1 view.png\n\n";
+        std::ofstream(dataset / "sparse" / "0" / "points3D.txt").put('\n');
+    };
+    write_dataset(reference, "OPENCV 640 480 500 500 320 240 -0.05 0.01 0 0");
+    write_dataset(test, "PINHOLE 320 240 250 250 160 120");
+    auto params = compare(reference, test, root / "output");
+    params.evaluation.eval_space = EvalSpace::Undistorted;
+    const auto result = lfs::training::compare_image_sets(params, std::nullopt);
+    ASSERT_TRUE(result) << result.error().detail();
+    ASSERT_EQ(result->metrics.views.size(), 1u);
+    EXPECT_EQ(result->metrics.views[0].width, 320);
+    EXPECT_EQ(result->metrics.views[0].height, 240);
+    fs::remove_all(root);
+}
+
 // Catches images above the training width cap being downscaled, a larger test set not being resized to its
 // references, a smaller one being upsampled instead of the references downscaled, identical sets not scoring
 // perfectly, the reports not being written, and a rerun
 // into the same folder keeping the previous run's rows or images.
 TEST(CompareImages, ScoresRealImagesAndResizesTheTestSet) {
-    if (!torch::cuda::is_available())
-        GTEST_SKIP() << "CUDA not available";
+    if (!lfs::core::gpu_backend_available(lfs::core::default_gpu_backend()))
+        GTEST_SKIP() << "GPU backend unavailable";
     install_image_loader();
     const auto reference = copy_images("images_8", "lfs_compare_reference");
     const auto output = fresh_directory("lfs_compare_output");
@@ -275,8 +303,8 @@ TEST(CompareImages, ScoresRealImagesAndResizesTheTestSet) {
 // test camera's own (off-centre, other size and focal length), --undistort for a folder without cameras
 // disagreeing with a dataset that brings those cameras, and --undistort accepted for a set that has cameras.
 TEST(CompareImages, DistortedReferencesCompareInEitherSpace) {
-    if (!torch::cuda::is_available())
-        GTEST_SKIP() << "CUDA not available";
+    if (!lfs::core::gpu_backend_available(lfs::core::default_gpu_backend()))
+        GTEST_SKIP() << "GPU backend unavailable";
     install_image_loader();
     const auto root = fresh_directory("lfs_compare_lens");
     const auto output = root / "output";
@@ -356,8 +384,8 @@ TEST(CompareImages, DistortedReferencesCompareInEitherSpace) {
 // Catches a mask folder or a box mask that does not restrict the scored pixels, masks that need cameras
 // accepted without them, and a test image of another shape compared anyway.
 TEST(CompareImages, MasksAndShapeMismatch) {
-    if (!torch::cuda::is_available())
-        GTEST_SKIP() << "CUDA not available";
+    if (!lfs::core::gpu_backend_available(lfs::core::default_gpu_backend()))
+        GTEST_SKIP() << "GPU backend unavailable";
     install_image_loader();
     const auto reference = copy_images("images_8", "lfs_compare_mask_reference");
     const auto test = copy_images("images_4", "lfs_compare_mask_test");
