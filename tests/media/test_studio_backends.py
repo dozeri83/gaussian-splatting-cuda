@@ -156,6 +156,48 @@ class StudioBackends(unittest.TestCase):
                 mean_error = sum(abs(a - b) for a, b in zip(actual, expected)) / len(actual)
                 self.assertLess(mean_error, 10, f"GPU rotation disagrees with FFmpeg: MAE {mean_error}")
 
+    def test_sparse_seek_preserves_targets_without_repeated_long_gop_decode(self):
+        original_source = self.source
+        self.addCleanup(setattr, self, "source", original_source)
+        for label, gop, variable in (("long", 120, False), ("short", 6, False),
+                                     ("variable", 120, True), ("one-second", 30, False),
+                                     ("two-second", 60, False)):
+            with self.subTest(clip=label):
+                self.source = self.root / f"sparse-{label}.mp4"
+                command = [FFMPEG, "-v", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=128x96:rate=30:duration=4"]
+                if variable:
+                    command += ["-vf", "select=not(eq(mod(n\\,5)\\,1))", "-fps_mode", "vfr"]
+                subprocess.run(command + ["-c:v", "libx264", "-g", str(gop),
+                                          "-keyint_min", str(gop), "-sc_threshold", "0",
+                                          "-pix_fmt", "yuv420p", str(self.source)], check=True, timeout=30)
+                fps = 1 if label == "two-second" else 2 if variable or label == "one-second" else 5
+                _, output = self.invoke(fps=fps, end_seconds=4)
+                metadata = json.loads((output / "extraction_metadata.json").read_text())
+                self.assertEqual(metadata["performance"]["selected_frames"], 4 * fps)
+                probe = json.loads(subprocess.check_output([
+                    FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_frames",
+                    "-show_entries", "frame=best_effort_timestamp_time,key_frame", "-of", "json", str(self.source)]))
+                timestamps = [float(frame["best_effort_timestamp_time"]) for frame in probe["frames"]]
+                for index, frame in enumerate(metadata["frames"]):
+                    expected = next(value for value in timestamps if value + 1e-7 >= index / fps)
+                    self.assertAlmostEqual(frame["timestamp"], expected, places=6)
+                if label == "long":
+                    self.assertLessEqual(metadata["performance"]["decoded_frames"], 150)
+                if label in ("one-second", "two-second"):
+                    # Independent per-target seeking visits the keyframe through
+                    # the first frame at/after the requested time, inclusive.
+                    keyframes = [float(frame["best_effort_timestamp_time"])
+                                 for frame in probe["frames"] if frame.get("key_frame") == 1]
+                    baseline = sum(sum(key <= value <= next(
+                        value for value in timestamps if value + 1e-7 >= index / fps)
+                        for value in timestamps)
+                        for index in range(4 * fps)
+                        for key in [max(value for value in keyframes if value <= index / fps)])
+                    self.assertLessEqual(metadata["performance"]["decoded_frames"], baseline)
+                if label == "short":
+                    self.assertGreater(metadata["processing"]["frame_selection"]["keyframe_seek_count"], 2)
+
     def test_verified_gpu_jpeg_resume(self):
         work = Path(tempfile.mkdtemp(dir=self.root))
         output = work / "frames"

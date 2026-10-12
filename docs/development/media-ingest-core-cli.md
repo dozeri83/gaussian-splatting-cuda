@@ -207,6 +207,14 @@ writer, not checkpoint sink work; use total elapsed time for resume comparisons.
 Accepted-frame and manifest counts include verified retained images as well as
 newly published images; progress describes the replayed selection.
 
+Sparse hardware FPS extraction can continue decoding between nearby targets
+instead of seeking repeatedly into the same GOP. The demuxer index determines
+whether the target keyframe is beyond the retained decoder position; only then
+does another seek help. Without a usable index, observed seek preroll is the
+fallback and is refreshed when forward decoding encounters a keyframe. This applies to ordinary extraction and replay,
+preserves the first-frame-at-or-after-target selection, and does not enable
+sparse seeking for sharpness, interval, software or Dolby Vision paths.
+
 For a new image, the existing writer encodes into the checkpoint directory,
 then an immutable record of the expected encoded hash is atomically published
 before the image is published with no-replace. The shared core publication
