@@ -114,7 +114,7 @@ namespace lfs::vis::gui {
         LFS_VIS_API void updateBackendContent(std::optional<rendering::ViewerBackend> published_backend);
         LFS_VIS_API bool applyHoverTooltip(int doc_w, int bar_h, int maximum_overlay_height,
                                            bool force_position = false);
-        void updateHoverTooltip();
+        LFS_VIS_API void updateHoverTooltip();
         void updateTooltipScheduling();
         void resetTooltip();
         LFS_VIS_API void updateUpscalerContent(const RenderSettings& settings, SceneUpscalerSelection runtime);
