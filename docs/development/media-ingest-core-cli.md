@@ -145,6 +145,27 @@ structured errors use the existing Studio exception translation. The synchronous
 memory convenience call raises on failed extraction; C++ custom sinks can retain
 partial frames and inspect the structured result.
 
+## Extraction manifest publication
+
+The extractor publishes `extraction_metadata.json` through the existing shared
+atomic-file service for both SDR and float output. SDR retains its legacy
+replacement policy; float output retains its explicit metadata overwrite option.
+The existing schemas and frame naming/timestamps are unchanged. This publication
+does not request durable filesystem synchronization.
+
+A write, close or publication failure is an extraction failure. Cancellation
+observed before publication is reported as cancellation. Either leaves the
+previous manifest intact and removes the owned temporary file. Images already
+committed remain available; a failure to publish the manifest does not roll them
+back. Cancellation earlier in extraction still does not publish a partial
+manifest. A pre-existing manifest therefore describes its previous run, not the
+newly interrupted one: callers must use the terminal job/result state rather
+than infer completion from manifest existence or progress alone.
+
+This is per-file publication, not an atomic transaction of a whole sequence,
+a checkpoint/resume protocol or a power-loss durability guarantee. Once a
+manifest is published, later cancellation cannot undo that commit.
+
 ## Verification
 
 Configure the application with its existing preset/toolchain and enable
