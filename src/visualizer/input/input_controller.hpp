@@ -120,6 +120,9 @@ namespace lfs::vis {
         void applyNewProjectNavigationDefaults();
         [[nodiscard]] bool cameraViewSnapEnabled() const { return camera_view_snap_enabled_; }
         void setCameraViewSnapEnabled(bool enabled) { camera_view_snap_enabled_ = enabled; }
+        // When off, wheel, swipe and pinch zoom target the view center as before.
+        [[nodiscard]] bool zoomTowardCursorEnabled() const { return zoom_toward_cursor_enabled_; }
+        void setZoomTowardCursorEnabled(bool enabled) { zoom_toward_cursor_enabled_ = enabled; }
         // Trackpad navigation reads two-finger swipes over the viewport as
         // orbit/pan/zoom. Mouse drags and pinch zoom work in both modes.
         [[nodiscard]] const TrackpadPreferenceState& trackpadPreferences() const { return trackpad_; }
@@ -235,12 +238,13 @@ namespace lfs::vis {
         // Wheel zoom by delta notches at the mouse zoom speed. With a cursor
         // (window pixels) orthographic views keep the point under it fixed and
         // perspective views zoom toward the surface under it; without a cursor,
-        // or over background in perspective, they zoom toward the view center.
+        // or over background in perspective, or with zoom toward cursor turned
+        // off, they zoom toward the view center.
         void zoomViewport(Viewport& target_viewport, float delta,
-                          const std::optional<glm::dvec2>& cursor = std::nullopt);
+                          std::optional<glm::dvec2> cursor = std::nullopt);
         // Trackpad zoom: a factor above 1 zooms in, independent of the wheel speed.
         void zoomViewportBy(Viewport& target_viewport, float factor,
-                            const std::optional<glm::dvec2>& cursor = std::nullopt);
+                            std::optional<glm::dvec2> cursor = std::nullopt);
         // World point of the displayed surface under the cursor, from the last
         // frame's depth; nullopt over background or when depth is unavailable.
         [[nodiscard]] std::optional<glm::vec3> surfacePointUnderCursor(double x, double y) const;
@@ -314,6 +318,7 @@ namespace lfs::vis {
         DragMode drag_mode_ = DragMode::None;
         CameraNavigationMode camera_navigation_mode_ = CameraNavigationMode::Orbit;
         bool camera_view_snap_enabled_ = false;
+        bool zoom_toward_cursor_enabled_ = true;
         TrackpadPreferenceState trackpad_{};
         int trackpad_touches_ = 0;
         int drag_button_ = -1;

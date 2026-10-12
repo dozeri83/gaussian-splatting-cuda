@@ -515,6 +515,7 @@ namespace lfs::vis {
             setCameraNavigationMode(*mode);
         }
         setCameraViewSnapEnabled(loadCameraViewSnapPreference());
+        setZoomTowardCursorEnabled(loadZoomTowardCursorPreference());
 
         // Get initial mouse position
         float fx, fy;
@@ -1937,7 +1938,9 @@ namespace lfs::vis {
     }
 
     void InputController::zoomViewport(Viewport& target_viewport, const float delta,
-                                       const std::optional<glm::dvec2>& cursor) {
+                                       std::optional<glm::dvec2> cursor) {
+        if (!zoom_toward_cursor_enabled_)
+            cursor.reset();
         constexpr float ORTHO_ZOOM_FACTOR = 0.1f;
         if (scaleOrthographicView(target_viewport, 1.0f + delta * ORTHO_ZOOM_FACTOR, cursor))
             return;
@@ -1950,7 +1953,9 @@ namespace lfs::vis {
     }
 
     void InputController::zoomViewportBy(Viewport& target_viewport, const float factor,
-                                         const std::optional<glm::dvec2>& cursor) {
+                                         std::optional<glm::dvec2> cursor) {
+        if (!zoom_toward_cursor_enabled_)
+            cursor.reset();
         if (scaleOrthographicView(target_viewport, factor, cursor))
             return;
         const float fraction = 1.0f - 1.0f / factor;

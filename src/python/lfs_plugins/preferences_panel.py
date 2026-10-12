@@ -221,6 +221,7 @@ class PreferencesPanel(Panel):
         model.bind("navigation_idx", self._navigation_index, self._set_navigation_index)
         model.bind("navigation_up_idx", self._navigation_up_index, self._set_navigation_up_index)
         model.bind("new_project_align_grid", lf.get_new_project_align_grid, self._set_new_project_align_grid)
+        model.bind("zoom_toward_cursor", lf.get_zoom_toward_cursor_enabled, self._set_zoom_toward_cursor)
         model.bind("zoom_speed", lf.ui.get_zoom_speed_preference, self._set_zoom_speed)
         model.bind(
             "pointing_device",
@@ -463,6 +464,7 @@ class PreferencesPanel(Panel):
             lf.get_camera_navigation_mode(),
             lf.get_new_project_navigation_up_axis(),
             lf.get_new_project_align_grid(),
+            lf.get_zoom_toward_cursor_enabled(),
             float(lf.ui.get_zoom_speed_preference()),
             float(lf.ui.get_navigation_speed_preference()),
             tuple(sorted(lf.ui.get_trackpad_preferences().items())),
@@ -885,6 +887,10 @@ class PreferencesPanel(Panel):
 
     def _set_new_project_align_grid(self, enabled):
         lf.set_new_project_navigation_defaults(lf.get_new_project_navigation_up_axis(), bool(enabled))
+        self._refresh_selection()
+
+    def _set_zoom_toward_cursor(self, enabled):
+        lf.set_zoom_toward_cursor_enabled(bool(enabled))
         self._refresh_selection()
 
     def _set_zoom_speed(self, value):
@@ -1700,6 +1706,7 @@ class PreferencesPanel(Panel):
             lf.ui.set_remember_camera_view_snap(False)
             lf.set_camera_navigation_mode("orbit")
             lf.set_camera_view_snap_enabled(False)
+            lf.set_zoom_toward_cursor_enabled(True)
         elif section == "interface":
             if not self._mcp_safe_mode:
                 lf.ui.set_scene_graph_selection_markers(False)
@@ -1731,6 +1738,7 @@ class PreferencesPanel(Panel):
             self._handle.dirty("navigation_idx")
             self._handle.dirty("navigation_up_idx")
             self._handle.dirty("new_project_align_grid")
+            self._handle.dirty("zoom_toward_cursor")
             self._handle.dirty("zoom_speed")
             self._handle.dirty("navigation_speed")
             self._handle.dirty("pointing_device")

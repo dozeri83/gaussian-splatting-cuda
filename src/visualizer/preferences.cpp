@@ -564,6 +564,18 @@ namespace lfs::vis {
         impl_->loadLocked();
         return impl_->values.value("remember_camera_view_snap", false);
     }
+    void UserPreferences::setZoomTowardCursor(const bool enabled) {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->loadLocked();
+        impl_->values["zoom_toward_cursor"] = enabled;
+        impl_->saveLocked();
+    }
+    bool UserPreferences::zoomTowardCursor() {
+        std::scoped_lock lock(impl_->mutex);
+        impl_->loadLocked();
+        const auto it = impl_->values.find("zoom_toward_cursor");
+        return it != impl_->values.end() && it->is_boolean() ? it->get<bool>() : true;
+    }
     void UserPreferences::setSceneGraphSelectionMarkers(const bool enabled) {
         std::scoped_lock lock(impl_->mutex);
         impl_->loadLocked();
@@ -946,6 +958,8 @@ namespace lfs::vis {
     bool loadCameraViewSnapPreference() { return UserPreferences::instance().cameraViewSnap(); }
     void setRememberCameraViewSnapPreference(const bool enabled) { UserPreferences::instance().setRememberCameraViewSnap(enabled); }
     bool rememberCameraViewSnapPreference() { return UserPreferences::instance().rememberCameraViewSnap(); }
+    void saveZoomTowardCursorPreference(const bool enabled) { UserPreferences::instance().setZoomTowardCursor(enabled); }
+    bool loadZoomTowardCursorPreference() { return UserPreferences::instance().zoomTowardCursor(); }
     void saveSceneGraphSelectionMarkersPreference(const bool enabled) {
         UserPreferences::instance().setSceneGraphSelectionMarkers(enabled);
     }
