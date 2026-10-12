@@ -5,9 +5,11 @@ get_filename_component(_media_root "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 
 add_library(lfs_media SHARED
     media_ingest.cpp media_backends.cpp hdr_renderer.cpp decoded_video_frame.cpp
-    media_probe.cpp frame_sink.cpp file_frame_sink.cpp image_output.cpp linear_frame.cpp
+    media_probe.cpp frame_sink.cpp file_frame_sink.cpp resumable_file_sink.cpp image_output.cpp linear_frame.cpp
     video_frame_extractor.cpp video_player.cpp video_encode_session.cpp hdr_tonemap.cpp)
 target_compile_definitions(lfs_media PRIVATE LFS_MEDIA_EXPORTS)
+add_dependencies(lfs_media lfs_git_version)
+target_include_directories(lfs_media PRIVATE "${CMAKE_BINARY_DIR}/include")
 target_compile_features(lfs_media PUBLIC cxx_std_23)
 target_include_directories(lfs_media PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
     PRIVATE "${_media_root}/src")
@@ -16,7 +18,7 @@ if(LFS_HAS_CUDA)
     target_include_directories(lfs_media SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 target_link_libraries(lfs_media PUBLIC lfs_error
-    PRIVATE lfs_image_codecs lfs_file_io lfs_logger TBB::tbb)
+    PRIVATE lfs_image_codecs lfs_file_io lfs_logger TBB::tbb OpenSSL::Crypto)
 target_link_libraries(lfs_media PRIVATE ${FFMPEG_LIBRARIES})
 # Static third-party objects do not obey this target's C++ visibility preset.
 # Export the media namespace only, including in stripped portable builds.

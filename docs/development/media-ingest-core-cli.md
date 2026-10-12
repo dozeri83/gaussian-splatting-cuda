@@ -166,6 +166,79 @@ This is per-file publication, not an atomic transaction of a whole sequence,
 a checkpoint/resume protocol or a power-loss durability guarantee. Once a
 manifest is published, later cancellation cannot undo that commit.
 
+## Verified image-sequence resume
+
+`media-ingest extract ... --resume` and `FileExtraction.resume = true` opt into
+checkpointed file extraction. Defaults and ordinary extraction remain unchanged.
+PNG, JPEG and SDR linear EXR are supported through the existing file writers.
+This option does not resume an interrupted encoded video or a custom memory sink.
+
+The `.media-ingest-checkpoint` directory contains a versioned input/request
+identity and one bounded immutable JSON record per selected image. Input identity
+uses a streaming SHA-256 of the complete input; stream, selection, geometry,
+sharpness, color, output encoding and pipeline/build identity must match. An
+existing extraction without a checkpoint is not adopted. Changed requests,
+malformed checkpoints and modified/truncated output files fail without replacing
+those files. Missing recorded images can be reconstructed only when their
+regenerated encoded bytes match the recorded hash.
+
+Checkpoint hashing uses the project's existing OpenSSL SHA-256 provider through
+a private media dependency. The algorithm, input bytes and checkpoint digest
+format are unchanged; input, selected pixel rows and encoded files are still
+verified in full.
+
+The extractor replays decoding and selection from the original start to preserve
+VFR timestamps, naming, deduplication and sharpness windows. It verifies retained
+file bytes and regenerated selected pixels. Verified images are not re-encoded
+or rewritten. JPEG resume reuses the registered Studio GPU encoder when hardware
+is requested and it can allocate one frame; otherwise a new checkpoint selects
+the existing CPU writer. The standalone CLI has no registered Studio GPU encoder.
+The selected encoder is recorded in the checkpoint identity. CPU checkpoints
+stay CPU when a GPU later becomes available; GPU checkpoints fail explicitly if
+their provider is unavailable. Encoding failures never silently switch providers.
+GPU JPEG bytes pass through the same staging, record-before-image and no-replace
+publication as CPU output. Only missing images are encoded, one frame at a time;
+decoded pixels still pass through host memory for checkpoint verification.
+The existing hardware decode option remains explicit. Input, pixel and retained-output verification still
+cost CPU time and I/O. A verified replay can be slower than a fresh ordinary
+extraction, particularly for JPEG; resume promises verified reuse, not a speedup.
+The extractor's detailed upload/JPEG/file-write timing counters cover its native
+writer, not checkpoint sink work; use total elapsed time for resume comparisons.
+Accepted-frame and manifest counts include verified retained images as well as
+newly published images; progress describes the replayed selection.
+
+For a new image, the existing writer encodes into the checkpoint directory,
+then an immutable record of the expected encoded hash is atomically published
+before the image is published with no-replace. The shared core publication
+primitive renames the staged image on the same filesystem, avoiding a second
+image write. Its older-filesystem hard-link/reservation fallbacks remain shared.
+Empty reservation files left by process death on exFAT are treated as unpublished:
+an initial identity is republished only before any frame record/image exists;
+an empty last record is regenerated; an empty recorded image is reconstructed
+only if its regenerated encoded digest matches. Nonempty corrupt files remain
+errors. Completion checks run before the previous manifest can be replaced.
+Staging cleanup cannot turn a committed image into a failed/unaccounted commit.
+Abandoned staged copies can remain even after a successful replay: retained
+final images return without re-encoding or removing an older staged copy.
+
+Checkpoint frequency is one record per image. Record reads are capped at 16 KiB;
+hashing uses fixed-size buffers. File count grows linearly with selected
+images; decoding, input/pixel hashing, retained-file hashing and staging I/O have a
+cost. The final manifest retains its existing schema and overwrite policy,
+including EXR's explicit overwrite option. Replaying an already completed EXR
+sequence therefore requires `files.exr.overwrite = true` to replace its manifest
+(`--overwrite` in the CLI); retained images still are not overwritten.
+Application build/version participates in checkpoint identity, covering changes
+to the image encoder implementations as well as FFmpeg. Checkpoint format 1
+from the initial implementation is incompatible with format 2; no silent adoption.
+Each retained output is read/hashed once during replay, after pixel verification.
+Checkpoints remain available after
+completion. Resume cannot be combined with stale-output removal. Use one active
+extraction per output directory; concurrent extraction is not a supported mode.
+This assumes trusted local input/output directories: protection against another
+writer swapping files between verification and publication/open is not promised.
+No durable synchronization, global transaction or power-loss guarantee is added.
+
 ## Verification
 
 Configure the application with its existing preset/toolchain and enable

@@ -1356,7 +1356,7 @@ namespace lfs::io {
 
                 cpu_contiguous_buffer = new uint8_t[frame_size];
 
-                if (!custom_sink && params.allow_hardware_decode && params.format == ImageFormat::JPG)
+                if (!custom_sink && params.allow_hardware_decode && params.allow_hardware_encode && params.format == ImageFormat::JPG)
                     gpu_jpeg = media::detail::createGpuJpegEncoder({src_width, src_height,
                                                                     out_width, out_height, estimated_total, params.rotation, using_hw_decode,
                                                                     needs_scale, convert_hdr_to_sdr});
@@ -2215,6 +2215,7 @@ namespace lfs::io {
                     (gpu_encoding_enabled || completed_count != estimated_total || completed_count == 0))
                     params.progress_callback(completed_count, completed_count, skipped_count);
 
+                check_sink(sink.prepareComplete({media::SinkOutcome::Completed, accepted_frames, {}}));
                 if (!custom_sink && params.generate_metadata && !saved_frames.empty()) {
                     const std::filesystem::path meta_path = params.output_dir / "extraction_metadata.json";
                     try {
@@ -2319,7 +2320,7 @@ namespace lfs::io {
                                                  {"output", convert_hdr_to_sdr ? "sRGB transfer, BT.709 primaries, full range, 8-bit dithered" : "source"},
                                              }},
                             {"image_encoder", {
-                                                  {"backend", used_gpu_encoding ? "nvimagecodec_cuda" : "cpu"},
+                                                  {"backend", used_gpu_encoding ? "nvimagecodec_cuda" : sink.imageEncoderBackend()},
                                                   {"batch_size", used_gpu_encoding ? jpeg_batch_size : 1},
                                               }},
                             {"frame_selection", {
