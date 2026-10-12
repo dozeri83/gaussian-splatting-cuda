@@ -1022,6 +1022,8 @@ namespace lfs::vis {
             const float previous_depth_max_z = settings.depth_filter_max.z;
             const auto previous_backend = settings.raster_backend;
             const bool previous_gut = settings.gut;
+            if (settings.environment_map_path != sanitized_settings.environment_map_path)
+                environment_map_path_ = std::make_shared<const std::filesystem::path>(sanitized_settings.environment_map_path);
             settings = sanitized_settings;
             const bool gut_toggle_only = settings.raster_backend == previous_backend &&
                                          settings.gut != previous_gut;
@@ -1094,6 +1096,8 @@ namespace lfs::vis {
     }
 
     void RenderingManager::storeActiveSettingsLocked(const RenderSettings& settings) {
+        if (settings_.environment_map_path != settings.environment_map_path)
+            environment_map_path_ = std::make_shared<const std::filesystem::path>(settings.environment_map_path);
         settings_ = settings.scene();
         view_source_.editViewSettings(view_source_.activeView(), [&](ViewSettings& view) { view = settings.view(); });
     }

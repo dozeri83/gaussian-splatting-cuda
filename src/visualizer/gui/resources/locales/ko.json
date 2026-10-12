@@ -5235,5 +5235,6 @@
   "node_editor.curve_hint": "점을 끌어 조정하세요. 클릭하여 추가하고 두 번 클릭하거나 Delete로 삭제합니다.",
   "node_editor.ramp_hint": "스톱을 끌어 이동하세요. 클릭하여 추가하고 두 번 클릭하거나 Delete로 삭제합니다. 스톱을 선택하면 RGBA를 편집할 수 있습니다.",
   "node_editor.keyframe_hint": "키프레임 삽입 · Ctrl+클릭 또는 포인터를 올리고 I",
-  "toolbar.asset_manager": "프로젝트"
+  "toolbar.asset_manager": "프로젝트",
+  "training.reset_before_strategy_change": "전략을 변경하기 전에 훈련을 초기화하세요."
 }

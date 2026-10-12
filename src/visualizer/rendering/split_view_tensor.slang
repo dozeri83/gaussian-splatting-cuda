@@ -37,6 +37,7 @@ struct Parameters {
     uint rightFilter;
     uint lossVisualization;
     uint exactTexelSampling;
+    uint vectorPadding;
     float2 leftUvScale;
     float2 leftUvClamp;
     float2 rightUvScale;
@@ -61,7 +62,7 @@ float readChannel(Ptr<uint8_t, Access.Read> image, uint width, uint height,
                               : float(image[index]) * (1.0 / 255.0);
 }
 
-float3 sampleLinear(Ptr<uint8_t, Access.Read> image, uint width, uint height,
+float4 sampleLinear(Ptr<uint8_t, Access.Read> image, uint width, uint height,
                     uint channels, uint floatingPoint, uint chw, float2 uv) {
     float2 extent = float2(max(width, 1u), max(height, 1u));
     float2 pixel = clamp(uv * extent - 0.5, 0.0, extent - 1.0);
@@ -69,51 +70,56 @@ float3 sampleLinear(Ptr<uint8_t, Access.Read> image, uint width, uint height,
     uint2 b = min(a + 1u, uint2(max(width, 1u) - 1u, max(height, 1u) - 1u));
     float2 f = frac(pixel);
     uint c1 = min(1u, channels - 1u), c2 = min(2u, channels - 1u);
-    float3 c00 = float3(readChannel(image, width, height, channels, floatingPoint, chw, a.x, a.y, 0),
+    float4 c00 = float4(readChannel(image, width, height, channels, floatingPoint, chw, a.x, a.y, 0),
                         readChannel(image, width, height, channels, floatingPoint, chw, a.x, a.y, c1),
-                        readChannel(image, width, height, channels, floatingPoint, chw, a.x, a.y, c2));
-    float3 c10 = float3(readChannel(image, width, height, channels, floatingPoint, chw, b.x, a.y, 0),
+                        readChannel(image, width, height, channels, floatingPoint, chw, a.x, a.y, c2),
+                        channels >= 4 && (p.exactTexelSampling & 2u) != 0 ? readChannel(image, width, height, channels, floatingPoint, chw, a.x, a.y, 3) : 1.0);
+    float4 c10 = float4(readChannel(image, width, height, channels, floatingPoint, chw, b.x, a.y, 0),
                         readChannel(image, width, height, channels, floatingPoint, chw, b.x, a.y, c1),
-                        readChannel(image, width, height, channels, floatingPoint, chw, b.x, a.y, c2));
-    float3 c01 = float3(readChannel(image, width, height, channels, floatingPoint, chw, a.x, b.y, 0),
+                        readChannel(image, width, height, channels, floatingPoint, chw, b.x, a.y, c2),
+                        channels >= 4 && (p.exactTexelSampling & 2u) != 0 ? readChannel(image, width, height, channels, floatingPoint, chw, b.x, a.y, 3) : 1.0);
+    float4 c01 = float4(readChannel(image, width, height, channels, floatingPoint, chw, a.x, b.y, 0),
                         readChannel(image, width, height, channels, floatingPoint, chw, a.x, b.y, c1),
-                        readChannel(image, width, height, channels, floatingPoint, chw, a.x, b.y, c2));
-    float3 c11 = float3(readChannel(image, width, height, channels, floatingPoint, chw, b.x, b.y, 0),
+                        readChannel(image, width, height, channels, floatingPoint, chw, a.x, b.y, c2),
+                        channels >= 4 && (p.exactTexelSampling & 2u) != 0 ? readChannel(image, width, height, channels, floatingPoint, chw, a.x, b.y, 3) : 1.0);
+    float4 c11 = float4(readChannel(image, width, height, channels, floatingPoint, chw, b.x, b.y, 0),
                         readChannel(image, width, height, channels, floatingPoint, chw, b.x, b.y, c1),
-                        readChannel(image, width, height, channels, floatingPoint, chw, b.x, b.y, c2));
+                        readChannel(image, width, height, channels, floatingPoint, chw, b.x, b.y, c2),
+                        channels >= 4 && (p.exactTexelSampling & 2u) != 0 ? readChannel(image, width, height, channels, floatingPoint, chw, b.x, b.y, 3) : 1.0);
     return lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
 }
 
-float3 samplePanel(Ptr<uint8_t, Access.Read> image, uint width, uint height,
+float4 samplePanel(Ptr<uint8_t, Access.Read> image, uint width, uint height,
                    uint channels, uint floatingPoint, uint chw, float2 uv,
                    float start, float end, uint normalize, uint flipY, uint spatialFilter,
                    float2 uvScale, float2 uvClamp, float2 texcoordScale, float2 texcoordOffset) {
-    if (p.exactTexelSampling != 0) {
+    if ((p.exactTexelSampling & 1u) != 0) {
         uint x = min(uint(uv.x * p.contentWidth), width - 1u);
         uint y = min(uint(uv.y * p.contentHeight), height - 1u);
         if (flipY != 0) y = min(p.contentHeight - 1u - y, height - 1u);
-        return float3(readChannel(image, width, height, channels, floatingPoint, chw, x, y, 0),
+        return float4(readChannel(image, width, height, channels, floatingPoint, chw, x, y, 0),
                       readChannel(image, width, height, channels, floatingPoint, chw, x, y, 1),
-                      readChannel(image, width, height, channels, floatingPoint, chw, x, y, 2));
+                      readChannel(image, width, height, channels, floatingPoint, chw, x, y, 2),
+                      channels >= 4 && (p.exactTexelSampling & 2u) != 0 ? readChannel(image, width, height, channels, floatingPoint, chw, x, y, 3) : 1.0);
     }
     float u = normalize != 0 ? (uv.x - start) / max(end - start, 1e-6) : uv.x;
     float v = flipY != 0 ? 1.0 - uv.y : uv.y;
     float2 st = min((float2(u, v) * texcoordScale + texcoordOffset) * uvScale, uvClamp);
-    float3 center = sampleLinear(image, width, height, channels, floatingPoint, chw, st);
+    float4 center = sampleLinear(image, width, height, channels, floatingPoint, chw, st);
     if (spatialFilter == 0) return center;
     const float strength = 0.18;
     float2 texel = 1.0 / float2(max(width, 1u), max(height, 1u));
-    float3 left = sampleLinear(image, width, height, channels, floatingPoint, chw,
+    float4 left = sampleLinear(image, width, height, channels, floatingPoint, chw,
                                clamp(st - float2(texel.x, 0.0), 0.0, uvClamp));
-    float3 right = sampleLinear(image, width, height, channels, floatingPoint, chw,
+    float4 right = sampleLinear(image, width, height, channels, floatingPoint, chw,
                                 clamp(st + float2(texel.x, 0.0), 0.0, uvClamp));
-    float3 up = sampleLinear(image, width, height, channels, floatingPoint, chw,
+    float4 up = sampleLinear(image, width, height, channels, floatingPoint, chw,
                              clamp(st - float2(0.0, texel.y), 0.0, uvClamp));
-    float3 down = sampleLinear(image, width, height, channels, floatingPoint, chw,
+    float4 down = sampleLinear(image, width, height, channels, floatingPoint, chw,
                                clamp(st + float2(0.0, texel.y), 0.0, uvClamp));
-    float3 sharpened = center * (1.0 + 4.0 * strength) - (left + right + up + down) * strength;
-    return clamp(sharpened, min(center, min(min(left, right), min(up, down))),
-                 max(center, max(max(left, right), max(up, down))));
+    float3 sharpened = center.rgb * (1.0 + 4.0 * strength) - (left.rgb + right.rgb + up.rgb + down.rgb) * strength;
+    return float4(clamp(sharpened, min(center.rgb, min(min(left.rgb, right.rgb), min(up.rgb, down.rgb))),
+                 max(center.rgb, max(max(left.rgb, right.rgb), max(up.rgb, down.rgb)))), center.a);
 }
 
 float3 lossHeatmap(float3 groundTruth, float3 rendered) {
@@ -154,24 +160,30 @@ void composeSplitView(uint3 tid : SV_DispatchThreadID) {
     }
     float2 uv = (px - float2(p.contentX, p.contentY)) /
                 float2(max(p.contentWidth, 1u), max(p.contentHeight, 1u));
-    float3 left = samplePanel(p.left, p.leftWidth, p.leftHeight, p.leftChannels,
+    float4 left = samplePanel(p.left, p.leftWidth, p.leftHeight, p.leftChannels,
                               p.leftFloat, p.leftChw, uv, p.leftStart, p.leftEnd,
                               p.leftNormalize, p.leftFlipY, p.leftFilter,
                               p.leftUvScale, p.leftUvClamp,
                               p.leftTexcoordScale, p.leftTexcoordOffset);
-    float3 right = samplePanel(p.right, p.rightWidth, p.rightHeight, p.rightChannels,
+    float4 right = samplePanel(p.right, p.rightWidth, p.rightHeight, p.rightChannels,
                                p.rightFloat, p.rightChw, uv, p.rightStart, p.rightEnd,
                                p.rightNormalize, p.rightFlipY, p.rightFilter,
                                p.rightUvScale, p.rightUvClamp,
                                p.rightTexcoordScale, p.rightTexcoordOffset);
     if (p.lossVisualization != 0) {
-        writeDestination(tid.xy, lossHeatmap(left, right));
+        writeDestination(tid.xy, lossHeatmap(left.rgb, right.rgb));
         return;
     }
 
     float splitX = float(p.contentX) + saturate(p.splitPosition) * float(p.contentWidth);
     float dividerPixel = float(p.contentX) + floor(p.splitPosition * float(p.contentWidth) + 0.5);
-    float3 color = px.x < dividerPixel ? left : right;
+    float4 panel = px.x < dividerPixel ? left : right;
+    float3 color = panel.rgb;
+    if ((p.exactTexelSampling & 2u) != 0) {
+        uint index = (tid.y * p.destinationWidth + tid.x) * 4u;
+        float3 sky = float3(p.destination[index], p.destination[index + 1], p.destination[index + 2]) / 255.0;
+        color = lerp(sky, color, saturate(panel.a));
+    }
     float distFromSplit = abs(px.x - splitX);
     if (distFromSplit < 2.0) {
         color = float3(0.29, 0.33, 0.42);

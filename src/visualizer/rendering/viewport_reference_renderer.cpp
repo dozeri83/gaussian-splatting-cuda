@@ -351,7 +351,7 @@ namespace lfs::vis {
         desc.split_view.coordinate_extent = split.coordinate_extent;
         desc.split_view.background = split.background;
         const auto panel = [&](const VulkanSplitViewPanel& source, ViewportSplitPanel& dest, RenderTargetId target, size_t index) {
-            dest = {.target = target, .image = source.image, .start_position = source.start_position, .end_position = source.end_position, .normalize_x_to_panel = source.normalize_x_to_panel, .flip_y = source.flip_y, .spatial_filter = source.spatial_filter, .image_size = source.image_size, .allocation_size = source.allocation_size, .uv_scale = source.uv_scale, .uv_clamp_max = source.uv_clamp_max, .texcoord_scale = source.texcoord_scale, .texcoord_offset = source.texcoord_offset};
+            dest = {.target = target, .image = source.image, .start_position = source.start_position, .end_position = source.end_position, .normalize_x_to_panel = source.normalize_x_to_panel, .flip_y = source.flip_y, .spatial_filter = source.spatial_filter, .environment = source.environment, .image_size = source.image_size, .allocation_size = source.allocation_size, .uv_scale = source.uv_scale, .uv_clamp_max = source.uv_clamp_max, .texcoord_scale = source.texcoord_scale, .texcoord_offset = source.texcoord_offset};
             desc.scene_outputs.push_back({.target = target, .color = source.image, .size = source.image_size, .allocation_size = source.allocation_size, .generation = source.external_image_generation, .flip_y = source.flip_y});
             if (source.temporal_input) {
                 desc.split_temporal[index] = ViewportTemporalRequest{target, *source.temporal_input, source.temporal_settings, source.temporal_quality};

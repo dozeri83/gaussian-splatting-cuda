@@ -661,6 +661,29 @@ TEST_F(PythonIntegrationTest, SceneTimeCallbackSupportsSetTickClearAndUnsetTick)
     EXPECT_EQ(clip_times, (std::vector<float>{0.0f, 1.25f}));
 }
 
+TEST_F(PythonIntegrationTest, SceneTimeCallbackIsSharedWithPythonExtension) {
+    const lfs::python::GilAcquire gil;
+    struct SceneTimeCallbackReset {
+        ~SceneTimeCallbackReset() { lfs::python::clear_scene_time_callback(); }
+    } reset;
+
+    ASSERT_EQ(PyRun_SimpleString(
+                  "import lichtfeld as lf\n"
+                  "_scene_time_contract_ticks = []\n"
+                  "lf.on_scene_time(_scene_time_contract_ticks.append)\n"),
+              0);
+    ASSERT_TRUE(lfs::python::has_scene_time_callback());
+    lfs::python::tick_scene_time_callback(0.0f);
+    lfs::python::tick_scene_time_callback(0.5f);
+    lfs::python::tick_scene_time_callback(1.0f);
+    ASSERT_EQ(PyRun_SimpleString(
+                  "assert _scene_time_contract_ticks == [0.0, 0.5, 1.0]\n"
+                  "lf.clear_scene_time()\n"
+                  "del _scene_time_contract_ticks\n"),
+              0);
+    EXPECT_FALSE(lfs::python::has_scene_time_callback());
+}
+
 TEST_F(PythonIntegrationTest, FrameCallbackSupportsReplaceClearAndExpiry) {
     struct FrameCallbackReset {
         ~FrameCallbackReset() { lfs::python::clear_frame_callback(); }
@@ -1188,6 +1211,32 @@ result_values = [1.0 if outcome is lf.ProjectOpenOutcome.RECOVERY_PROMPT_PENDING
     ASSERT_EQ(result.values.size(), 1u);
     EXPECT_FLOAT_EQ(result.values[0], 1.0F);
     EXPECT_EQ(viewer.post_work_calls, 1);
+}
+
+TEST_F(PythonIntegrationTest, StrategyMutationRunsOnViewerThread) {
+    using namespace std::chrono_literals;
+    for (const auto* setter : {"p.set_strategy('mcmc')", "p.set('strategy', 'mcmc')"}) {
+        TestVisualizer viewer;
+        viewer.queue_posted_work = true;
+        const ScopedVisualizer scoped_viewer(&viewer);
+        bool work_ran = false;
+        std::jthread viewer_worker([&]() {
+            if (viewer.waitForQueuedWork(1s)) {
+                // Also prove that the waiting Python caller releases its GIL.
+                const lfs::python::GilAcquire gil;
+                viewer.on_viewer_thread = true;
+                work_ran = viewer.runNextQueuedWork();
+            }
+        });
+        const auto result = runPythonTensorSnippet(
+            std::string("import lichtfeld as lf\np = lf.optimization_params()\n") + setter +
+            "\nresult_shape = (1,)\nresult_values = [float(p.strategy == 'mcmc')]\n");
+        viewer_worker.join();
+        EXPECT_TRUE(work_ran) << setter;
+        EXPECT_EQ(viewer.post_work_calls, 1) << setter;
+        ASSERT_EQ(result.values.size(), 1u);
+        EXPECT_FLOAT_EQ(result.values[0], 1.0F);
+    }
 }
 
 TEST_F(PythonIntegrationTest, ProjectWritePollRunsOnViewerThread) {

@@ -409,6 +409,15 @@ namespace lfs::vis::gui {
             applyProjectDragOverlay();
     }
 
+    void RmlViewportOverlay::setSplitViewLayout(const bool split) {
+        if (split_view_layout_ == split)
+            return;
+        split_view_layout_ = split;
+        toolbar_roots_dirty_ = true;
+        markRenderNeeded(RenderReason::ToolbarLayout);
+        updateToolbarRoots();
+    }
+
     void RmlViewportOverlay::setToolbarBounds(const float x,
                                               const float width,
                                               const float inset) {
@@ -580,6 +589,9 @@ namespace lfs::vis::gui {
             std::abs(applied_toolbar_width_ - toolbar_width_) > 0.5f;
         if (!changed)
             return false;
+
+        if (auto* const content = document_->GetElementById("viewport-content"))
+            content->SetClass("split-view", split_view_layout_);
 
         const auto apply_root = [&](const char* element_id,
                                     const float x,

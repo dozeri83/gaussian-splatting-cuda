@@ -42,7 +42,7 @@ layout(push_constant) uniform Push {
     vec4 right_texcoord_scale_offset;
 } pc;
 
-vec3 sample_panel(sampler2D tex, vec2 uv, float start, float end, float normalize, float flip_y,
+vec4 sample_panel(sampler2D tex, vec2 uv, float start, float end, float normalize, float flip_y,
                   float spatial_filter, vec2 uv_scale, vec2 uv_clamp_max,
                   vec2 texcoord_scale, vec2 texcoord_offset) {
     float u = uv.x;
@@ -52,7 +52,7 @@ vec3 sample_panel(sampler2D tex, vec2 uv, float start, float end, float normaliz
     }
     float v = flip_y > 0.5 ? 1.0 - uv.y : uv.y;
     vec2 st = min((vec2(u, v) * texcoord_scale + texcoord_offset) * uv_scale, uv_clamp_max);
-    vec3 center = texture(tex, st).rgb;
+    vec4 center = texture(tex, st);
     if (spatial_filter < 0.5) {
         return center;
     }
@@ -63,11 +63,11 @@ vec3 sample_panel(sampler2D tex, vec2 uv, float start, float end, float normaliz
     vec3 right = texture(tex, clamp(st + vec2(texel.x, 0.0), vec2(0.0), uv_clamp_max)).rgb;
     vec3 up = texture(tex, clamp(st - vec2(0.0, texel.y), vec2(0.0), uv_clamp_max)).rgb;
     vec3 down = texture(tex, clamp(st + vec2(0.0, texel.y), vec2(0.0), uv_clamp_max)).rgb;
-    vec3 sharpened = center * (1.0 + 4.0 * strength) -
+    vec3 sharpened = center.rgb * (1.0 + 4.0 * strength) -
                      (left + right + up + down) * strength;
-    vec3 neighborhood_min = min(center, min(min(left, right), min(up, down)));
-    vec3 neighborhood_max = max(center, max(max(left, right), max(up, down)));
-    return clamp(sharpened, neighborhood_min, neighborhood_max);
+    vec3 neighborhood_min = min(center.rgb, min(min(left, right), min(up, down)));
+    vec3 neighborhood_max = max(center.rgb, max(max(left, right), max(up, down)));
+    return vec4(clamp(sharpened, neighborhood_min, neighborhood_max), center.a);
 }
 
 vec3 loss_heatmap(vec3 ground_truth, vec3 rendered) {
@@ -95,13 +95,13 @@ vec3 loss_heatmap(vec3 ground_truth, vec3 rendered) {
     return mix(yellow, white, (intensity - 0.75) * 4.0);
 }
 
-vec3 fetch_panel_exact(sampler2D tex, ivec2 local_texel, float flip_y) {
+vec4 fetch_panel_exact(sampler2D tex, ivec2 local_texel, float flip_y) {
     ivec2 size = textureSize(tex, 0);
     ivec2 texel = local_texel;
     if (flip_y > 0.5) {
         texel.y = int(pc.rect.w) - 1 - texel.y;
     }
-    return texelFetch(tex, clamp(texel, ivec2(0), size - ivec2(1)), 0).rgb;
+    return texelFetch(tex, clamp(texel, ivec2(0), size - ivec2(1)), 0);
 }
 
 void main() {
@@ -128,12 +128,12 @@ void main() {
             u_left, content_uv, pc.panel_norm.x, pc.panel_norm.y,
             pc.panel_flags.x, pc.split.y, pc.panel_flags.z,
             pc.left_uv_scale_clamp.xy, pc.left_uv_scale_clamp.zw,
-            pc.left_texcoord_scale_offset.xy, pc.left_texcoord_scale_offset.zw);
+            pc.left_texcoord_scale_offset.xy, pc.left_texcoord_scale_offset.zw).rgb;
         vec3 rendered = sample_panel(
             u_right, content_uv, pc.panel_norm.z, pc.panel_norm.w,
             pc.panel_flags.y, pc.split.z, pc.panel_flags.w,
             pc.right_uv_scale_clamp.xy, pc.right_uv_scale_clamp.zw,
-            pc.right_texcoord_scale_offset.xy, pc.right_texcoord_scale_offset.zw);
+            pc.right_texcoord_scale_offset.xy, pc.right_texcoord_scale_offset.zw).rgb;
         frag_color = vec4(loss_heatmap(ground_truth, rendered), 1.0);
         return;
     }
@@ -142,7 +142,7 @@ void main() {
     float divider_pixel = pc.rect.x + floor(pc.split.x * pc.rect.z + 0.5);
     bool use_left = px.x < divider_pixel;
 
-    vec3 color;
+    vec4 color;
     if ((int(pc.split.w) & 2) != 0) {
         ivec2 local_texel = ivec2(floor(px - pc.rect.xy));
         color = use_left
@@ -199,5 +199,5 @@ void main() {
         return;
     }
 
-    frag_color = vec4(color, 1.0);
+    frag_color = vec4(color.rgb, (int(pc.split.w) & 4) != 0 ? color.a : 1.0);
 }

@@ -129,7 +129,7 @@ namespace lfs::vis {
 
     struct ViewportEnvironment {
         bool enabled = false;
-        std::filesystem::path map_path;
+        std::shared_ptr<const std::filesystem::path> map_path;
         glm::mat3 camera_to_world{1.0f};
         glm::vec4 intrinsics{0.0f}; // focal_x, focal_y, cx, cy
         glm::vec2 viewport_size{0.0f};

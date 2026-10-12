@@ -3237,7 +3237,22 @@ namespace lfs::vis {
                 return std::unexpected(validation_result.error());
             }
 
-            // Validation passed - now clear and load
+            // Layout validation does not parse all camera and point records.
+            // Finish parsing before replacing the current scene and trainer.
+            auto prepared = lfs::training::loadTrainingData(dataset_params);
+            if (!prepared) {
+                const auto error = std::format("Failed to load dataset: {}", prepared.error().format());
+                LOG_ERROR("Failed to load training data: {}", error);
+                state::DatasetLoadCompleted{
+                    .path = path,
+                    .success = false,
+                    .error = error,
+                    .num_images = 0,
+                    .num_points = 0}
+                    .emit();
+                return std::unexpected(error);
+            }
+
             core::Scene::Transaction txn(scene_);
 
             if (services().trainerOrNull()) {
@@ -3251,7 +3266,7 @@ namespace lfs::vis {
 
             cached_params_ = dataset_params;
 
-            auto load_result = lfs::training::loadTrainingDataIntoScene(dataset_params, scene_);
+            auto load_result = lfs::training::applyLoadResultToScene(dataset_params, scene_, std::move(*prepared));
             if (!load_result) {
                 LOG_ERROR("Failed to load training data: {}", load_result.error());
                 state::DatasetLoadCompleted{
@@ -3471,7 +3486,18 @@ namespace lfs::vis {
                 throw std::runtime_error("Failed to load training data: " + validation_result.error());
             }
 
-            // === Phase 2: Clear scene (validation passed) ===
+            // Parse the checkpoint's dataset before discarding the current scene.
+            // Its model replaces initialization data after the dataset is installed.
+            auto load_params = checkpoint_params;
+            load_params.init_path = std::nullopt;
+            load_params.resume_checkpoint = path;
+            auto prepared = lfs::training::loadTrainingData(load_params);
+            if (!prepared) {
+                throw std::runtime_error("Failed to load training data: Failed to load dataset: " +
+                                         prepared.error().format());
+            }
+
+            // === Phase 2: Clear scene (dataset parsed) ===
             core::Scene::Transaction txn(scene_);
 
             if (services().trainerOrNull()) {
@@ -3489,7 +3515,7 @@ namespace lfs::vis {
             // Clear init_path to prevent loading the initial PLY again - we use the checkpoint model instead
             checkpoint_params.init_path = std::nullopt;
             checkpoint_params.resume_checkpoint = path;
-            const auto load_result = lfs::training::loadTrainingDataIntoScene(checkpoint_params, scene_);
+            const auto load_result = lfs::training::applyLoadResultToScene(checkpoint_params, scene_, std::move(*prepared));
             if (!load_result) {
                 throw std::runtime_error("Failed to load training data: " + load_result.error());
             }
@@ -6020,10 +6046,27 @@ namespace lfs::vis {
     }
 
     void SceneManager::setAppearanceModel(std::unique_ptr<AppearanceTensorModel> model) {
+        clearAppearanceModel();
         appearance_tensor_model_ = std::move(model);
     }
 
+#if LFS_BUILD_TRAINER
+    void SceneManager::setAppearanceModel(std::unique_ptr<lfs::training::PPISP> ppisp,
+                                          std::unique_ptr<lfs::training::PPISPControllerPool> controller,
+                                          const bool training_viewport) {
+        clearAppearanceModel();
+        appearance_training_viewport_ = training_viewport;
+        appearance_ppisp_ = std::move(ppisp);
+        appearance_controller_pool_ = std::move(controller);
+    }
+#endif
+
     void SceneManager::clearAppearanceModel() {
+#if LFS_BUILD_TRAINER
+        appearance_training_viewport_ = false;
+        appearance_ppisp_.reset();
+        appearance_controller_pool_.reset();
+#endif
         appearance_tensor_model_.reset();
     }
 

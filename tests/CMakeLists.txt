@@ -218,6 +218,8 @@ if(BUILD_TESTS)
     lfs_add_gpu_program(gpu_program_contracts spark_alpha_contract SOURCE shaders/spark_alpha_contract.slang
         DEPENDS "${CMAKE_SOURCE_DIR}/src/rendering/rasterizer/slang/spark_alpha.inc"
         COMPUTE evaluate)
+    lfs_add_gpu_program(gpu_program_contracts split_view_contract
+        SOURCE "${CMAKE_SOURCE_DIR}/src/visualizer/rendering/split_view_tensor.slang" COMPUTE composeSplitView)
     lfs_add_gpu_program(gpu_program_contracts program_contract SOURCE shaders/program_contract.slang
         COMPUTE transform VERTEX vertexMain FRAGMENT fragmentMain)
     lfs_add_gpu_program(gpu_program_contracts program_features SOURCE shaders/program_features.slang
@@ -323,12 +325,14 @@ if(BUILD_VISUALIZER_TESTS OR BUILD_TESTS)
         test_menu_bar_title.cpp
         test_point_cloud_updates.cpp
 
+        test_viewport_depth_layout.cpp
         test_preferences_migration.cpp
         test_scene_upscaler_registry.cpp
         test_screen_layout.cpp
         test_screen.cpp
         test_view_render_state.cpp
         test_python_editor_input.cpp
+        test_python_runtime_callbacks.cpp
         test_startup_overlay_geometry.cpp
         test_status_bar_fit.cpp
         test_viewer_backend_metadata.cpp
@@ -1121,6 +1125,7 @@ set(TEST_FILES
     test_p5_session_chapters.cpp
     test_training_terminal_state.cpp
     test_training_camera_errors.cpp
+    test_training_controller_freeze.cpp
     test_headless_run_coordinator.cpp
     test_argument_parser.cpp
     test_licht_command.cpp
@@ -1257,6 +1262,7 @@ set(TEST_FILES
     test_node_canvas_widgets.cpp
     test_panel_layout_render_demand.cpp
     test_preferences_hint_layout.cpp
+    test_viewport_depth_layout.cpp
     test_viewport_select.cpp
     test_sequencer_regressions.cpp
     test_timeline_save_budget.cpp
@@ -2072,6 +2078,17 @@ if(UNIX AND NOT APPLE AND TARGET LichtFeld-Studio)
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         LABELS "gpu;integration"
         TIMEOUT 240
+        RUN_SERIAL TRUE
+        ENVIRONMENT "LFS_TEST_BUILD_DIR=${CMAKE_BINARY_DIR};LFS_EXECUTABLE=$<TARGET_FILE:LichtFeld-Studio>"
+    )
+    add_test(NAME lichtfeld.python.training_strategy_update
+        COMMAND ${Python_EXECUTABLE} -m pytest -q
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/test_training_strategy_update.py
+    )
+    set_tests_properties(lichtfeld.python.training_strategy_update PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        LABELS "gpu;integration"
+        TIMEOUT 300
         RUN_SERIAL TRUE
         ENVIRONMENT "LFS_TEST_BUILD_DIR=${CMAKE_BINARY_DIR};LFS_EXECUTABLE=$<TARGET_FILE:LichtFeld-Studio>"
     )

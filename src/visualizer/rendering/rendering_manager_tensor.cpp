@@ -85,7 +85,8 @@ namespace lfs::vis {
                     .uv_clamp_max = panel.uv_clamp_max,
                     .texcoord_scale = panel.texcoord_scale,
                     .texcoord_offset = panel.texcoord_offset,
-                    .spatial_filter = panel.spatial_filter};
+                    .spatial_filter = panel.spatial_filter,
+                    .environment = panel.environment};
         }
 
         SplitViewCpuDesc cpuSplitViewDesc(const ViewportSplitView& split) {
@@ -255,6 +256,10 @@ namespace lfs::vis {
         }
 
         auto frame_settings = context.settings;
+        const auto environment_map_path = [this] {
+            std::lock_guard lock(settings_mutex_);
+            return environment_map_path_;
+        }();
         enforceProjectionBackend(frame_settings);
         SceneRenderState scene_state = context.scene_manager->buildRenderState();
         const auto* model = scene_state.combined_model;
@@ -395,7 +400,7 @@ namespace lfs::vis {
             clearViewportImageState(view, size);
             view.viewport_artifact_service_.clearViewportOutput();
             view.viewport_environment_ = buildViewportEnvironment(
-                frame_context, frame_settings, environmentBackgroundUsesTransparentViewerCompositing(frame_settings));
+                frame_context, frame_settings, environmentBackgroundUsesTransparentViewerCompositing(frame_settings), environment_map_path);
             view.viewport_meshes_ = buildViewportMeshes(frame_context, frame_settings);
             return {.size = size, .matches_viewport_extent = true, .rendered = true};
         }
@@ -557,6 +562,11 @@ namespace lfs::vis {
                                            lfs::rendering::FrameMetadata metadata,
                                            SplitViewInfo info,
                                            std::optional<GTPresentedView> gt_view = std::nullopt) {
+                if (environmentBackgroundUsesTransparentViewerCompositing(frame_settings)) {
+                    const auto environment = buildViewportEnvironment(frame_context, frame_settings, true, environment_map_path);
+                    split.left.environment = environment;
+                    split.right.environment = environment;
+                }
                 view.split_view_ = std::move(split);
                 ++view.split_view_image_generation_;
                 view.vulkan_viewport_image_ = view.split_view_.left.image;
@@ -576,7 +586,7 @@ namespace lfs::vis {
                 view.viewport_artifact_service_.setLazyCapture(
                     [capture, size] { return composeSplitViewCpuImage(cpuSplitViewDesc(capture), size); },
                     metadata, size);
-                view.viewport_environment_ = {};
+                view.viewport_environment_ = view.split_view_.left.environment;
                 view.viewport_meshes_ = {};
                 initialized_ = true;
                 return ViewportFrameResult{
@@ -902,7 +912,7 @@ namespace lfs::vis {
         view.vulkan_viewport_image_ = image;
         view.viewport_depth_image_ = depth;
         view.viewport_environment_ = buildViewportEnvironment(
-            frame_context, frame_settings, environmentBackgroundUsesTransparentViewerCompositing(frame_settings));
+            frame_context, frame_settings, environmentBackgroundUsesTransparentViewerCompositing(frame_settings), environment_map_path);
         view.viewport_meshes_ = buildViewportMeshes(frame_context, frame_settings);
         view.vulkan_viewport_image_size_ = published_size;
         view.vulkan_viewport_image_alloc_size_ = published_size;

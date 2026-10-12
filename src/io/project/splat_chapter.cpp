@@ -11,6 +11,7 @@
 #include "core/tensor_backend.hpp"
 #include "core/tensor_completion.hpp"
 #include "core/tensor_cuda_interop.hpp"
+#include "core/tensor_execution.hpp"
 #include "core/tensor_readback.hpp"
 #include "core/tensor_sh.hpp"
 
@@ -100,6 +101,7 @@ namespace lfs::io::project {
         constexpr std::size_t RAW_STREAM_WINDOW_BYTES = 16ull * 1024ull * 1024ull;
         constexpr std::uint64_t RAW_STREAM_MAX_MANIFEST_BYTES = 32ull * 1024ull * 1024ull;
 
+        std::function<void()> splat_capture_stream_hook;
         std::optional<bool> splat_capture_no_headroom_override;
         std::optional<bool> splat_capture_stream_creation_failure_override;
         std::optional<std::size_t> splat_stream_window_override;
@@ -506,6 +508,11 @@ namespace lfs::io::project {
         }
         lfs::core::SplatData cloned;
         try {
+            std::optional<lfs::core::CUDAStreamGuard> snapshot_scope;
+            if (impl->stream)
+                snapshot_scope.emplace(impl->stream->get());
+            if (splat_capture_stream_hook)
+                splat_capture_stream_hook();
             cloned = model.clone_async(impl->stream ? impl->stream->get() : nullptr);
         } catch (const std::bad_alloc& error) {
             LOG_WARN(
@@ -529,6 +536,21 @@ namespace lfs::io::project {
                                        &impl->snapshot->_densification_info,
                                        &impl->snapshot->_max_screen_share})
                 impl->ready->include(*tensor);
+            // Order later source writes after the snapshot on each source queue.
+            // Vulkan and Metal share ordered queues; CUDA bridges GPU events.
+            std::array<std::optional<lfs::core::TensorExecutionTarget>, tensors.size()> fenced_queues{};
+            std::size_t fenced_count = 0;
+            const auto snapshot_queue = impl->snapshot->means().execution_target();
+            for (const auto* tensor : tensors) {
+                if (!tensor->is_valid() || tensor->device() != lfs::core::Device::GPU)
+                    continue;
+                const auto queue = tensor->execution_target();
+                const auto end = fenced_queues.begin() + fenced_count;
+                if (std::find(fenced_queues.begin(), end, queue) != end)
+                    continue;
+                queue.wait_for(snapshot_queue);
+                fenced_queues[fenced_count++] = queue;
+            }
         } catch (const std::bad_alloc& error) {
             return splat_error(
                 lfs::ErrorCode::ResourceExhausted,
@@ -914,6 +936,11 @@ namespace lfs::io::project {
     void detail::set_splat_stream_window_bytes_for_testing(
         const std::optional<std::size_t> window_bytes) {
         splat_stream_window_override = window_bytes;
+    }
+
+    void detail::set_splat_capture_stream_hook_for_testing(
+        std::function<void()> hook) {
+        splat_capture_stream_hook = std::move(hook);
     }
 
     void detail::set_splat_capture_no_headroom_for_testing(

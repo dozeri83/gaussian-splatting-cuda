@@ -1115,6 +1115,8 @@ namespace lfs::vis {
         // Settings
         ViewSource& view_source_;
         SceneRenderSettings settings_;
+        std::shared_ptr<const std::filesystem::path> environment_map_path_ =
+            std::make_shared<const std::filesystem::path>(settings_.environment_map_path);
         mutable std::mutex settings_mutex_;
         // Serializes release commit/undo/publication with mode transitions.
         // Acquire transition before settings; never while holding settings/history locks.

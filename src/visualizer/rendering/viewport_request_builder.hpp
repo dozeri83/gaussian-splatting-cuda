@@ -46,7 +46,8 @@ namespace lfs::vis {
 
     // Environment background for this frame's camera; `enabled` decides whether it draws.
     [[nodiscard]] LFS_VIS_API ViewportEnvironment buildViewportEnvironment(
-        const FrameContext& ctx, const RenderSettings& settings, bool enabled);
+        const FrameContext& ctx, const RenderSettings& settings, bool enabled,
+        const std::shared_ptr<const std::filesystem::path>& environment_path);
 
     // Visible meshes shaded as the viewport draws them; exports reuse this to match it.
     [[nodiscard]] LFS_VIS_API std::vector<ViewportMeshDrawItem> buildViewportMeshDrawItems(

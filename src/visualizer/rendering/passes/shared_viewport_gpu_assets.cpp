@@ -1458,23 +1458,23 @@ namespace lfs::vis {
     }
 
     void SharedViewportGpuAssets::Impl::prepareEnvironment(const VulkanEnvironmentParams& params) {
-        if (!params.enabled || params.map_path.empty()) {
+        if (!params.enabled || !params.map_path || params.map_path->empty()) {
             retireEnvironmentImages(false);
             return;
         }
         environment_last_enabled_epoch = epoch;
-        if (environment_load_failed && params.map_path == environment_failed_path) {
+        if (environment_load_failed && *params.map_path == environment_failed_path) {
             return;
         }
         if (hasLiveEnvironmentTexture() &&
-            environment_images[live_environment_index].path == params.map_path) {
+            environment_images[live_environment_index].path == *params.map_path) {
             environment_images[live_environment_index].last_used_epoch = epoch;
             environment_images[live_environment_index].retire_after_epoch = 0;
             retireEnvironmentImages(false);
             return;
         }
         for (std::size_t i = 0; i < environment_images.size(); ++i) {
-            if (environment_images[i].path == params.map_path &&
+            if (environment_images[i].path == *params.map_path &&
                 environment_images[i].view != VK_NULL_HANDLE) {
                 if (hasLiveEnvironmentTexture() && live_environment_index != i) {
                     environment_images[live_environment_index].retire_after_epoch = epoch;
@@ -1488,9 +1488,9 @@ namespace lfs::vis {
                 return;
             }
         }
-        const bool ok = loadEnvironmentFromPath(params.map_path);
+        const bool ok = loadEnvironmentFromPath(*params.map_path);
         environment_load_failed = !ok;
-        environment_failed_path = ok ? std::filesystem::path{} : params.map_path;
+        environment_failed_path = ok ? std::filesystem::path{} : *params.map_path;
         retireEnvironmentImages(false);
     }
 

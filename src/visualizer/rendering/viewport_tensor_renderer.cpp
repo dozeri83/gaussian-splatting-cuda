@@ -424,7 +424,8 @@ namespace lfs::vis {
                 .left_filter = split.left.spatial_filter ? 1u : 0u,
                 .right_filter = split.right.spatial_filter ? 1u : 0u,
                 .loss_visualization = split.loss_visualization ? 1u : 0u,
-                .exact_texel_sampling = split.exact_texel_sampling ? 1u : 0u,
+                .exact_texel_sampling = (split.exact_texel_sampling ? 1u : 0u) |
+                                        ((split.left.environment.enabled || split.right.environment.enabled) ? 2u : 0u),
                 .left_uv_scale = vec2(split.left.uv_scale),
                 .left_uv_clamp = vec2(split.left.uv_clamp_max),
                 .right_uv_scale = vec2(split.right.uv_scale),
@@ -633,9 +634,9 @@ namespace lfs::vis {
 
         bool drawEnvironment(Tensor& destination, const ViewportFrameDesc& desc, const FramebufferRect rect) {
             const auto& environment = desc.environment;
-            if (!environment.enabled || environment.map_path.empty())
+            if (!environment.enabled || (!environment.map_path || environment.map_path->empty()))
                 return false;
-            const Tensor* map = environmentMap(environment.map_path);
+            const Tensor* map = environmentMap(*environment.map_path);
             if (!map)
                 return false;
             auto& draw = addOverlay("environmentVertex", "environmentFragment", rect, desc, false);
@@ -764,7 +765,7 @@ namespace lfs::vis {
             const auto rect = framebufferRect(desc);
             if (rect.width == 0 || rect.height == 0)
                 return;
-            const bool environment = !desc.split_view.enabled && drawEnvironment(*destination, desc, rect);
+            const bool environment = drawEnvironment(*destination, desc, rect);
             const bool composed = desc.split_view.enabled ? composeSplit(frame, desc)
                                                           : compose(frame, desc, environment);
             if (!composed)

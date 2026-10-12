@@ -273,6 +273,8 @@ namespace lfs::vis::screen {
             if (viewport_height > 0.0f && std::isfinite(distance) && distance > 0.01f && half_tan > 0.0f)
                 s.ortho_scale = std::clamp(viewport_height / (2.0f * distance * half_tan),
                                            lfs::rendering::MIN_ORTHO_SCALE, lfs::rendering::MAX_ORTHO_SCALE);
+            else
+                s.ortho_scale = 100.0f;
         }
         s.orthographic = enabled;
         sanitizeGTComparisonSettings(s);

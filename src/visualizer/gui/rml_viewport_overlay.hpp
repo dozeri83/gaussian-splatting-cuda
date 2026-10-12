@@ -110,6 +110,7 @@ namespace lfs::vis::gui {
         void shutdown();
         void setViewportBounds(glm::vec2 pos, glm::vec2 size, glm::vec2 screen_origin);
         void setToolbarBounds(float x, float width, float inset);
+        void setSplitViewLayout(bool split);
         void setSplitDividerOverlay(SplitDividerOverlayState state);
         void setGTMetricsOverlay(GTMetricsOverlayState state);
         void setLodStatsOverlay(LodStatsOverlayState state);
@@ -140,6 +141,7 @@ namespace lfs::vis::gui {
         [[nodiscard]] bool blocksPointer(double screen_x, double screen_y) const;
 
     private:
+        friend class ViewportDepthLayoutTestAccess;
         friend class lfs::vis::SequencerFrameDemandTest_PropagatesPlaybackStreamAndPreviewDemand_Test;
         struct ToolbarDragListener final : Rml::EventListener {
             RmlViewportOverlay* owner = nullptr;
@@ -215,6 +217,7 @@ namespace lfs::vis::gui {
         float toolbar_width_ = 0.0f;
         float applied_toolbar_x_ = 0.0f;
         float applied_toolbar_width_ = -1.0f;
+        bool split_view_layout_ = false;
         bool toolbar_roots_dirty_ = true;
         bool toolbar_rail_layout_dirty_ = true;
         float last_toolbar_dpi_ = 0.0f;
