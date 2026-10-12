@@ -47,6 +47,43 @@ class StudioBackends(unittest.TestCase):
         self.assertTrue(actual["cuda_diagnostics"])
         return actual,output
 
+    def test_native_manifest_preserves_offset_reordered_pts(self):
+        source = self.root / "offset-reordered.mkv"
+        subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=4", "-itsoffset", "2", "-f", "lavfi", "-i",
+                        "testsrc2=size=128x96:rate=30:duration=4", "-map", "0:a", "-map", "1:v",
+                        "-c:a", "pcm_s16le", "-c:v", "libx264", "-bf", "3", "-g", "120",
+                        "-pix_fmt", "yuv420p", str(source)], check=True, timeout=30)
+        reference = json.loads(subprocess.check_output([
+            FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_streams",
+            "-show_frames", "-of", "json", str(source)]))
+        stream = reference["streams"][0]
+        self.assertEqual(stream["index"], 1)
+        self.assertTrue(any(frame["pict_type"] == "B" for frame in reference["frames"]))
+        for options in ({}, {"fps": 2}):
+            with self.subTest(options=options):
+                _, output = self.invoke(input=str(source), end_seconds=3, **options)
+                manifest = json.loads((output / "extraction_metadata.json").read_text())
+                self.assertIn("nvdec", json.dumps(manifest))
+                timing = manifest["input"]["video"]
+                self.assertEqual(timing["stream_index"], 1)
+                self.assertGreater(timing["start_pts"], 0)
+                self.assertEqual(timing["time_base"], [int(p) for p in stream["time_base"].split("/")])
+                expected = {int(frame["best_effort_timestamp"]) for frame in reference["frames"]}
+                self.assertTrue(manifest["frames"])
+                self.assertEqual(manifest["frames"][0]["source_pts"],
+                                 int(reference["frames"][0]["best_effort_timestamp"]))
+                self.assertEqual(manifest["frames"][0]["timestamp"], 0)
+                if "fps" in options:
+                    self.assertEqual([frame["timestamp"] for frame in manifest["frames"]],
+                                     [0, .5, 1, 1.5, 2, 2.5])
+                for frame in manifest["frames"]:
+                    self.assertIn(frame["source_pts"], expected)
+                    self.assertEqual(frame["timestamp_origin"], "best_effort")
+                    seconds = ((frame["source_pts"] - timing["relative_origin_pts"])
+                               * timing["time_base"][0] / timing["time_base"][1])
+                    self.assertAlmostEqual(frame["timestamp"], seconds, places=6)
+
     def test_shared_player_uses_native_decode_and_seeks(self):
         actual, _ = self.invoke(operation="native-preview")
         self.assertTrue(actual["hardware_decode"])
@@ -118,6 +155,11 @@ class StudioBackends(unittest.TestCase):
             self.assertLess(error, 3, f"NVENC retained frame {index} was overwritten: {error}")
 
     def test_native_decode_jpeg_rotation_and_scoring(self):
+        reference = json.loads(subprocess.check_output([
+            FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_frames",
+            "-show_streams", "-of", "json", str(self.source)]))
+        expected_pts = {int(frame["best_effort_timestamp"]) for frame in reference["frames"]}
+        expected_time_base = [int(part) for part in reference["streams"][0]["time_base"].split("/")]
         for options in ({}, {"jpeg":True}, {"jpeg":True,"rotation":90},
                         {"jpeg":True,"rotation":180}, {"jpeg":True,"rotation":270},
                         {"jpeg":True,"scale":0.5},
@@ -128,6 +170,11 @@ class StudioBackends(unittest.TestCase):
                 self.assertEqual(actual["accepted"],len(metadata["frames"]))
                 self.assertGreater(actual["accepted"],0)
                 self.assertIn("nvdec",json.dumps(metadata))
+                self.assertTrue(metadata["processing"]["decoder"]["hardware_requested"])
+                self.assertEqual(metadata["input"]["video"]["time_base"], expected_time_base)
+                for frame in metadata["frames"]:
+                    self.assertIn(frame["source_pts"], expected_pts)
+                    self.assertEqual(frame["timestamp_origin"], "best_effort")
                 expected_size = [96,128] if options.get("rotation") in (90,270) else [128,96]
                 if options.get("scale"):
                     expected_size = [64,48]
@@ -177,11 +224,19 @@ class StudioBackends(unittest.TestCase):
                 self.assertEqual(metadata["performance"]["selected_frames"], 4 * fps)
                 probe = json.loads(subprocess.check_output([
                     FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_frames",
-                    "-show_entries", "frame=best_effort_timestamp_time,key_frame", "-of", "json", str(self.source)]))
+                    "-show_streams", "-show_entries", "frame=best_effort_timestamp_time,best_effort_timestamp,key_frame:stream=index,time_base,start_pts",
+                    "-of", "json", str(self.source)]))
                 timestamps = [float(frame["best_effort_timestamp_time"]) for frame in probe["frames"]]
+                source_pts = {float(frame["best_effort_timestamp_time"]): int(frame["best_effort_timestamp"])
+                              for frame in probe["frames"]}
+                timing = metadata["input"]["video"]
+                self.assertEqual(timing["stream_index"], probe["streams"][0]["index"])
+                self.assertEqual(timing["time_base"], [int(part) for part in probe["streams"][0]["time_base"].split("/")])
                 for index, frame in enumerate(metadata["frames"]):
                     expected = next(value for value in timestamps if value + 1e-7 >= index / fps)
                     self.assertAlmostEqual(frame["timestamp"], expected, places=6)
+                    self.assertEqual(frame["source_pts"], source_pts[expected])
+                    self.assertEqual(frame["timestamp_origin"], "best_effort")
                 if label == "long":
                     self.assertLessEqual(metadata["performance"]["decoded_frames"], 150)
                 if label in ("one-second", "two-second"):

@@ -158,6 +158,39 @@ class MediaBindings(unittest.TestCase):
             self.assertEqual(record["file_sha256"], hashlib.sha256(
                 (files.files.output_directory / record["file"]).read_bytes()).hexdigest())
 
+    def test_resume_manifest_preserves_selected_source_timestamps(self):
+        for fixture, end in (("cfr-asymmetric", 0.35), ("vfr-asymmetric", 1.5)):
+            for label, file_format in (("png", media.FrameFileFormat.PNG), ("exr", media.FrameFileFormat.EXR)):
+                with self.subTest(fixture=fixture, format=label):
+                    request = self.request()
+                    request.input = self.corpus / (fixture + ".nut")
+                    request.end_seconds = end
+                    if label == "exr":
+                        request.output_format = media.FramePixelFormat.RGBFloat32
+                        request.input_color.transfer = media.ColorTransfer.Linear
+                        request.input_color.primaries = media.ColorPrimaries.Bt709
+                    _, selected = media.MediaIngest.extract(request)
+                    files = self.resume_files(self.root / ("resume-timing-" + fixture + label), file_format)
+                    files.files.exr.overwrite = True
+                    self.interrupt_resume(request, files)
+                    media.MediaIngest.extract_files(request, files)
+                    manifest_path = files.files.output_directory / "extraction_metadata.json"
+                    manifest = json.loads(manifest_path.read_text())
+                    self.assertEqual(len(manifest["frames"]), len(selected))
+                    for entry, surface in zip(manifest["frames"], selected):
+                        self.assertEqual(entry["source_pts"], surface.info.source_timestamp.ticks)
+                        self.assertEqual(entry["timestamp_origin"], "best_effort")
+                        self.assertAlmostEqual(entry["timestamp"], surface.info.relative_seconds, places=6)
+                    images = {entry["file"]: (files.files.output_directory / entry["file"]).read_bytes()
+                              for entry in manifest["frames"]}
+                    media.MediaIngest.extract_files(request, files)
+                    self.assertEqual(json.loads(manifest_path.read_text())["frames"], manifest["frames"])
+                    missing = files.files.output_directory / manifest["frames"][-1]["file"]
+                    missing.unlink()
+                    media.MediaIngest.extract_files(request, files)
+                    self.assertEqual(json.loads(manifest_path.read_text())["frames"], manifest["frames"])
+                    self.assertEqual(images, {name: (files.files.output_directory / name).read_bytes() for name in images})
+
     def test_resume_rejects_changed_request_and_corrupt_output(self):
         request = self.request()
         files = self.resume_files(self.root / "resume-reject")
@@ -412,7 +445,19 @@ media.MediaIngest.extract_files(r, f, progress=lambda _: os._exit(73))
         files.files.format = media.FrameFileFormat.EXR
         files.files.exr.precision = media.ExrPrecision.Float
         self.assertEqual(media.MediaIngest.extract_files(request, files).frames_accepted, len(frames))
-        self.assertTrue((files.files.output_directory / "extraction_metadata.json").is_file())
+        manifest = json.loads((files.files.output_directory / "extraction_metadata.json").read_text())
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["output"]["bit_depth"], 32)
+        self.assertFalse(manifest["processing"]["decoder"]["hardware_requested"])
+        self.assertEqual(manifest["output"]["input_transfer"], "linear")
+        self.assertTrue(manifest["output"]["transfer_override"])
+        self.assertEqual(len(manifest["frames"]), len(frames))
+        for entry, surface in zip(manifest["frames"], frames):
+            self.assertEqual(entry["source_pts"], surface.info.source_timestamp.ticks)
+            self.assertEqual(entry["timestamp_origin"], "best_effort")
+            self.assertEqual(manifest["input"]["video"]["time_base"],
+                             [surface.info.source_timestamp.time_base.numerator,
+                              surface.info.source_timestamp.time_base.denominator])
         color = media.FrameColor()
         color.transfer = media.ColorTransfer.Linear
         color.primaries = media.ColorPrimaries.Bt709

@@ -166,6 +166,42 @@ This is per-file publication, not an atomic transaction of a whole sequence,
 a checkpoint/resume protocol or a power-loss durability guarantee. Once a
 manifest is published, later cancellation cannot undo that commit.
 
+## Extraction manifest timing and provenance
+
+Extraction manifests retain `schema_version: 2` and all legacy fields. Optional
+additive fields describe the actual extraction without introducing a separate
+metadata API or a second manifest. Consumers should tolerate additional keys.
+
+- `input.video.stream_index` identifies the selected stream;
+  `input.video.time_base` is its `[numerator, denominator]` in seconds per tick.
+- `input.video.start_pts` is the declared stream start, or `null` when unknown.
+  `relative_origin_pts` records the effective origin used by the existing
+  relative-seconds calculation, which uses zero when the stream start is absent.
+- Each frame's `source_pts` is the original integer timestamp, or `null` when
+  absent. `timestamp_origin` is `best_effort`, `presentation`, or `missing`.
+  Relative seconds are calculated by subtracting the stream origin in ticks
+  before scaling. This preserves the first frame and FPS sampling boundaries
+  when the stream starts at a nonzero timestamp, including native decoding.
+  Missing source timing is not replaced with a synthetic integer PTS. The legacy
+  `timestamp` remains the extraction's relative seconds; `source_frame` remains
+  its legacy nominal-rate-derived number, not a decoded ordinal. The timebase is
+  stored once at stream level rather than repeated in every frame.
+- `provenance` records `ffmpeg_version`, `avcodec_version` and `avformat_version`
+  once per manifest. Numeric library versions use FFmpeg's packed version integer.
+- `processing.decoder.hardware_requested` records the request independently of
+  the existing `backend` field, which describes the observed execution path.
+
+Existing color, EXR precision/overrides, encoder backend and performance fields
+remain authoritative. No projection, vendor metadata or unknown calibration is
+inferred. These additions use the shared extractor for legacy, CLI, Python and
+host file extraction; custom in-memory sinks retain their existing `FrameInfo`.
+Manifest publication and overwrite policies are unchanged.
+When metadata is requested, publication failure is terminal rather than a
+best-effort warning; already published images are not rolled back. PNG/JPEG
+metadata is opt-in, while EXR retains its mandatory manifest and explicit
+overwrite policy. Verified replay and missing-image reconstruction retain the
+same selected source timestamps as uninterrupted extraction.
+
 ## Verified image-sequence resume
 
 `media-ingest extract ... --resume` and `FileExtraction.resume = true` opt into
