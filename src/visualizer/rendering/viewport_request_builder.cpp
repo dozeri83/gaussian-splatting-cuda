@@ -872,12 +872,13 @@ namespace lfs::vis {
     }
 
     ViewportEnvironment buildViewportEnvironment(const FrameContext& ctx, const RenderSettings& settings,
-                                                 const bool enabled) {
+                                                 const bool enabled,
+                                                 const std::shared_ptr<const std::filesystem::path>& environment_path) {
         const auto vp_data = ctx.makeViewportData();
         const auto frame_view = ctx.makeFrameView();
         ViewportEnvironment environment{
             .enabled = enabled,
-            .map_path = settings.environment_map_path,
+            .map_path = environment_path,
             .camera_to_world = vp_data.rotation,
             .viewport_size = glm::vec2(static_cast<float>(frame_view.size.x), static_cast<float>(frame_view.size.y)),
             .exposure = settings.environment_exposure,

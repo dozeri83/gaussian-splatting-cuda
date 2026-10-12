@@ -28,6 +28,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+namespace lfs::training {
+    class PPISP;
+    class PPISPControllerPool;
+} // namespace lfs::training
+
 namespace lfs::vis {
 
     class AppearanceTensorModel;
@@ -347,9 +352,23 @@ namespace lfs::vis {
         void completePendingSelectionCounts() const;
 
         void setAppearanceModel(std::unique_ptr<AppearanceTensorModel> model);
+#if LFS_BUILD_TRAINER
+        void setAppearanceModel(std::unique_ptr<lfs::training::PPISP> ppisp,
+                                std::unique_ptr<lfs::training::PPISPControllerPool> controller = nullptr,
+                                bool training_viewport = false);
+        [[nodiscard]] lfs::training::PPISP* getAppearancePPISP() { return appearance_ppisp_.get(); }
+        [[nodiscard]] lfs::training::PPISPControllerPool* getAppearanceControllerPool() { return appearance_controller_pool_.get(); }
+        [[nodiscard]] bool appearanceUsesTrainingViewport() const { return appearance_training_viewport_; }
+#endif
         void clearAppearanceModel();
         [[nodiscard]] const AppearanceTensorModel* getAppearanceTensorModel() const { return appearance_tensor_model_.get(); }
-        [[nodiscard]] bool hasAppearanceModel() const { return appearance_tensor_model_ != nullptr; }
+        [[nodiscard]] bool hasAppearanceModel() const {
+#if LFS_BUILD_TRAINER
+            if (appearance_ppisp_)
+                return true;
+#endif
+            return appearance_tensor_model_ != nullptr;
+        }
 
         // Drop the GUI's borrowed scene-image tensor and drain the GPU so no
         // in-flight Vulkan work references model tensors that are about to be
@@ -484,6 +503,11 @@ namespace lfs::vis {
         void pasteNodeHierarchy(const ClipboardEntry::HierarchyNode& src, core::NodeId parent_id);
 
         std::unique_ptr<AppearanceTensorModel> appearance_tensor_model_;
+#if LFS_BUILD_TRAINER
+        bool appearance_training_viewport_ = false;
+        std::unique_ptr<lfs::training::PPISP> appearance_ppisp_;
+        std::unique_ptr<lfs::training::PPISPControllerPool> appearance_controller_pool_;
+#endif
 
         void beginSelectionPreview();
 

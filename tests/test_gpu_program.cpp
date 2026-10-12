@@ -7,6 +7,7 @@
 #include "program_features.hpp"
 #include "program_features_variant.hpp"
 #include "spark_alpha_contract.hpp"
+#include "split_view_contract.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -24,6 +25,105 @@ namespace {
         uint32_t padding = 0;
     };
     class Programs : public testing::TestWithParam<GpuBackend> {};
+
+    struct alignas(16) SplitViewParameters {
+        std::uint64_t destination = 0;
+        std::uint64_t left = 0;
+        std::uint64_t right = 0;
+        std::uint32_t destination_width = 0;
+        std::uint32_t destination_height = 0;
+        std::int32_t viewport_x = 0;
+        std::int32_t viewport_y = 0;
+        std::uint32_t viewport_width = 0;
+        std::uint32_t viewport_height = 0;
+        std::int32_t content_x = 0;
+        std::int32_t content_y = 0;
+        std::uint32_t content_width = 0;
+        std::uint32_t content_height = 0;
+        std::uint32_t left_width = 0;
+        std::uint32_t left_height = 0;
+        std::uint32_t left_channels = 0;
+        std::uint32_t left_float = 0;
+        std::uint32_t left_chw = 0;
+        std::uint32_t right_width = 0;
+        std::uint32_t right_height = 0;
+        std::uint32_t right_channels = 0;
+        std::uint32_t right_float = 0;
+        std::uint32_t right_chw = 0;
+        float split_position = 0.5f;
+        float left_start = 0.0f;
+        float left_end = 1.0f;
+        float right_start = 0.0f;
+        float right_end = 1.0f;
+        std::uint32_t left_normalize = 0;
+        std::uint32_t right_normalize = 0;
+        std::uint32_t left_flip_y = 0;
+        std::uint32_t right_flip_y = 0;
+        std::uint32_t left_filter = 0;
+        std::uint32_t right_filter = 0;
+        std::uint32_t loss_visualization = 0;
+        std::uint32_t exact_texel_sampling = 0;
+        std::uint32_t vector_padding = 0;
+        std::array<float, 2> left_uv_scale{1, 1};
+        std::array<float, 2> left_uv_clamp{1, 1};
+        std::array<float, 2> right_uv_scale{1, 1};
+        std::array<float, 2> right_uv_clamp{1, 1};
+        std::array<float, 2> left_texcoord_scale{1, 1};
+        std::array<float, 2> left_texcoord_offset{0, 0};
+        std::array<float, 2> right_texcoord_scale{1, 1};
+        std::array<float, 2> right_texcoord_offset{0, 0};
+        std::array<float, 4> background{0, 0, 0, 1};
+    };
+    static_assert(offsetof(SplitViewParameters, destination_width) == 24);
+    static_assert(offsetof(SplitViewParameters, left_uv_scale) == 160);
+    static_assert(offsetof(SplitViewParameters, background) == 224);
+    static_assert(sizeof(SplitViewParameters) == 240);
+
+    TEST_P(Programs, SplitEnvironmentPreservesAlphaAndOpaqueSampling) {
+        if (!gpu_backend_available(GetParam()))
+            GTEST_SKIP();
+        const GpuBackendScope scope(GetParam());
+        auto module = M::load(split_view_contract_entries(), GetParam());
+        ASSERT_TRUE(module) << module.error().detail();
+        constexpr uint32_t width = 64, height = 16;
+        for (const bool chw : {false, true}) {
+            for (const bool composite : {false, true}) {
+                for (const bool exact : {false, true}) {
+                    for (const float alpha : {0.0f, 0.5f, 1.0f}) {
+                        SCOPED_TRACE(testing::Message() << chw << composite << exact << " alpha=" << alpha);
+                        std::vector<float> pixels(width * height * 4, 0.25f);
+                        for (uint32_t i = 0; i < width * height; ++i)
+                            pixels[chw ? width * height * 3 + i : i * 4 + 3] = alpha;
+                        const auto shape = chw ? TensorShape{4, height, width} : TensorShape{height, width, 4};
+                        auto panel = Tensor::from_vector(pixels, shape, Device::GPU);
+                        auto output = Tensor::full({height, width, 4}, 204, Device::GPU, DataType::UInt8);
+                        SplitViewParameters params;
+                        params.destination_width = params.viewport_width = params.content_width = width;
+                        params.destination_height = params.viewport_height = params.content_height = height;
+                        params.left_width = params.right_width = width;
+                        params.left_height = params.right_height = height;
+                        params.left_channels = params.right_channels = 4;
+                        params.left_float = params.right_float = 1;
+                        params.left_chw = params.right_chw = chw;
+                        params.left_end = params.right_start = 0.5f;
+                        params.exact_texel_sampling = (exact ? 1u : 0u) | (composite ? 2u : 0u);
+                        const std::array bindings{M::Binding{0, &output, M::Access::ReadWrite},
+                                                  M::Binding{8, &panel}, M::Binding{16, &panel}};
+                        const auto dispatched = (*module)->dispatch({.function = "composeSplitView",
+                                                                     .arguments = {std::as_bytes(std::span(&params, 1)), bindings},
+                                                                     .groups = {1, height, 1}});
+                        ASSERT_TRUE(dispatched) << dispatched.error().detail();
+                        const auto actual = output.cpu().contiguous();
+                        const int expected = static_cast<int>(std::lround(255 * (composite ? 0.25f * alpha + 0.8f * (1 - alpha) : 0.25f)));
+                        for (const uint32_t x : {0u, width - 1})
+                            for (uint32_t c = 0; c < 3; ++c)
+                                EXPECT_NEAR(actual.ptr<uint8_t>()[x * 4 + c], expected, 1);
+                        EXPECT_EQ(actual.ptr<uint8_t>()[3], 255);
+                    }
+                }
+            }
+        }
+    }
 
     TEST_P(Programs, SparkDensityPreservesWeakCoverage) {
         if (!gpu_backend_available(GetParam()))

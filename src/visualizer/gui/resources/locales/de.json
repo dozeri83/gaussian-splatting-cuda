@@ -5233,5 +5233,6 @@
   "node_editor.curve_hint": "Punkte ziehen; klicken zum Hinzufügen, doppelklicken oder Entf zum Löschen.",
   "node_editor.ramp_hint": "Marken ziehen; klicken zum Hinzufügen, doppelklicken oder Entf zum Löschen. Marke auswählen, um RGBA zu ändern.",
   "node_editor.keyframe_hint": "Schlüsselbild einfügen · Strg+Klick oder I beim Darüberfahren",
-  "toolbar.asset_manager": "Projekte"
+  "toolbar.asset_manager": "Projekte",
+  "training.reset_before_strategy_change": "Setzen Sie das Training zurück, bevor Sie die Strategie ändern."
 }

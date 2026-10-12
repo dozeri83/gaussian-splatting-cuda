@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Viewport captures retain alpha compositing when an environment cannot load."""
+"""Viewport captures preserve environment backgrounds and alpha compositing."""
 
 import struct
 import time
@@ -117,11 +117,8 @@ assert not _fixture_errors, _fixture_errors
 @pytest.fixture(params=[False, True], ids=["plain", "appearance"])
 def environment_capture(capture_endpoint, request):
     endpoint = capture_endpoint
-    _tool(endpoint, "editor_run", {
-        "code": "import lichtfeld as lf\nlf.get_render_settings().apply_appearance_correction = " + repr(request.param),
-        "show_console": False, "wait_for_completion": True,
-    })
-    _settings(endpoint, environment_mode=0, background_color=[0, 0, 0])
+    _settings(endpoint, apply_appearance_correction=request.param,
+              environment_mode=0, background_color=[0, 0, 0])
     yield endpoint
     _settings(endpoint, environment_mode=0, background_color=[0, 0, 0])
 
@@ -152,9 +149,46 @@ def test_valid_environment_and_solid_restore_exactly(environment_capture, tmp_pa
     _settings(endpoint, environment_mode=1, environment_map_path=path)
     valid = _image(endpoint)
     assert _difference(solid, valid) > 1
+    with pytest.raises(AssertionError, match="previous environment was kept"):
+        _settings(endpoint, environment_map_path=str(tmp_path / "absent.hdr"))
+    assert _difference(valid, _image(endpoint)) == 0
     _unavailable_environment(endpoint, tmp_path / "absent.hdr", "missing")
     _image(endpoint)
     _settings(endpoint, environment_map_path=path)
     assert _difference(valid, _image(endpoint)) == 0
     _settings(endpoint, environment_mode=0)
     assert _difference(solid, _image(endpoint)) == 0
+
+
+def test_independent_split_keeps_environment_in_capture(environment_capture, tmp_path):
+    from PIL import ImageStat
+
+    endpoint = environment_capture
+    path = _hdr(tmp_path / "split-sky.hdr", [128, 64, 32, 129])
+    _settings(endpoint, environment_mode=1, environment_map_path=path)
+    single = _image(endpoint)
+
+    def editor(code):
+        result = _tool(endpoint, "editor_run", {
+            "code": code, "show_console": False, "wait_for_completion": True,
+        })
+        assert result.get("success", True), result
+        time.sleep(0.2)
+
+    editor("import lichtfeld as lf\n"
+           "_original_view = lf.ui.screen.active_view()\n"
+           "_added_view = lf.ui.screen.split(_original_view, direction='vertical', factor=0.5)\n"
+           "assert _added_view > 0")
+    try:
+        # Independent panels are separate screen views on dev. Capture each view.
+        for name in ("_original_view", "_added_view"):
+            editor(f"assert lf.ui.screen.set_active_view({name})")
+            image = _image(endpoint)
+            image.save(tmp_path / f"split-capture-{name}.png")
+            for x in (image.width // 4, 3 * image.width // 4):
+                sky = ImageStat.Stat(image.crop((x, 20, x + 20, 40))).mean
+                assert all(value > minimum for value, minimum in zip(sky, (200, 170, 130))), sky
+    finally:
+        editor("assert lf.ui.screen.join(_original_view, _added_view) or lf.ui.screen.close(_added_view)\n"
+               "assert lf.ui.screen.set_active_view(_original_view)")
+    assert _difference(single, _image(endpoint)) < 0.06

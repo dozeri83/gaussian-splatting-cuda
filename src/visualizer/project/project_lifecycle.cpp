@@ -21,6 +21,7 @@
 #include "core/path_utils.hpp"
 #include "core/project_path.hpp"
 #include "core/tensor_backend.hpp"
+#include "core/tensor_completion.hpp"
 #if LFS_BUILD_TRAINER
 #include "lfs/training/ops/registry.hpp"
 #endif
@@ -50,6 +51,7 @@
 #include "scene/scene_manager.hpp"
 #include "scene/viewer_splat_quantize.hpp"
 #if LFS_BUILD_TRAINER
+#include "training/checkpoint.hpp"
 #include "training/project_snapshot_chapters.hpp"
 #include "training/trainer.hpp"
 #endif
@@ -1431,6 +1433,21 @@ namespace lfs::vis::project {
                 if (!installed) {
                     return;
                 }
+                viewer_.postWork({
+                    .run = [this, epoch, document] {
+                        if (epoch_.load(std::memory_order_acquire) != epoch || document_ != document)
+                            return;
+                        if (auto* manager = viewer_.getSceneManager();
+                            manager && manager->appearanceUsesTrainingViewport()) {
+                            // Finish any viewport use before releasing the stored copy.
+                            lfs::core::TensorCompletion completion;
+                            completion.include_current_gpu();
+                            completion.wait();
+                            manager->clearAppearanceModel();
+                        }
+                    },
+                    .cancel = {},
+                });
                 if (then_reset) {
                     viewer_.postWork({
                         .run =
@@ -8497,6 +8514,34 @@ namespace lfs::vis::project {
                         }
                         return;
                     }
+#if LFS_BUILD_TRAINER
+                    // Display correction is needed even while the training session
+                    // remains stored. Read only appearance, on the hydration worker.
+                    auto appearance = std::make_shared<lfs::training::CheckpointAppearance>();
+                    const auto& hydration_report = staged->report();
+                    if (hydration_report.checkpoint_uuid && hydration_report.checkpoint_header &&
+                        lfs::core::has_flag(hydration_report.checkpoint_header->flags,
+                                            lfs::core::CheckpointFlags::HAS_PPISP) &&
+                        (!hydration_report.checkpoint_params ||
+                         hydration_report.checkpoint_params->optimization.ppisp_active())) {
+                        if (const auto* checkpoint = opened_source->find_checkpoint(*hydration_report.checkpoint_uuid)) {
+                            const auto loaded = checkpoint->visit_stream(
+                                [&](std::istream& source, const std::uint64_t bytes) -> lfs::Result<void> {
+                                    auto parsed = lfs::training::load_checkpoint_appearance(source, bytes);
+                                    if (!parsed)
+                                        return lfs::Result<void>::failure(std::move(parsed).error());
+                                    *appearance = std::move(*parsed);
+                                    return {};
+                                });
+                            if (!loaded) {
+                                LOG_WARN("Project appearance restore failed: {}", developerError(loaded.error()));
+                            } else if (hydration_report.checkpoint_params &&
+                                       !hydration_report.checkpoint_params->optimization.ppisp_use_controller) {
+                                appearance->controller.reset();
+                            }
+                        }
+                    }
+#endif
                     const auto payload_staged_at =
                         std::chrono::steady_clock::now();
                     if (project_open_job) {
@@ -8521,7 +8566,11 @@ namespace lfs::vis::project {
                                  selection_mutation_serial,
                                  selected_node_uuids,
                                  restore_ticket,
-                                 plan, hydration_started,
+                                 plan,
+#if LFS_BUILD_TRAINER
+                                 appearance,
+#endif
+                                 hydration_started,
                                  source_opened_at,
                                  payload_staged_at,
                                  queued_at, project_open_job,
@@ -8564,6 +8613,12 @@ namespace lfs::vis::project {
                                                     plan->value()),
                                                 install_selection);
                                     plan->reset();
+#if LFS_BUILD_TRAINER
+                                    if (appearance->ppisp) {
+                                        manager->setAppearanceModel(std::move(appearance->ppisp),
+                                                                    std::move(appearance->controller), true);
+                                    }
+#endif
                                     manager->changeContentType(
                                         inferContentType(
                                             manager->getScene()));

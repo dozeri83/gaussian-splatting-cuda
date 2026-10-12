@@ -3,6 +3,7 @@
 #pragma once
 
 #include "core/tensor_fwd.hpp"
+#include "viewport_draw_types.hpp"
 
 #include <glm/glm.hpp>
 #include <memory>
@@ -19,6 +20,7 @@ namespace lfs::vis {
         glm::vec2 texcoord_scale{1.0f};
         glm::vec2 texcoord_offset{0.0f};
         bool spatial_filter = false;
+        ViewportEnvironment environment{};
     };
 
     struct SplitViewCpuDesc {

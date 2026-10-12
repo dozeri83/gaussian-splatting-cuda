@@ -4,7 +4,9 @@
 #include "rendering_manager_split_view.hpp"
 
 #include "core/camera.hpp"
+#include "core/environment_math.hpp"
 #include "core/tensor.hpp"
+#include "rendering/environment_image.hpp"
 #include "rendering/image_layout.hpp"
 #include "rendering/rendering.hpp"
 #include "viewport_request_builder.hpp"
@@ -301,6 +303,19 @@ namespace lfs::vis {
         apply_tight_cpu_uv(left_panel, std::get<1>(*left_data), std::get<2>(*left_data));
         apply_tight_cpu_uv(right_panel, std::get<1>(*right_data), std::get<2>(*right_data));
 
+        const auto load_environment = [](const ViewportEnvironment& environment) {
+            std::shared_ptr<const lfs::rendering::EnvironmentImage> image;
+            if (environment.enabled && environment.map_path) {
+                auto loaded = lfs::rendering::loadEnvironmentImageShared(*environment.map_path);
+                if (loaded) {
+                    image = *loaded;
+                }
+            }
+            return image;
+        };
+        const auto left_environment = load_environment(params.left.environment);
+        const auto right_environment = load_environment(params.right.environment);
+
         const int width = output_size.x;
         const int height = output_size.y;
         if (width <= 0 || height <= 0)
@@ -361,15 +376,14 @@ namespace lfs::vis {
         };
         const auto sample_panel_color = [&](const SplitViewCpuPanelDesc& panel,
                                             const auto& data, const float u, const float v) {
-            if (params.exact_texel_sampling) {
+            const auto exact_sample = [&](const int channel) {
                 const int w = std::get<1>(data), h = std::get<2>(data);
                 const int x = std::clamp(static_cast<int>(u * rect_width), 0, w - 1);
                 const int local_y = static_cast<int>(v * rect_height);
                 const int y = std::clamp(panel.flip_y ? rect_height - 1 - local_y : local_y, 0, h - 1);
                 const float* pixels = std::get<0>(data).template ptr<float>();
-                const auto at = [&](int c) { return pixels[(static_cast<std::size_t>(c) * h + y) * w + x]; };
-                return glm::vec3{at(0), at(1), at(2)};
-            }
+                return pixels[(static_cast<std::size_t>(channel) * h + y) * w + x];
+            };
             float panel_u = u;
             if (panel.normalize_x_to_panel) {
                 const float span = std::max(panel.end_position - panel.start_position, 1e-6f);
@@ -388,8 +402,10 @@ namespace lfs::vis {
                     sample(std::get<0>(data), std::get<1>(data), std::get<2>(data), sample_uv.x, sample_uv.y, 1),
                     sample(std::get<0>(data), std::get<1>(data), std::get<2>(data), sample_uv.x, sample_uv.y, 2)};
             };
-            glm::vec3 color = sample_color(texture_uv);
-            if (panel.spatial_filter) {
+            glm::vec3 color = params.exact_texel_sampling
+                                  ? glm::vec3{exact_sample(0), exact_sample(1), exact_sample(2)}
+                                  : sample_color(texture_uv);
+            if (panel.spatial_filter && !params.exact_texel_sampling) {
                 constexpr float kSpatialSharpenStrength = 0.18f;
                 const float texel_x = 1.0f / static_cast<float>(std::max(std::get<1>(data), 1));
                 const float texel_y = 1.0f / static_cast<float>(std::max(std::get<2>(data), 1));
@@ -405,6 +421,39 @@ namespace lfs::vis {
                 color = glm::clamp(sharpened,
                                    glm::min(color, glm::min(glm::min(left, right), glm::min(up, down))),
                                    glm::max(color, glm::max(glm::max(left, right), glm::max(up, down))));
+            }
+            if (panel.environment.enabled) {
+                const auto& environment = panel.environment;
+                const auto& image = &panel == &left_panel ? left_environment : right_environment;
+                glm::vec3 background{0.0f};
+                if (image) {
+                    namespace math = lfs::core::envmath;
+                    auto direction = math::environmentWorldDirection(
+                        panel_u * environment.viewport_size.x - 0.5f,
+                        v * environment.viewport_size.y - 0.5f,
+                        environment.viewport_size.x, environment.viewport_size.y,
+                        environment.equirectangular_view,
+                        environment.intrinsics.x, environment.intrinsics.y,
+                        environment.intrinsics.z, environment.intrinsics.w,
+                        &environment.camera_to_world[0][0]);
+                    direction = math::rotateAroundY(direction, environment.rotation_radians);
+                    const auto uv = math::equirectUvForDirection(direction);
+                    const auto radiance = math::sampleEnvironmentBilinear(
+                        [&](const int sx, const int sy) {
+                            const auto offset = (static_cast<std::size_t>(sy) * image->width + sx) * 3;
+                            return math::Vec3{image->pixels[offset], image->pixels[offset + 1], image->pixels[offset + 2]};
+                        },
+                        uv.u, uv.v, image->width, image->height);
+                    const auto shaded = math::shadeEnvironmentRadiance(radiance, std::exp2(environment.exposure));
+                    background = {shaded.x, shaded.y, shaded.z};
+                }
+                const float alpha = std::get<3>(data) >= 4
+                                        ? std::clamp(params.exact_texel_sampling ? exact_sample(3)
+                                                                                 : sample(std::get<0>(data), std::get<1>(data), std::get<2>(data),
+                                                                                          texture_uv.x, texture_uv.y, 3),
+                                                     0.0f, 1.0f)
+                                        : 1.0f;
+                color = color * alpha + background * (1.0f - alpha);
             }
             return color;
         };

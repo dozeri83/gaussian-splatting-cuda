@@ -5233,5 +5233,6 @@
   "node_editor.curve_hint": "Drag points to shape the curve. Click to add; double-click or Delete to remove.",
   "node_editor.ramp_hint": "Drag stops to move them. Click to add; double-click or Delete to remove. Select a stop to edit RGBA.",
   "node_editor.keyframe_hint": "Insert keyframe · Ctrl+click or I while hovering",
-  "toolbar.asset_manager": "Projects"
+  "toolbar.asset_manager": "Projects",
+  "training.reset_before_strategy_change": "Reset training before changing strategy."
 }

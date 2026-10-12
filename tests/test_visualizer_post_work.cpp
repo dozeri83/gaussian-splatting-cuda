@@ -21,6 +21,7 @@
 #include "core/scene.hpp"
 #include "core/services.hpp"
 #include "core/tensor_backend.hpp"
+#include "core/tensor_execution.hpp"
 #include "core/training_state.hpp"
 #include "core/user_paths.hpp"
 #include "cuda_backend_test.hpp"
@@ -51,6 +52,7 @@
 #include "rendering/coordinate_conventions.hpp"
 #include "rendering/passes/vulkan_viewport_pass.hpp"
 #include "rendering/rendering_manager.hpp"
+#include "rendering/viewport_appearance_correction.hpp"
 #include "rendering/vulkan_view_render_state.hpp"
 #include "scene/viewer_splat_quantize.hpp"
 #include "tools/unified_tool_registry.hpp"
@@ -946,7 +948,8 @@ namespace {
         const lfs::core::Uuid& checkpoint_uuid,
         const std::filesystem::path& dataset_path = {},
         const int sh_degree = 0,
-        const bool gut = false) {
+        const bool gut = false,
+        const lfs::training::PPISP* appearance = nullptr) {
         const lfs::core::GpuBackendScope backend_scope(lfs::core::GpuBackend::CUDA);
         const std::size_t count = sh_degree > 0 ? 8 : 2;
         auto model = sh_degree > 0
@@ -959,6 +962,7 @@ namespace {
                 mcmc_defaults();
         parameters.optimization.sh_degree = sh_degree;
         parameters.optimization.gut = gut;
+        parameters.optimization.use_ppisp = appearance != nullptr;
         parameters.optimization.max_cap =
             static_cast<int>(count);
         parameters.dataset.data_path = dataset_path;
@@ -968,7 +972,7 @@ namespace {
         (void)lfs::test::licht::require_result(
             lfs::training::serialize_checkpoint(
                 stream, 11, strategy, parameters,
-                nullptr, nullptr, nullptr, nullptr));
+                nullptr, appearance, nullptr, nullptr));
         const auto encoded = stream.str();
         std::vector<std::byte> bytes(encoded.size());
         std::memcpy(
@@ -1113,7 +1117,8 @@ namespace {
         const int prms_iterations = -1,
         const bool gut = false,
         const bool enable_sparsity = false,
-        const int sparsify_steps = 15000) {
+        const int sparsify_steps = 15000,
+        const lfs::training::PPISP* appearance = nullptr) {
         auto document = lfs::test::licht::make_empty_document(
             lfs::core::generate_uuid_v4(), 1);
         lfs::core::Scene source;
@@ -1163,7 +1168,7 @@ namespace {
                 checkpoint_uuid,
                 make_training_autosave_checkpoint_payload(
                     checkpoint_uuid, dataset_path,
-                    sh_degree, gut)));
+                    sh_degree, gut, appearance)));
         if (finish_reason !=
             lfs::io::project::TrainingFinishReason::
                 None) {
@@ -8543,6 +8548,112 @@ contract["check_selection_submode_follows_native_mode"](lf)
                 gui->asyncTasks().getImportPath(),
                 dataset_path.filename().string());
         }
+    }
+
+    TEST_F(VisualizerImplResetTest, RejectedDatasetPreservesProjectScene) {
+        const auto project = temporary_.path / "existing.licht";
+        write_splt_project(project, lfs::test::licht::make_splat(2), "First",
+                           lfs::test::licht::make_splat(3), "Second");
+        const auto original_bytes = lfs::test::licht::read_file_bytes(project);
+        const auto dataset = temporary_.path / "dataset";
+        write_minimal_transforms_dataset(dataset);
+        nlohmann::json valid;
+        std::ifstream(dataset / "transforms.json") >> valid;
+
+        VisualizerImpl viewer(projectOptions());
+        ASSERT_TRUE(viewer.getParameterManager()->ensureLoaded());
+        for (const auto& invalid : std::vector<nlohmann::json>{
+                 {{"fl_y", 0}},
+                 {{"fl_y", -1}},
+                 {{"camera_angle_x", 0}},
+                 {{"camera_angle_x", 3.141592653589793}}}) {
+            SCOPED_TRACE(invalid.dump());
+            auto transforms = valid;
+            transforms.update(invalid);
+            if (invalid.contains("camera_angle_x"))
+                transforms.erase("fl_x");
+            std::ofstream(dataset / "transforms.json") << transforms.dump();
+            ASSERT_TRUE(viewer.projectOpen(project, ProjectSwitchDisposition::DiscardChanges));
+            ASSERT_TRUE(waitUntil([&] {
+                viewer.pumpPostedWorkForProjectWrite();
+                const auto info = viewer.projectGetInfo();
+                return info && info->hydration_state == "complete";
+            }));
+            auto* const manager = viewer.getSceneManager();
+            manager->selectNode("First");
+            const auto before = viewer.projectGetInfo();
+            ASSERT_TRUE(before);
+            ASSERT_FALSE(before->dirty);
+            const auto* first = viewer.getScene().getNode("First");
+            const auto* second = viewer.getScene().getNode("Second");
+            ASSERT_NE(first, nullptr);
+            ASSERT_NE(second, nullptr);
+            core::param::TrainingParameters params;
+            params.no_download = true;
+            const auto rejected = manager->loadDataset(dataset, params);
+            ASSERT_FALSE(rejected);
+            EXPECT_NE(rejected.error().find("Transforms"), std::string::npos);
+            EXPECT_EQ(viewer.getScene().getNode("First"), first);
+            EXPECT_EQ(viewer.getScene().getNode("Second"), second);
+            EXPECT_EQ(manager->getSelectedNodeName(), "First");
+            const auto after = viewer.projectGetInfo();
+            ASSERT_TRUE(after);
+            EXPECT_FALSE(after->dirty);
+            EXPECT_EQ(after->path, before->path);
+            EXPECT_EQ(after->project_uuid, before->project_uuid);
+            ASSERT_EQ(after->payloads.size(), before->payloads.size());
+            for (size_t i = 0; i < before->payloads.size(); ++i) {
+                EXPECT_EQ(after->payloads[i].node_uuid, before->payloads[i].node_uuid);
+                EXPECT_EQ(after->payloads[i].hydration_state, before->payloads[i].hydration_state);
+            }
+            EXPECT_EQ(lfs::test::licht::read_file_bytes(project), original_bytes);
+        }
+    }
+
+    TEST_F(VisualizerImplResetTest, RejectedCheckpointDatasetPreservesScene) {
+        const auto dataset = temporary_.path / "dataset";
+        write_minimal_transforms_dataset(dataset);
+        nlohmann::json transforms;
+        std::ifstream(dataset / "transforms.json") >> transforms;
+        transforms["fl_y"] = 0;
+        std::ofstream(dataset / "transforms.json") << transforms.dump();
+        const auto checkpoint = temporary_.path / "model.resume";
+        const auto payload = make_training_autosave_checkpoint_payload(core::generate_uuid_v4(), dataset);
+        std::vector<std::byte> bytes(payload.size());
+        ASSERT_TRUE(payload.read_at(0, bytes));
+        lfs::test::licht::write_file_bytes(checkpoint, bytes);
+
+        VisualizerImpl viewer(projectOptions());
+        ASSERT_TRUE(viewer.getParameterManager()->ensureLoaded());
+        const auto id = viewer.getScene().addGroup("Existing");
+        auto* const existing = viewer.getScene().getNodeById(id);
+        core::param::TrainingParameters params;
+        params.no_download = true;
+        EXPECT_THROW(viewer.getSceneManager()->loadCheckpointForTraining(checkpoint, params), std::runtime_error);
+        EXPECT_EQ(viewer.getScene().getNode("Existing"), existing);
+    }
+
+    TEST_F(VisualizerImplResetTest, DatasetReplacementKeepsSuccessfulAndEarlyRejectionBehavior) {
+        VisualizerImpl viewer(projectOptions());
+        ASSERT_TRUE(viewer.getParameterManager()->ensureLoaded());
+        auto* const manager = viewer.getSceneManager();
+        const auto id = viewer.getScene().addGroup("Existing");
+        core::param::TrainingParameters params;
+        params.no_download = true;
+        params.optimization.init_num_pts = 8;
+        EXPECT_FALSE(manager->loadDataset(temporary_.path / "missing", params));
+        EXPECT_NE(viewer.getScene().getNodeById(id), nullptr);
+
+        const auto dataset = temporary_.path / "valid";
+        write_minimal_transforms_dataset(dataset);
+        const auto loaded = manager->loadDataset(dataset, params);
+        ASSERT_TRUE(loaded) << loaded.error();
+        EXPECT_EQ(viewer.getScene().getNode("Existing"), nullptr);
+        EXPECT_EQ(viewer.getScene().getAllCameras().size(), 1u);
+        ASSERT_NE(viewer.getScene().getInitialPointCloud(), nullptr);
+        EXPECT_EQ(viewer.getScene().getInitialPointCloud()->size(), 10000);
+        EXPECT_TRUE(viewer.getTrainerManager()->hasTrainer());
+        EXPECT_EQ(manager->getContentType(), SceneManager::ContentType::Dataset);
     }
 
     TEST_F(VisualizerImplResetTest,
@@ -17991,6 +18102,126 @@ contract["check_selection_submode_follows_native_mode"](lf)
             checkpoint_identity(project_path);
         EXPECT_EQ(after_save.first, before.first);
         EXPECT_EQ(after_save.second, before.second);
+    }
+
+    TEST(ViewportAppearanceCorrectionTest, StandaloneModesPreservePixelsAndUpdateCost) {
+        if (!lfs::core::gpu_backend_available(lfs::core::default_gpu_backend())) {
+            GTEST_SKIP() << "CUDA device unavailable";
+        }
+        SceneManager scene;
+        auto appearance = std::make_unique<lfs::training::PPISP>(100);
+        appearance->register_frame(0, 0);
+        appearance->register_frame(1, 0);
+        appearance->finalize();
+        appearance->seed_exposure({{0, 2.0f}, {1, -2.0f}});
+        auto* ppisp = appearance.get();
+        scene.setAppearanceModel(std::move(appearance));
+        auto input = std::make_shared<lfs::core::Tensor>(
+            lfs::core::Tensor::full({3, 420, 648}, 0.25f, lfs::core::Device::GPU));
+        RenderSettings settings;
+        settings.apply_appearance_correction = false;
+        EXPECT_EQ(applyViewportAppearanceCorrection(input, &scene, settings, 0), input);
+        settings.apply_appearance_correction = true;
+        for (const int uid : {0, -1}) {
+            const auto expected = (uid == 0 ? ppisp->apply(*input, 0, 0)
+                                            : ppisp->apply_with_exposure(*input, 0, 0.0f))
+                                      .cpu()
+                                      .to_vector();
+            EXPECT_EQ(applyViewportAppearanceCorrection(input, &scene, settings, uid)->cpu().to_vector(), expected);
+        }
+        settings.ppisp_mode = RenderSettings::PPISPMode::MANUAL;
+        settings.ppisp_overrides.exposure_offset = 0.5f;
+        lfs::training::PPISPRenderOverrides overrides;
+        overrides.exposure_offset = 0.5f;
+        const auto expected = ppisp->apply_with_overrides(*input, 0, 0, overrides).cpu().to_vector();
+        EXPECT_EQ(applyViewportAppearanceCorrection(input, &scene, settings, 0)->cpu().to_vector(), expected);
+        for (int i = 0; i < 10; ++i)
+            (void)applyViewportAppearanceCorrection(input, &scene, settings, 0);
+        lfs::core::TensorExecutionTarget::current().wait();
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 200; ++i)
+            (void)applyViewportAppearanceCorrection(input, &scene, settings, 0);
+        lfs::core::TensorExecutionTarget::current().wait();
+        std::cout << "appearance_update_us="
+                  << std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / 200
+                  << '\n';
+        std::stringstream snapshot;
+        ppisp->serialize(snapshot);
+        snapshot.seekg(0);
+        auto restored = std::make_unique<lfs::training::PPISP>(1);
+        restored->deserialize(snapshot);
+        SceneManager reopened;
+        reopened.setAppearanceModel(std::move(restored), nullptr, true);
+        // The stored training viewport keeps the live trainer's first-frame
+        // fallback for novel views, including manual controls.
+        EXPECT_EQ(applyViewportAppearanceCorrection(input, &reopened, settings, -1)->cpu().to_vector(), expected);
+        settings.ppisp_mode = RenderSettings::PPISPMode::AUTO;
+        const auto training_default = ppisp->apply(*input, 0, 0).cpu().to_vector();
+        EXPECT_EQ(applyViewportAppearanceCorrection(input, &reopened, settings, -1)->cpu().to_vector(), training_default);
+        settings.ppisp_mode = RenderSettings::PPISPMode::MANUAL;
+        for (int i = 0; i < 10; ++i)
+            (void)applyViewportAppearanceCorrection(input, &reopened, settings, 0);
+        lfs::core::TensorExecutionTarget::current().wait();
+        const auto restored_start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 200; ++i)
+            (void)applyViewportAppearanceCorrection(input, &reopened, settings, 0);
+        lfs::core::TensorExecutionTarget::current().wait();
+        std::cout << "restored_appearance_update_us="
+                  << std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - restored_start).count() / 200
+                  << '\n';
+        scene.clearAppearanceModel();
+        EXPECT_EQ(applyViewportAppearanceCorrection(input, &scene, settings, 0), input);
+    }
+
+    TEST_F(VisualizerImplResetTest, LazyCheckpointReopenPreservesAppearance) {
+        if (!lfs::core::gpu_backend_available(lfs::core::default_gpu_backend())) {
+            GTEST_SKIP() << "CUDA device unavailable";
+        }
+        const auto project_path = temporary_.path / "appearance.licht";
+        const auto dataset_path = temporary_.path / "dataset";
+        write_minimal_transforms_dataset(dataset_path);
+        lfs::training::PPISP appearance(100);
+        appearance.register_frame(0, 0);
+        appearance.register_frame(1, 0);
+        appearance.finalize();
+        appearance.seed_exposure({{0, 2.0f}, {1, -2.0f}});
+        write_resumable_project_with_checkpoint(
+            project_path, lfs::core::generate_uuid_v4(),
+            lfs::core::generate_uuid_v4(), dataset_path,
+            lfs::io::project::TrainingFinishReason::None, 0, -1, false, false, 15000, &appearance);
+        const auto before = checkpoint_identity(project_path);
+        VisualizerImpl viewer(projectOptions());
+        ASSERT_TRUE(viewer.getParameterManager()->ensureLoaded());
+        ASSERT_TRUE(viewer.getWindowManager()->init());
+        viewer.input_controller_ = std::make_unique<InputController>(nullptr, viewer);
+        ASSERT_TRUE(viewer.projectOpen(project_path, ProjectSwitchDisposition::DiscardChanges));
+        viewer.noteGuiSessionRestoreOwnerReady(1);
+        ASSERT_TRUE(waitForHydrationComplete(viewer, viewer.work_queue_mutex_, viewer.work_queue_));
+        EXPECT_FALSE(viewer.getTrainerManager()->hasTrainer());
+        EXPECT_FALSE(viewer.projectTrainingSessionState().hydrated);
+        auto* scene = viewer.getSceneManager();
+        ASSERT_TRUE(scene->hasAppearanceModel());
+        auto input = std::make_shared<lfs::core::Tensor>(
+            lfs::core::Tensor::full({3, 8, 8}, 0.25f, lfs::core::Device::GPU));
+        RenderSettings settings;
+        settings.apply_appearance_correction = true;
+        const auto expected = appearance.apply(*input, 0, 0).cpu().to_vector();
+        EXPECT_EQ(applyViewportAppearanceCorrection(input, scene, settings, 0)->cpu().to_vector(), expected);
+        settings.apply_appearance_correction = false;
+        EXPECT_EQ(applyViewportAppearanceCorrection(input, scene, settings, 0), input);
+        const auto saved = viewer.projectSave(false);
+        ASSERT_TRUE(saved) << lfs::format_for_developer(saved.error());
+        ASSERT_TRUE(pumpUntil(viewer.work_queue_mutex_, viewer.work_queue_, [&] {
+            return !viewer.jobs().anyRunning(JobType::ProjectWrite);
+        }));
+        EXPECT_EQ(checkpoint_identity(project_path), before);
+        ASSERT_TRUE(restoreTrainerAndWait(viewer, viewer.work_queue_mutex_, viewer.work_queue_));
+        ASSERT_TRUE(pumpUntil(viewer.work_queue_mutex_, viewer.work_queue_, [&] {
+            return !scene->hasAppearanceModel();
+        }));
+        ASSERT_TRUE(viewer.getTrainerManager()->getTrainer()->hasPPISP());
+        settings.apply_appearance_correction = true;
+        EXPECT_EQ(applyViewportAppearanceCorrection(input, scene, settings, 0)->cpu().to_vector(), expected);
     }
 
     TEST_F(VisualizerImplResetTest,

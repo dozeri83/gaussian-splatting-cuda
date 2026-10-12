@@ -54,8 +54,10 @@ namespace lfs::vis {
             const int camera_uid,
             const PPISPOverrides& overrides,
             const lfs::core::PpispRegion& region = {},
-            const lfs::core::Tensor& controller_params = {}) {
-            const bool was_hwc = (rgb.ndim() == 3 && rgb.shape()[2] == 3);
+            const lfs::core::Tensor& controller_params = {},
+            const bool training_viewport = false) {
+            const bool was_hwc = rgb.ndim() == 3 &&
+                                 (training_viewport ? rgb.shape()[0] != 3 : rgb.shape()[2] == 3);
             const auto input = was_hwc ? rgb.permute({2, 0, 1}).contiguous() : rgb;
             const bool is_training_camera = ppisp.is_known_frame(camera_uid);
             const int camera_idx = is_training_camera ? ppisp.camera_index(ppisp.camera_for_frame(camera_uid)) : 0;
@@ -78,6 +80,13 @@ namespace lfs::vis {
                              ? ppisp.apply(input, camera_id, camera_uid, region)
                              : ppisp.apply_with_overrides(
                                    input, camera_id, camera_uid, toRenderOverrides(overrides), region);
+            } else if (training_viewport) {
+                const int fallback_camera = ppisp.any_camera_id();
+                const int fallback_frame = ppisp.any_frame_uid();
+                result = overrides.isIdentity()
+                             ? ppisp.apply(input, fallback_camera, fallback_frame, region)
+                             : ppisp.apply_with_overrides(input, fallback_camera, fallback_frame,
+                                                          toRenderOverrides(overrides), region);
             } else {
                 const int camera = ppisp.majority_camera_id();
                 result = overrides.isIdentity()
@@ -92,6 +101,29 @@ namespace lfs::vis {
         [[nodiscard]] lfs::core::Tensor applyStandaloneAppearance(
             const lfs::core::Tensor& rgb, SceneManager& scene_mgr, int camera_uid,
             const PPISPOverrides& overrides, bool use_controller, const lfs::core::PpispRegion& region) {
+#if LFS_BUILD_TRAINER
+            if (auto* ppisp = scene_mgr.getAppearancePPISP()) {
+                auto* pool = use_controller ? scene_mgr.getAppearanceControllerPool() : nullptr;
+                const bool training_viewport = scene_mgr.appearanceUsesTrainingViewport();
+                std::unique_lock<std::mutex> controller_lock;
+                if (pool) {
+                    controller_lock = std::unique_lock(pool->predict_mutex());
+                    const bool hwc = training_viewport ? rgb.shape()[0] != 3 : rgb.shape()[2] == 3;
+                    pool->allocate_buffers(rgb.shape()[hwc ? 0 : 1], rgb.shape()[hwc ? 1 : 2]);
+                }
+                auto effective_overrides = overrides;
+                if (training_viewport) {
+                    effective_overrides = {};
+                    effective_overrides.exposure_offset = overrides.exposure_offset;
+                    effective_overrides.vignette_enabled = overrides.vignette_enabled;
+                    effective_overrides.vignette_strength = overrides.vignette_strength;
+                    effective_overrides.wb_temperature = overrides.wb_temperature;
+                    effective_overrides.wb_tint = overrides.wb_tint;
+                    effective_overrides.gamma_multiplier = overrides.gamma_multiplier;
+                }
+                return applyPpispAppearance(*ppisp, pool, rgb, camera_uid, effective_overrides, region, {}, training_viewport);
+            }
+#endif
             const auto* model = scene_mgr.getAppearanceTensorModel();
             if (!model)
                 return rgb;

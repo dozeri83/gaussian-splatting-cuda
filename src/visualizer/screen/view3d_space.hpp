@@ -54,7 +54,7 @@ namespace lfs::vis::screen {
     //   axis:top|bottom|front|back|right|left, overlay:grid|axes|pivot|frustums,
     //   overlay:grid_plane:<0..2>.
     // Returns false for commands it does not know.
-    bool applyViewCommand(View3DSpace& view, std::string_view command, float viewport_height);
+    LFS_VIS_API bool applyViewCommand(View3DSpace& view, std::string_view command, float viewport_height);
 
     [[nodiscard]] LFS_VIS_API nlohmann::json viewSettingsToJson(const ViewSettings& settings);
     // Fields missing from `json` keep their value from `base`; present fields

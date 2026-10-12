@@ -212,7 +212,10 @@ namespace lfs::vis {
                 .flip_y = panel.flip_y,
                 .uv_scale = panel.uv_scale,
                 .uv_clamp_max = panel.uv_clamp_max,
+                .texcoord_scale = panel.texcoord_scale,
+                .texcoord_offset = panel.texcoord_offset,
                 .spatial_filter = panel.spatial_filter,
+                .environment = panel.environment,
             };
         }
 
@@ -249,13 +252,14 @@ namespace lfs::vis {
         [[nodiscard]] VulkanMeshFrame populateMeshFrame(
             const FrameContext& frame_ctx,
             const RenderSettings& settings,
-            const VulkanSplitViewParams& split_view_params) {
+            const VulkanSplitViewParams& split_view_params,
+            const std::shared_ptr<const std::filesystem::path>& environment_map_path) {
             auto meshes = buildViewportMeshes(frame_ctx, settings);
             VulkanMeshFrame frame;
             frame.view_projection = meshes.view_projection;
             frame.camera_position = meshes.camera_position;
             frame.items = std::move(meshes.items);
-            frame.environment = buildViewportEnvironment(frame_ctx, settings, environmentBackgroundEnabled(settings));
+            frame.environment = buildViewportEnvironment(frame_ctx, settings, environmentBackgroundEnabled(settings), environment_map_path);
             frame.split_view = split_view_params;
 
             return frame;
@@ -557,6 +561,10 @@ namespace lfs::vis {
             rendererTrainingInterop(*scene_renderer_).releaseScratchOnIdle(true);
         }
         auto frame_settings = context.settings;
+        const auto environment_map_path = [this] {
+            std::lock_guard lock(settings_mutex_);
+            return environment_map_path_;
+        }();
         enforceProjectionBackend(frame_settings);
         const bool frame_depth_window_drag_preview = depthWindowDragPreview(context.view);
         if (context.preparing_import && splitViewUsesPLYComparison(frame_settings.split_view_mode) && context.scene_manager) {
@@ -2644,6 +2652,11 @@ namespace lfs::vis {
             pending_split_view.right.spatial_filter = filter_reconstructed_panels;
             pending_split_view.coordinate_extent =
                 rendered_gt_actual_size ? current_size : render_size;
+            if (environmentBackgroundUsesTransparentViewerCompositing(frame_settings)) {
+                const auto environment = buildViewportEnvironment(frame_ctx, frame_settings, true, environment_map_path);
+                pending_split_view.left.environment = environment;
+                pending_split_view.right.environment = environment;
+            }
         }
 
         const bool render_point_cloud = frame_settings.point_cloud_mode || !has_visible_gaussian_model;
@@ -2731,7 +2744,7 @@ namespace lfs::vis {
 
                 if (!frame_ctx.scene_state.meshes.empty() ||
                     environmentBackgroundEnabled(frame_settings)) {
-                    auto mesh_frame = populateMeshFrame(frame_ctx, frame_settings, pending_split_view);
+                    auto mesh_frame = populateMeshFrame(frame_ctx, frame_settings, pending_split_view, environment_map_path);
                     if (vulkanSceneImageView(render_result->depth_image_view) != VK_NULL_HANDLE) {
                         // The Vulkan point renderer exposes its hardware depth attachment
                         // (NDC z); the Metal one writes linear view depth, cleared to -1.
@@ -2844,7 +2857,7 @@ namespace lfs::vis {
                                 vulkanSceneImageView(render_result.depth_image_view) != VK_NULL_HANDLE ||
                                 pending_split_view.enabled;
                             if (publish_mesh_frame) {
-                                auto mesh_frame = populateMeshFrame(frame_ctx, frame_settings, pending_split_view);
+                                auto mesh_frame = populateMeshFrame(frame_ctx, frame_settings, pending_split_view, environment_map_path);
                                 if (vulkanSceneImageView(render_result.depth_image_view) != VK_NULL_HANDLE) {
                                     mesh_frame.depth_blit.external_image = vulkanSceneImage(render_result.depth_image);
                                     mesh_frame.depth_blit.external_image_view = vulkanSceneImageView(render_result.depth_image_view);
@@ -3245,7 +3258,7 @@ namespace lfs::vis {
         if ((rendered_image || render_error.empty() || pending_split_view.enabled) &&
             (environmentBackgroundEnabled(frame_settings) || !frame_ctx.scene_state.meshes.empty() ||
              pending_split_view.enabled)) {
-            VulkanMeshFrame gpu_mesh_frame = populateMeshFrame(frame_ctx, frame_settings, pending_split_view);
+            VulkanMeshFrame gpu_mesh_frame = populateMeshFrame(frame_ctx, frame_settings, pending_split_view, environment_map_path);
 
             // Splat depth -> mesh-pass z-test source. Only meaningful when the
             // active render path produced a tensor-backed depth output.
@@ -3312,13 +3325,13 @@ namespace lfs::vis {
                                 capture_params = vulkanViewRenderState(view_state).mesh_frame.split_view;
                             }
                         }
-                        const auto read_panel = [this](const RenderTargetId target)
+                        const auto read_panel = [this](const RenderTargetId target, const bool transparent_background)
                             -> std::shared_ptr<lfs::core::Tensor> {
                             if (!scene_renderer_ || !last_graphics_context_) {
                                 return {};
                             }
-                            auto image = scene_renderer_->readOutputImage(
-                                target);
+                            auto image = transparent_background ? scene_renderer_->readOutputImageRgba(target)
+                                                                : scene_renderer_->readOutputImage(target);
                             if (!image) {
                                 LOG_ERROR("Failed to capture Scene split-view panel: {}", image.error());
                                 return {};
@@ -3328,7 +3341,7 @@ namespace lfs::vis {
                         if (!capture_params.left.image &&
                             capture_params.left.external_image_view != VK_NULL_HANDLE) {
                             capture_params.left.image =
-                                read_panel(view_state.split_left_render_target_);
+                                read_panel(view_state.split_left_render_target_, capture_params.left.environment.enabled);
                         }
                         if (!capture_params.right.image &&
                             capture_params.right.external_image_view != VK_NULL_HANDLE) {
@@ -3339,7 +3352,7 @@ namespace lfs::vis {
                                 }
                             } else {
                                 capture_params.right.image =
-                                    read_panel(view_state.split_right_render_target_);
+                                    read_panel(view_state.split_right_render_target_, capture_params.right.environment.enabled);
                             }
                         }
                         if (!capture_params.left.image || !capture_params.right.image) {

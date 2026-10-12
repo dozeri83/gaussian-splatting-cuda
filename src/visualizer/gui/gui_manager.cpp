@@ -6536,6 +6536,7 @@ namespace lfs::vis::gui {
             last_ui_layout_work_size_ = screen.work_size;
             last_ui_layout_ui_hidden_ = ui_hidden_;
             last_ui_layout_screen_generation_ = screen_generation;
+            rml_viewport_overlay_.setSplitViewLayout(viewer_->screens().screen().views().size() > 1);
             last_ui_layout_panel_visibility_revision_ = reg.visibility_revision();
         }
 

@@ -5233,5 +5233,6 @@
   "node_editor.curve_hint": "Déplacez les points ; cliquez pour ajouter, double-cliquez ou Suppr pour retirer.",
   "node_editor.ramp_hint": "Déplacez les étapes ; cliquez pour ajouter, double-cliquez ou Suppr pour retirer. Sélectionnez une étape pour régler RVBA.",
   "node_editor.keyframe_hint": "Insérer une image clé · Ctrl+clic ou I au survol",
-  "toolbar.asset_manager": "Projets"
+  "toolbar.asset_manager": "Projets",
+  "training.reset_before_strategy_change": "Réinitialisez l’entraînement avant de changer de stratégie."
 }

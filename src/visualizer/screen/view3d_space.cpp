@@ -274,6 +274,8 @@ namespace lfs::vis::screen {
             const float half_tan = std::tan(lfs::rendering::focalLengthToVFovRad(s.focal_length_mm) * 0.5f);
             if (viewport_height > 0.0f && std::isfinite(distance) && distance > 0.01f && half_tan > 0.0f)
                 s.ortho_scale = std::clamp(viewport_height / (2.0f * distance * half_tan), kMinScale, kMaxScale);
+            else
+                s.ortho_scale = 100.0f;
         }
         s.orthographic = enabled;
         sanitizeGTComparisonSettings(s);

@@ -27,6 +27,9 @@ namespace lfs::training {
         return lfs::io::CentralizeDataset::Off;
     }
 
+    [[nodiscard]] lfs::io::Result<lfs::io::LoadResult> loadTrainingData(
+        const lfs::core::param::TrainingParameters& params);
+
     std::expected<void, std::string> loadTrainingDataIntoScene(
         const lfs::core::param::TrainingParameters& params,
         lfs::core::Scene& scene);

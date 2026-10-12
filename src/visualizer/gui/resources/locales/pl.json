@@ -5233,5 +5233,6 @@
   "node_editor.curve_hint": "Przeciągaj punkty; kliknij, aby dodać, kliknij dwukrotnie lub naciśnij Delete, aby usunąć.",
   "node_editor.ramp_hint": "Przeciągaj znaczniki; kliknij, aby dodać, kliknij dwukrotnie lub Delete, aby usunąć. Zaznacz znacznik, aby zmienić RGBA.",
   "node_editor.keyframe_hint": "Wstaw klatkę kluczową · Ctrl+kliknięcie lub I po najechaniu kursorem",
-  "toolbar.asset_manager": "Projekty"
+  "toolbar.asset_manager": "Projekty",
+  "training.reset_before_strategy_change": "Zresetuj trening przed zmianą strategii."
 }

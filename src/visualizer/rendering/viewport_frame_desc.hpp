@@ -38,6 +38,7 @@ namespace lfs::vis {
         std::shared_ptr<const lfs::core::Tensor> image, depth;
         float start_position = 0, end_position = 1;
         bool normalize_x_to_panel = false, flip_y = false, spatial_filter = false;
+        ViewportEnvironment environment{};
         glm::ivec2 image_size{0}, allocation_size{0};
         glm::vec2 uv_scale{1}, uv_clamp_max{1}, texcoord_scale{1}, texcoord_offset{0};
     };

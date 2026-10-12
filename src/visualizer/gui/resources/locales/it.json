@@ -5233,5 +5233,6 @@
   "node_editor.curve_hint": "Trascina i punti; clic per aggiungere, doppio clic o Canc per rimuovere.",
   "node_editor.ramp_hint": "Trascina le tappe; clic per aggiungere, doppio clic o Canc per rimuovere. Seleziona una tappa per modificare RGBA.",
   "node_editor.keyframe_hint": "Inserisci fotogramma chiave · Ctrl+clic oppure I al passaggio del puntatore",
-  "toolbar.asset_manager": "Progetti"
+  "toolbar.asset_manager": "Progetti",
+  "training.reset_before_strategy_change": "Reimposta l’addestramento prima di cambiare strategia."
 }

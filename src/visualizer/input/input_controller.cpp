@@ -637,6 +637,7 @@ namespace lfs::vis {
             keyboard_viewport.camera.enterDrone();
             publishCameraMove(&keyboard_viewport);
         }
+        python::request_redraw();
     }
 
     void InputController::applyNewProjectNavigationDefaults() {
