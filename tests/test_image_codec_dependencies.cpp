@@ -12,6 +12,7 @@
 #include <jpeglib.h>
 #include <png.h>
 #include <stdexcept>
+#include <tiffio.h>
 #include <vector>
 #include <zlib.h>
 
@@ -89,6 +90,113 @@ namespace {
             std::filesystem::remove_all(path, error);
         }
     };
+    TEST(ProductionTiff, NormalizesUnsignedInteger32WithoutMisreportingSamples) {
+        TemporaryDirectory temporary;
+        for (const auto extension : {".tiff", ".data"})
+            for (const auto mode : {"wl", "wb"})
+                for (const auto planar : {PLANARCONFIG_CONTIG, PLANARCONFIG_SEPARATE}) {
+                    constexpr int width = 5, height = 2, channels = 3;
+                    const auto path = temporary.path / (std::string("integer32-") + mode + std::to_string(planar) + extension);
+                    TIFF* tiff = TIFFOpen(path.string().c_str(), mode);
+                    ASSERT_NE(tiff, nullptr);
+                    TIFFSetField(tiff, TIFFTAG_IMAGEWIDTH, width);
+                    TIFFSetField(tiff, TIFFTAG_IMAGELENGTH, height);
+                    TIFFSetField(tiff, TIFFTAG_SAMPLESPERPIXEL, channels);
+                    TIFFSetField(tiff, TIFFTAG_BITSPERSAMPLE, 32);
+                    TIFFSetField(tiff, TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_UINT);
+                    TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
+                    TIFFSetField(tiff, TIFFTAG_PLANARCONFIG, planar);
+                    TIFFSetField(tiff, TIFFTAG_ROWSPERSTRIP, 1);
+                    const std::array<uint32_t, 7> values{0u, 1u, 65535u, 65536u, 0x7fffffffu, 0x80000000u, 0xffffffffu};
+                    std::array<uint32_t, width * height * channels> samples{};
+                    for (size_t i = 0; i < samples.size(); ++i)
+                        samples[i] = values[i % values.size()];
+                    std::array<uint32_t, width> plane{};
+                    std::array<uint32_t, width * channels> row{};
+                    for (int y = 0; y < height; ++y) {
+                        if (planar == PLANARCONFIG_CONTIG) {
+                            // libtiff may byte-swap the caller buffer when writing foreign endianness.
+                            std::copy_n(samples.data() + y * width * channels, row.size(), row.data());
+                            ASSERT_GE(TIFFWriteScanline(tiff, row.data(), y), 0);
+                        } else {
+                            for (int c = 0; c < channels; ++c) {
+                                for (int x = 0; x < width; ++x)
+                                    plane[x] = samples[(y * width + x) * channels + c];
+                                ASSERT_GE(TIFFWriteScanline(tiff, plane.data(), y, c), 0);
+                            }
+                        }
+                    }
+                    TIFFClose(tiff);
+                    codec::Probe info;
+                    codec::Image image;
+                    std::string error;
+                    ASSERT_TRUE(codec::probe(path, info, error)) << error;
+                    EXPECT_EQ(info.sample_type, codec::SampleType::Float32);
+                    ASSERT_TRUE(codec::decode(path, image, error)) << error;
+                    EXPECT_EQ(image.sample_type, codec::SampleType::Float32);
+                    ASSERT_EQ(image.data.size(), samples.size() * sizeof(float));
+                    for (size_t i = 0; i < samples.size(); ++i) {
+                        float actual;
+                        std::memcpy(&actual, image.data.data() + i * sizeof(float), sizeof(float));
+                        EXPECT_FLOAT_EQ(actual, static_cast<float>(double(samples[i]) / 4294967295.0));
+                    }
+                    if (std::string_view(extension) == ".tiff") {
+                        std::array<float, samples.size()> destination{};
+                        destination.fill(.125f);
+                        const auto before = destination;
+                        codec::DecodeTarget target{channels, codec::SampleType::Float32, destination.data()};
+                        EXPECT_FALSE(codec::decode_to_buffer(path, target, info, error));
+                        EXPECT_EQ(destination, before);
+                    }
+                }
+    }
+    TEST(ProductionTiff, PreservesSupportedSamplesInBothByteOrders) {
+        TemporaryDirectory temporary;
+        for (const auto mode : {"wl", "wb"}) {
+            for (const auto bits : {8, 16, 32}) {
+                const auto path = temporary.path / (std::to_string(bits) + mode + ".tiff");
+                TIFF* tiff = TIFFOpen(path.string().c_str(), mode);
+                ASSERT_NE(tiff, nullptr);
+                TIFFSetField(tiff, TIFFTAG_IMAGEWIDTH, 2);
+                TIFFSetField(tiff, TIFFTAG_IMAGELENGTH, 1);
+                TIFFSetField(tiff, TIFFTAG_SAMPLESPERPIXEL, 1);
+                TIFFSetField(tiff, TIFFTAG_BITSPERSAMPLE, bits);
+                TIFFSetField(tiff, TIFFTAG_SAMPLEFORMAT, bits == 32 ? SAMPLEFORMAT_IEEEFP : SAMPLEFORMAT_UINT);
+                TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
+                TIFFSetField(tiff, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+                std::array<std::uint8_t, 2> bytes{0, 255};
+                std::array<std::uint16_t, 2> shorts{0x0102, 65535};
+                std::array<float, 2> floats{-0.25f, 4.0f};
+                void* samples = bits == 8 ? static_cast<void*>(bytes.data()) : bits == 16 ? static_cast<void*>(shorts.data())
+                                                                                          : static_cast<void*>(floats.data());
+                std::vector<std::uint8_t> expected(bits / 8 * 2);
+                std::memcpy(expected.data(), samples, expected.size());
+                const auto written = TIFFWriteScanline(tiff, samples, 0);
+                TIFFClose(tiff);
+                ASSERT_EQ(written, 1);
+                codec::Image image;
+                codec::Probe info;
+                std::string error;
+                ASSERT_TRUE(codec::decode(path, image, error)) << error;
+                ASSERT_TRUE(codec::probe(path, info, error)) << error;
+                EXPECT_EQ(image.data, expected);
+                const auto type = bits == 8 ? codec::SampleType::UInt8 : bits == 16 ? codec::SampleType::UInt16
+                                                                                    : codec::SampleType::Float32;
+                EXPECT_EQ(info.sample_type, type);
+                EXPECT_EQ(image.sample_type, type);
+                std::vector<std::uint8_t> output(expected.size());
+                codec::DecodeTarget target{1, type, output.data()};
+                ASSERT_TRUE(codec::decode_to_buffer(path, target, info, error)) << error;
+                EXPECT_EQ(output, expected);
+                const auto renamed = path.string() + ".data";
+                std::filesystem::copy_file(path, renamed);
+                ASSERT_TRUE(codec::probe(renamed, info, error)) << error;
+                EXPECT_EQ(info.sample_type, type);
+                ASSERT_TRUE(codec::decode(renamed, image, error)) << error;
+                EXPECT_EQ(image.data, expected);
+            }
+        }
+    }
     TEST(ProductionImageOutput, DispatchPreservesLegacyBytesAndComments) {
         TemporaryDirectory temporary;
         const auto bytes = [](const std::filesystem::path& path) {

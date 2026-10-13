@@ -74,6 +74,35 @@ class ExtractionContracts(unittest.TestCase):
             self.assertAlmostEqual(preview["time"], index / 10)
             self.assertEqual(bytes(preview["pixels"]), reference[index * 6144:(index + 1) * 6144])
 
+    def test_av1_cpu_extraction_and_preview_without_hardware(self):
+        work = Path(tempfile.mkdtemp(prefix="av1-cpu-", dir=self.root))
+        for pixel_format in ("yuv420p", "yuv420p10le"):
+            source = ROOT / "tests" / "media" / "fixtures" / ("av1-cpu-" + pixel_format + ".mp4")
+            self.assertTrue(source.is_file(), "Required generated AV1 fixture is missing")
+            request = work / "request.json"
+            request.write_text(json.dumps({"input": str(source), "output": str(work / "unused"),
+                                           "sink": "memory"}), encoding="utf-8")
+            result = subprocess.run([str(RUNNER), str(request)], capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertTrue(report["success"], report["error"])
+            self.assertEqual(len(report["frames"]), 4)
+            self.assertEqual(len({bytes(frame["pixels"]) for frame in report["frames"]}), 4)
+            reference = subprocess.check_output([FFMPEG, "-v", "error", "-i", str(source),
+                                                "-sws_flags", "fast_bilinear", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            actual = b"".join(bytes(frame["pixels"]) for frame in report["frames"])
+            self.assertEqual(len(actual), len(reference))
+            # Constant chroma isolates decode/order from version-specific chroma
+            # interpolation. External swscale/SIMD rounding allows 3 U8 LSBs.
+            self.assertLessEqual(max(abs(a - b) for a, b in zip(actual, reference)), 3)
+            request.write_text(json.dumps({"operation": "preview", "input": str(source)}), encoding="utf-8")
+            result = subprocess.run([str(RUNNER), str(request)], capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            preview = json.loads(result.stdout)
+            self.assertTrue(preview["success"], preview["error"])
+            self.assertFalse(preview["hardware_decode"])
+            self.assertEqual(bytes(preview["pixels"]), actual[:64 * 64 * 3])
+
     def test_cpu_encode_session_roundtrip_pts_metadata_and_lifecycle(self):
         work = Path(tempfile.mkdtemp(prefix="encode-session-", dir=self.root))
         video = work / "encoded é 日本語.mp4"
