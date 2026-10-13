@@ -13,6 +13,7 @@
 #include "media/hdr_renderer.hpp"
 #include "media/hdr_tonemap.hpp"
 #include "media/media_backends.hpp"
+#include "media/media_options.hpp"
 #include "media/media_probe_ffmpeg.hpp"
 #include "media/sws_packed_rgb.hpp"
 
@@ -22,6 +23,7 @@ extern "C" {
 #include <libavutil/dovi_meta.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
@@ -178,14 +180,133 @@ namespace lfs::io {
                                                    const double time_base,
                                                    const int frame_index,
                                                    const double fallback_fps,
-                                                   const double stream_start_seconds) {
+                                                   const int64_t stream_start_timestamp) {
             int64_t timestamp = frame->best_effort_timestamp;
             if (timestamp == AV_NOPTS_VALUE)
                 timestamp = frame->pts;
             if (timestamp != AV_NOPTS_VALUE && std::isfinite(time_base) && time_base > 0.0)
-                return static_cast<double>(timestamp) * time_base -
-                       stream_start_seconds;
+                // Subtract in ticks before scaling: fused multiply/subtract
+                // can otherwise turn the first frame into a negative epsilon.
+                // Widen first so opposite-sign int64 timestamps cannot overflow.
+                return static_cast<double>((static_cast<long double>(timestamp) -
+                                            static_cast<long double>(stream_start_timestamp)) *
+                                           time_base);
             return static_cast<double>(frame_index) / std::max(fallback_fps, 0.001);
+        }
+
+        [[nodiscard]] int64_t frameTimestampTicks(const AVFrame* const frame) {
+            if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
+                return frame->best_effort_timestamp;
+            return frame->pts;
+        }
+
+        [[nodiscard]] int64_t timestampAtOrAfterTime(const double seconds,
+                                                     const AVRational stream_time_base,
+                                                     const int64_t stream_start_timestamp) {
+            const AVRational time = av_d2q(seconds, 1000000000);
+            if (time.den <= 0 || stream_time_base.num <= 0 || stream_time_base.den <= 0)
+                throw std::invalid_argument("Invalid extraction parameters: trim range exceeds stream timestamp limits");
+            const int64_t relative_timestamp = av_rescale_q_rnd(
+                1, time, stream_time_base,
+                static_cast<AVRounding>(AV_ROUND_UP | AV_ROUND_PASS_MINMAX));
+            if (relative_timestamp == std::numeric_limits<int64_t>::min() ||
+                relative_timestamp == std::numeric_limits<int64_t>::max() ||
+                (relative_timestamp > 0 &&
+                 stream_start_timestamp > std::numeric_limits<int64_t>::max() - relative_timestamp) ||
+                (relative_timestamp < 0 &&
+                 stream_start_timestamp < std::numeric_limits<int64_t>::min() - relative_timestamp))
+                throw std::invalid_argument("Invalid extraction parameters: trim range exceeds stream timestamp limits");
+            return stream_start_timestamp + relative_timestamp;
+        }
+
+        struct TimestampBoundary {
+            int64_t first_at_or_after;
+            bool exact_tick;
+        };
+
+        [[nodiscard]] TimestampBoundary timestampBoundary(
+            const double seconds, const AVRational stream_time_base,
+            const int64_t stream_start_timestamp) {
+            const AVRational time = av_d2q(seconds, 1000000000);
+            const int64_t ceil_timestamp = timestampAtOrAfterTime(
+                seconds, stream_time_base, stream_start_timestamp);
+            const int64_t floor_relative = av_rescale_q_rnd(
+                1, time, stream_time_base,
+                static_cast<AVRounding>(AV_ROUND_DOWN | AV_ROUND_PASS_MINMAX));
+            if ((floor_relative > 0 &&
+                 stream_start_timestamp > std::numeric_limits<int64_t>::max() - floor_relative) ||
+                (floor_relative < 0 &&
+                 stream_start_timestamp < std::numeric_limits<int64_t>::min() - floor_relative))
+                throw std::invalid_argument("Invalid extraction parameters: trim range exceeds stream timestamp limits");
+            const int64_t floor_timestamp = stream_start_timestamp + floor_relative;
+            return {ceil_timestamp, floor_timestamp == ceil_timestamp};
+        }
+
+        [[nodiscard]] AVRational fpsTargetTime(const double start_time,
+                                               const double target_fps,
+                                               const std::size_t sample_index) {
+            if (sample_index > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+                throw std::invalid_argument("Invalid extraction parameters: requested frame count exceeds supported limits");
+            const AVRational start = av_d2q(start_time, 1000000000);
+            const AVRational fps = av_d2q(target_fps, 1000000);
+            if (start.den <= 0 || fps.num <= 0 || fps.den <= 0)
+                throw std::invalid_argument("Invalid extraction parameters: trim range exceeds stream timestamp limits");
+            const AVRational sample = av_mul_q(
+                AVRational{static_cast<int>(sample_index), 1}, av_inv_q(fps));
+            return av_add_q(start, sample);
+        }
+
+        // Compare decoded PTS against the first stream tick at or after the
+        // rational FPS target; seconds remain presentation metadata only.
+        [[nodiscard]] int64_t fpsTargetTimestamp(const double start_time,
+                                                 const double target_fps,
+                                                 const std::size_t sample_index,
+                                                 const AVRational stream_time_base,
+                                                 const int64_t stream_start_timestamp) {
+            if (stream_time_base.num <= 0 || stream_time_base.den <= 0)
+                throw std::invalid_argument("Invalid extraction parameters: trim range exceeds stream timestamp limits");
+            const AVRational target_time = fpsTargetTime(start_time, target_fps, sample_index);
+            const int64_t relative_timestamp = av_rescale_q_rnd(
+                1, target_time, stream_time_base,
+                static_cast<AVRounding>(AV_ROUND_UP | AV_ROUND_PASS_MINMAX));
+            if (relative_timestamp == std::numeric_limits<int64_t>::min() ||
+                relative_timestamp == std::numeric_limits<int64_t>::max() ||
+                (relative_timestamp > 0 &&
+                 stream_start_timestamp > std::numeric_limits<int64_t>::max() - relative_timestamp) ||
+                (relative_timestamp < 0 &&
+                 stream_start_timestamp < std::numeric_limits<int64_t>::min() - relative_timestamp))
+                throw std::invalid_argument("Invalid extraction parameters: trim range exceeds stream timestamp limits");
+            return stream_start_timestamp + relative_timestamp;
+        }
+
+        [[nodiscard]] bool frameCoversFpsTarget(const double start_time,
+                                                const double target_fps,
+                                                const std::size_t sample_index,
+                                                const AVRational stream_time_base,
+                                                const int64_t stream_start_timestamp,
+                                                const int64_t frame_timestamp,
+                                                const int64_t frame_duration) {
+            if (frame_duration <= 0)
+                return false;
+            const AVRational target_time = fpsTargetTime(start_time, target_fps, sample_index);
+            const int64_t target_ceil = fpsTargetTimestamp(
+                start_time, target_fps, sample_index, stream_time_base,
+                stream_start_timestamp);
+            const int64_t target_floor_relative = av_rescale_q_rnd(
+                1, target_time, stream_time_base,
+                static_cast<AVRounding>(AV_ROUND_DOWN | AV_ROUND_PASS_MINMAX));
+            if ((target_floor_relative > 0 &&
+                 stream_start_timestamp > std::numeric_limits<int64_t>::max() - target_floor_relative) ||
+                (target_floor_relative < 0 &&
+                 stream_start_timestamp < std::numeric_limits<int64_t>::min() - target_floor_relative))
+                return false;
+            const int64_t target_floor = stream_start_timestamp + target_floor_relative;
+            if (frame_timestamp > std::numeric_limits<int64_t>::max() - frame_duration)
+                return false;
+            const int64_t frame_end = frame_timestamp + frame_duration;
+            return target_floor == target_ceil
+                       ? frame_timestamp <= target_ceil && target_ceil < frame_end
+                       : frame_timestamp < target_ceil && target_ceil <= frame_end;
         }
 
         [[nodiscard]] int pixelFormatBitDepth(const AVCodecParameters* const parameters) {
@@ -355,7 +476,7 @@ namespace lfs::io {
             }
             if (!timestamps_available)
                 return {false, "timestamps_unavailable"};
-            return {true, "sparse_fps_keyframe_seek"};
+            return {true, "sparse_fps_adaptive_keyframe_seek"};
         }
 
         void write_jpeg_to_file(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
@@ -843,11 +964,11 @@ namespace lfs::io {
     }
 
     bool isGeneratedFrameFilename(const std::string_view pattern, const std::string_view filename) {
-        // The writer appends one of these lowercase extensions (all four characters long).
-        if (!filename.ends_with(".png") && !filename.ends_with(".jpg") && !filename.ends_with(".exr"))
+        // Generated extraction files use only these lowercase image extensions.
+        if (!filename.ends_with(".png") && !filename.ends_with(".jpg") && !filename.ends_with(".exr") && !filename.ends_with(".tif") && !filename.ends_with(".tiff"))
             return false;
         return matchFrameNameSegments(parseFrameFilenamePattern(pattern), 0,
-                                      filename.substr(0, filename.size() - 4), 0);
+                                      filename.substr(0, filename.size() - (filename.ends_with(".tiff") ? 5 : 4)), 0);
     }
 
     std::vector<std::filesystem::path> generatedExtractionFiles(
@@ -892,7 +1013,7 @@ namespace lfs::io {
             const size_t pixel_bytes = float_output ? 12 : 3;
             if ((params.output_format != media::FramePixelFormat::RGB8 && !float_output) ||
                 (float_output && (!provided_sink || params.convert_hdr_to_sdr)) ||
-                (params.format == ImageFormat::EXR && !float_output)) {
+                ((params.format == ImageFormat::EXR || params.format == ImageFormat::TIFF16) && !float_output)) {
                 failure_ = make_error({.code = ErrorCode::Unsupported, .domain = ErrorDomain::IO, .detail = "EXR requires float samples; float extraction requires a CPU sink and the SDR profile", .detection = LFS_SOURCE_SITE_CURRENT()});
                 error = std::string(failure_->detail());
                 return false;
@@ -1067,7 +1188,7 @@ namespace lfs::io {
 #endif
 
                 if (!codec) {
-                    codec = avcodec_find_decoder(codec_id);
+                    codec = media::detail::softwareVideoDecoder(codec_id);
                     if (!codec) {
                         error = "Unsupported codec";
                         if (hw_device_ctx)
@@ -1146,7 +1267,7 @@ namespace lfs::io {
                     hw_device_type = AV_HWDEVICE_TYPE_NONE;
                     hw_decoder_state.pixel_format = AV_PIX_FMT_NONE;
                     decoder_backend = "ffmpeg_software";
-                    codec = avcodec_find_decoder(codec_id);
+                    codec = media::detail::softwareVideoDecoder(codec_id);
                     if (!codec) {
                         error = "Unsupported codec";
                         avformat_close_input(&fmt_ctx);
@@ -1186,15 +1307,55 @@ namespace lfs::io {
                     throw std::runtime_error(std::string(failure_->detail()));
                 }
                 const std::size_t frame_size = layout.rgb_bytes * (float_output ? 4 : 1);
+                frame = av_frame_alloc();
+                sw_frame = av_frame_alloc();
+                packet = av_packet_alloc();
+                if (!frame || !sw_frame || !packet) {
+                    error = "Failed to allocate frame/packet";
+                    throw std::runtime_error(error);
+                }
+                DecoderPump decoder_pump(fmt_ctx, codec_ctx, packet, video_stream_idx);
+                bool prefetched_color_frame = false;
+                int discarded_color_probe_frames = 0;
+                const auto next_decoded_frame = [&]() {
+                    if (prefetched_color_frame) {
+                        prefetched_color_frame = false;
+                        return DecoderPumpResult::Frame;
+                    }
+                    return decoder_pump.next(frame, error);
+                };
                 std::unique_ptr<media::detail::LinearFrameConverter> linear_converter;
                 media::FrameColor output_color;
                 if (float_output) {
-                    if (dv_profile > 0 || video_stream->codecpar->color_trc == AVCOL_TRC_SMPTE2084 || video_stream->codecpar->color_trc == AVCOL_TRC_ARIB_STD_B67 ||
+                    if (dv_profile > 0 || (video_stream->codecpar->color_trc == AVCOL_TRC_SMPTE2084 && params.float_color_profile != media::FloatColorProfile::PqNits) || (video_stream->codecpar->color_trc == AVCOL_TRC_ARIB_STD_B67 && params.float_color_profile != media::FloatColorProfile::HlgScene) ||
                         video_stream->codecpar->color_trc == AVCOL_TRC_LOG || video_stream->codecpar->color_trc == AVCOL_TRC_LOG_SQRT) {
-                        failure_ = make_error({.code = ErrorCode::Unsupported, .domain = ErrorDomain::IO, .detail = "HDR/Dolby Vision is outside the float SDR profile", .detection = LFS_SOURCE_SITE_CURRENT()});
+                        failure_ = make_error({.code = ErrorCode::Unsupported, .domain = ErrorDomain::IO, .detail = "Source HDR transfer or Dolby Vision is outside the selected float profile", .detection = LFS_SOURCE_SITE_CURRENT()});
                         throw std::runtime_error(std::string(failure_->detail()));
                     }
-                    linear_converter = std::make_unique<media::detail::LinearFrameConverter>(*video_stream->codecpar, params.input_color);
+                    AVCodecParameters color_source = *video_stream->codecpar;
+                    if (params.float_color_profile != media::FloatColorProfile::Sdr) {
+                        // Some HEVC containers omit color tags carried by the
+                        // decoded frame. Read that declaration without losing the
+                        // first frame or inventing primaries/transfer metadata.
+                        if (params.cancel_requested && params.cancel_requested())
+                            throw ExtractionCancelled{};
+                        const auto first = decoder_pump.next(frame, error);
+                        if (first != DecoderPumpResult::Frame) {
+                            if (first == DecoderPumpResult::EndOfStream)
+                                error = "HDR float extraction requires a decoded source frame";
+                            throw std::runtime_error(error);
+                        }
+                        prefetched_color_frame = true;
+                        if (frame->color_trc != AVCOL_TRC_UNSPECIFIED)
+                            color_source.color_trc = frame->color_trc;
+                        if (frame->color_primaries != AVCOL_PRI_UNSPECIFIED)
+                            color_source.color_primaries = frame->color_primaries;
+                        if (frame->colorspace != AVCOL_SPC_UNSPECIFIED)
+                            color_source.color_space = frame->colorspace;
+                        if (frame->color_range != AVCOL_RANGE_UNSPECIFIED)
+                            color_source.color_range = frame->color_range;
+                    }
+                    linear_converter = std::make_unique<media::detail::LinearFrameConverter>(color_source, params.input_color, params.float_color_profile);
                     const auto color = linear_converter->outputColor();
                     if (!color) {
                         failure_ = color.error();
@@ -1207,25 +1368,11 @@ namespace lfs::io {
 
                 const int64_t stream_start_timestamp =
                     video_stream->start_time == AV_NOPTS_VALUE ? 0 : video_stream->start_time;
-                const double stream_start_seconds =
-                    static_cast<double>(stream_start_timestamp) * time_base;
                 const auto stream_timestamp_for_time =
                     [&](const double seconds) {
-                        const long double timestamp =
-                            static_cast<long double>(stream_start_timestamp) +
-                            std::round(static_cast<long double>(seconds) /
-                                       time_base);
-                        if (timestamp <
-                                static_cast<long double>(
-                                    std::numeric_limits<int64_t>::min()) ||
-                            timestamp >
-                                static_cast<long double>(
-                                    std::numeric_limits<int64_t>::max())) {
-                            throw std::invalid_argument(
-                                "Invalid extraction parameters: trim range "
-                                "exceeds stream timestamp limits");
-                        }
-                        return static_cast<int64_t>(timestamp);
+                        return timestampAtOrAfterTime(
+                            seconds, video_stream->time_base,
+                            stream_start_timestamp);
                     };
 
                 if (video_duration <= 0.0 && params.end_time < 0.0) {
@@ -1290,6 +1437,15 @@ namespace lfs::io {
                         ? calculateFpsSampleCount(start_time, end_time,
                                                   target_fps)
                         : 0;
+                const auto fps_timestamp_for_index = [&](const std::size_t index) {
+                    return fpsTargetTimestamp(start_time, target_fps, index,
+                                              video_stream->time_base,
+                                              stream_start_timestamp);
+                };
+                const TimestampBoundary start_timestamp_boundary = timestampBoundary(
+                    start_time, video_stream->time_base, stream_start_timestamp);
+                const TimestampBoundary end_timestamp_boundary = timestampBoundary(
+                    end_time, video_stream->time_base, stream_start_timestamp);
                 if (fps_target_count >
                     static_cast<std::size_t>(
                         std::numeric_limits<int>::max())) {
@@ -1309,6 +1465,11 @@ namespace lfs::io {
                 if (params.mode == ExtractionMode::FPS && video_fps > 0 && target_fps > 0)
                     window_est_frames = static_cast<int>(std::round(video_fps / target_fps));
                 window_est_frames = std::max(1, window_est_frames);
+                std::size_t next_fps_target_index = 0;
+                int64_t next_fps_target_timestamp =
+                    params.mode == ExtractionMode::FPS && fps_target_count > 0
+                        ? fps_timestamp_for_index(0)
+                        : AV_NOPTS_VALUE;
 
                 media::SinkSession session;
                 if (external_sink)
@@ -1337,6 +1498,11 @@ namespace lfs::io {
                             start_time, ffmpegError(seek_result));
                     } else {
                         avcodec_flush_buffers(codec_ctx);
+                        decoder_pump.resetAfterSeek();
+                        if (prefetched_color_frame)
+                            ++discarded_color_probe_frames;
+                        prefetched_color_frame = false;
+                        av_frame_unref(frame);
                         LOG_INFO("Seeking to start time: {:.2f}s", start_time);
                     }
                 }
@@ -1345,18 +1511,9 @@ namespace lfs::io {
                     LOG_INFO("Output resolution: {}x{} (from {}x{})", out_width, out_height, src_width, src_height);
                 }
 
-                frame = av_frame_alloc();
-                sw_frame = av_frame_alloc();
-                packet = av_packet_alloc();
-                if (!frame || !sw_frame || !packet) {
-                    error = "Failed to allocate frame/packet";
-                    throw std::runtime_error(error);
-                }
-                DecoderPump decoder_pump(fmt_ctx, codec_ctx, packet, video_stream_idx);
-
                 cpu_contiguous_buffer = new uint8_t[frame_size];
 
-                if (!custom_sink && params.allow_hardware_decode && params.format == ImageFormat::JPG)
+                if (!custom_sink && params.allow_hardware_decode && params.allow_hardware_encode && params.format == ImageFormat::JPG)
                     gpu_jpeg = media::detail::createGpuJpegEncoder({src_width, src_height,
                                                                     out_width, out_height, estimated_total, params.rotation, using_hw_decode,
                                                                     needs_scale, convert_hdr_to_sdr});
@@ -1501,6 +1658,13 @@ namespace lfs::io {
                     double timestamp;
                     int source_frame;
                     double sharpness_score;
+                    std::optional<int64_t> source_pts;
+                    media::TimestampOrigin timestamp_origin;
+                };
+                const auto frame_metadata = [](const media::FrameInfo& info, double timestamp, int source_frame, double score) {
+                    return BatchFrameMeta{timestamp, source_frame, score,
+                                          info.source_timestamp ? std::optional<int64_t>(info.source_timestamp->ticks) : std::nullopt,
+                                          info.timestamp_origin};
                 };
                 std::vector<BatchFrameMeta> batch_meta;
                 std::size_t batch_idx = 0;
@@ -1535,9 +1699,7 @@ namespace lfs::io {
                 int in_window_frame_count = 0;
                 struct FrameSaveInfo {
                     std::string filename;
-                    double timestamp;
-                    int source_frame;
-                    double sharpness_score;
+                    BatchFrameMeta frame;
                 };
                 std::vector<FrameSaveInfo> saved_frames;
                 std::unordered_set<std::filesystem::path> emitted_filenames;
@@ -1587,9 +1749,7 @@ namespace lfs::io {
                             used_gpu_encoding = true;
                             if (!custom_sink && params.generate_metadata && i < batch_meta.size()) {
                                 saved_frames.push_back({lfs::core::path_to_utf8(batch_filenames[i].filename()),
-                                                        batch_meta[i].timestamp,
-                                                        batch_meta[i].source_frame,
-                                                        batch_meta[i].sharpness_score});
+                                                        batch_meta[i]});
                             }
                         }
                     }
@@ -1606,8 +1766,9 @@ namespace lfs::io {
                 auto generate_filename = [&](int frame_num) {
                     if (custom_sink)
                         return std::filesystem::path{};
-                    std::string ext = params.format == ImageFormat::PNG ? ".png" : params.format == ImageFormat::EXR ? ".exr"
-                                                                                                                     : ".jpg";
+                    std::string ext = params.format == ImageFormat::TIFF16 ? ".tif" : params.format == ImageFormat::PNG ? ".png"
+                                                                                  : params.format == ImageFormat::EXR   ? ".exr"
+                                                                                                                        : ".jpg";
                     return params.output_dir / (formatFrameFilenameStem(params.filename_pattern, frame_num) + ext);
                 };
 
@@ -1634,14 +1795,31 @@ namespace lfs::io {
                     throw_if_cancelled();
                 };
 
-                auto should_extract_frame = [&](const double frame_time) {
+                auto should_extract_frame = [&](const AVFrame* const decoded_frame,
+                                                const double frame_time) {
                     bool should_extract = false;
                     if (params.mode == ExtractionMode::FPS) {
-                        should_extract = frame_time + 1.0e-6 >= next_capture_time;
-                        if (should_extract) {
+                        const int64_t timestamp = frameTimestampTicks(decoded_frame);
+                        if (timestamp != AV_NOPTS_VALUE) {
+                            while (next_fps_target_index < fps_target_count &&
+                                   timestamp >= next_fps_target_timestamp) {
+                                should_extract = true;
+                                ++next_fps_target_index;
+                                if (next_fps_target_index < fps_target_count)
+                                    next_fps_target_timestamp = fps_timestamp_for_index(next_fps_target_index);
+                            }
+                            if (next_fps_target_index < fps_target_count)
+                                next_capture_time = fpsSampleTime(start_time, end_time, target_fps,
+                                                                  next_fps_target_index);
+                        } else if (frame_time + 1.0e-6 >= next_capture_time) {
+                            should_extract = true;
                             do {
                                 next_capture_time += target_interval;
-                            } while (next_capture_time <= frame_time + 1.0e-6);
+                                ++next_fps_target_index;
+                            } while (next_fps_target_index < fps_target_count &&
+                                     next_capture_time <= frame_time + 1.0e-6);
+                            if (next_fps_target_index < fps_target_count)
+                                next_fps_target_timestamp = fps_timestamp_for_index(next_fps_target_index);
                         }
                     } else {
                         should_extract = in_trim_frame_count % frame_step == 0;
@@ -1674,8 +1852,8 @@ namespace lfs::io {
                     emit_rgb(write_w, write_h, write_data, best->info, best->score);
                     ++written_count;
                     if (!custom_sink && params.generate_metadata) {
-                        saved_frames.push_back({lfs::core::path_to_utf8(fname.filename()), best->timestamp,
-                                                best->source_frame, best->score});
+                        saved_frames.push_back({lfs::core::path_to_utf8(fname.filename()),
+                                                frame_metadata(best->info, best->timestamp, best->source_frame, best->score)});
                     }
                     finish_selected_frame();
                     window_best.reset();
@@ -1739,7 +1917,7 @@ namespace lfs::io {
                         void* dst_ptr = gpu_jpeg->queueHardware(batch_idx);
                         batch_gpu_ptrs.push_back(dst_ptr);
                         batch_filenames.push_back(filename);
-                        batch_meta.push_back({current_frame_time, current_src_frame, frame_score});
+                        batch_meta.push_back(frame_metadata(current_info, current_frame_time, current_src_frame, frame_score));
                         batch_idx++;
 
                         if (batch_idx >= jpeg_batch_size) {
@@ -1837,7 +2015,7 @@ namespace lfs::io {
 
                             batch_gpu_ptrs.push_back(dst_ptr);
                             batch_filenames.push_back(filename);
-                            batch_meta.push_back({current_frame_time, current_src_frame, frame_score});
+                            batch_meta.push_back(frame_metadata(current_info, current_frame_time, current_src_frame, frame_score));
                             batch_idx++;
 
                             if (batch_idx >= jpeg_batch_size) {
@@ -1848,9 +2026,7 @@ namespace lfs::io {
                             ++written_count;
                             if (!custom_sink && params.generate_metadata) {
                                 saved_frames.push_back({lfs::core::path_to_utf8(filename.filename()),
-                                                        current_frame_time,
-                                                        current_src_frame,
-                                                        frame_score});
+                                                        frame_metadata(current_info, current_frame_time, current_src_frame, frame_score)});
                             }
                         }
                     }
@@ -1881,7 +2057,7 @@ namespace lfs::io {
                             for (size_t i = 0; i < scoring_proxy.size(); ++i) {
                                 float value = 0;
                                 std::memcpy(&value, cpu_contiguous_buffer + i * sizeof(float), sizeof(float));
-                                scoring_proxy[i] = static_cast<uint8_t>(std::lround(std::clamp(value, 0.f, 1.f) * 255.f));
+                                scoring_proxy[i] = static_cast<uint8_t>(std::lround(std::clamp(value * (output_color.units == media::ColorUnits::Nits ? .0001f : 1.f), 0.f, 1.f) * 255.f));
                             }
                             score_pixels = scoring_proxy.data();
                         }
@@ -1930,7 +2106,7 @@ namespace lfs::io {
 
                         batch_gpu_ptrs.push_back(dst_ptr);
                         batch_filenames.push_back(filename);
-                        batch_meta.push_back({current_frame_time, current_src_frame, frame_score});
+                        batch_meta.push_back(frame_metadata(current_info, current_frame_time, current_src_frame, frame_score));
                         batch_idx++;
 
                         if (batch_idx >= jpeg_batch_size) {
@@ -1941,9 +2117,7 @@ namespace lfs::io {
                         ++written_count;
                         if (!custom_sink && params.generate_metadata) {
                             saved_frames.push_back({lfs::core::path_to_utf8(filename.filename()),
-                                                    current_frame_time,
-                                                    current_src_frame,
-                                                    frame_score});
+                                                    frame_metadata(current_info, current_frame_time, current_src_frame, frame_score)});
                         }
                     }
 
@@ -1961,6 +2135,8 @@ namespace lfs::io {
                 media::FrameInfo retained_info;
                 double retained_frame_time = 0.0;
                 double retained_frame_duration = 0.0;
+                int64_t retained_frame_timestamp = AV_NOPTS_VALUE;
+                int64_t retained_frame_duration_ticks = 0;
                 const auto retain_frame =
                     [&](AVFrame* const retained_source, const double frame_time,
                         const double frame_duration) {
@@ -1973,6 +2149,9 @@ namespace lfs::io {
                             throw std::runtime_error(error);
                         }
                         has_retained_frame = true;
+                        retained_frame_timestamp = frameTimestampTicks(retained_source);
+                        retained_frame_duration_ticks =
+                            std::max<int64_t>(0, retained_source->duration);
                         retained_info = frame_info(retained_source, frame_time);
                         retained_frame_time = frame_time;
                         retained_frame_duration = frame_duration;
@@ -1993,13 +2172,23 @@ namespace lfs::io {
                 const auto process_sequential_frame = [&](AVFrame* const decoded_frame) {
                     const double frame_time = frameTimestampSeconds(
                         decoded_frame, time_base, decoded_frame_count - 1,
-                        video_fps, stream_start_seconds);
-                    if (frame_time < start_time)
+                        video_fps, stream_start_timestamp);
+                    const int64_t timestamp = frameTimestampTicks(decoded_frame);
+                    if ((timestamp != AV_NOPTS_VALUE &&
+                         timestamp < start_timestamp_boundary.first_at_or_after) ||
+                        (timestamp == AV_NOPTS_VALUE && frame_time < start_time))
                         return false;
                     const bool past_end =
                         params.mode == ExtractionMode::FPS
-                            ? frame_time >= end_time
-                            : !extract_to_stream_end && frame_time > end_time;
+                            ? (timestamp != AV_NOPTS_VALUE
+                                   ? timestamp >= end_timestamp_boundary.first_at_or_after
+                                   : frame_time >= end_time)
+                            : !extract_to_stream_end &&
+                                  (timestamp != AV_NOPTS_VALUE
+                                       ? (end_timestamp_boundary.exact_tick
+                                              ? timestamp > end_timestamp_boundary.first_at_or_after
+                                              : timestamp >= end_timestamp_boundary.first_at_or_after)
+                                       : frame_time > end_time);
                     if (past_end)
                         return true;
 
@@ -2016,10 +2205,19 @@ namespace lfs::io {
                     current_frame_time = frame_time;
                     current_src_frame = source_frame_for_time(frame_time);
                     if (params.sharpness.enabled && params.sharpness.window_mode) {
-                        const int window_index = params.mode == ExtractionMode::FPS
-                                                     ? static_cast<int>(std::floor(
-                                                           (frame_time - start_time) / target_interval))
-                                                     : in_window_frame_count / frame_step;
+                        int window_index = in_window_frame_count / frame_step;
+                        if (params.mode == ExtractionMode::FPS) {
+                            if (timestamp != AV_NOPTS_VALUE) {
+                                window_index = current_window_idx;
+                                while (static_cast<std::size_t>(window_index + 1) < fps_target_count &&
+                                       timestamp >= fps_timestamp_for_index(
+                                                        static_cast<std::size_t>(window_index + 1)))
+                                    ++window_index;
+                            } else {
+                                window_index = static_cast<int>(std::floor(
+                                    (frame_time - start_time) / target_interval));
+                            }
+                        }
                         if (window_index != current_window_idx) {
                             flush_window();
                             current_window_idx = window_index;
@@ -2058,7 +2256,7 @@ namespace lfs::io {
                             process_frame_hw(decoded_frame);
                         else
                             process_frame_sw(decoded_frame);
-                    } else if (should_extract_frame(frame_time)) {
+                    } else if (should_extract_frame(decoded_frame, frame_time)) {
                         if (using_hw_decode &&
                             decoded_frame->format == hw_decoder_state.pixel_format)
                             process_frame_hw(decoded_frame);
@@ -2070,46 +2268,85 @@ namespace lfs::io {
 
                 bool sparse_seek_fallback = false;
                 if (use_sparse_keyframe_seek) {
+                    double observed_seek_preroll = 0.0;
                     for (std::size_t target_index = 0;
                          target_index < fps_target_count; ++target_index) {
                         throw_if_cancelled();
                         const double target_time = fpsSampleTime(
                             start_time, end_time, target_fps, target_index);
-                        const int64_t target_timestamp =
-                            stream_timestamp_for_time(target_time);
-                        const int seek_result = av_seek_frame(
-                            fmt_ctx, video_stream_idx, target_timestamp,
-                            AVSEEK_FLAG_BACKWARD);
-                        if (seek_result < 0) {
-                            LOG_WARN(
-                                "Sparse extraction seek failed at {:.6f}s ({}); "
-                                "continuing sequentially",
-                                target_time, ffmpegError(seek_result));
-                            sparse_seek_fallback = true;
-                            frame_selection_reason =
-                                "sparse_seek_failed_sequential_fallback";
-                            next_capture_time = target_time;
-                            break;
+                        const int64_t target_timestamp = fps_timestamp_for_index(target_index);
+                        const AVIndexEntry* target_keyframe = avformat_index_get_entry_from_timestamp(
+                            video_stream, target_timestamp, AVSEEK_FLAG_BACKWARD);
+                        // Prefer the demuxer index: seeking helps only when it
+                        // lands beyond the frame already retained by the decoder.
+                        bool seek_to_target = !has_retained_frame;
+                        const bool retained_at_or_after_target =
+                            has_retained_frame &&
+                            (retained_frame_timestamp != AV_NOPTS_VALUE
+                                 ? retained_frame_timestamp >= target_timestamp
+                                 : retained_frame_time >= target_time);
+                        if (has_retained_frame && !retained_at_or_after_target) {
+                            if (target_keyframe && (target_keyframe->flags & AVINDEX_KEYFRAME) &&
+                                target_keyframe->timestamp <= target_timestamp) {
+                                seek_to_target = target_keyframe->timestamp >
+                                                 stream_timestamp_for_time(retained_frame_time);
+                            } else {
+                                seek_to_target = target_time - retained_frame_time >
+                                                 observed_seek_preroll + 1.0 / video_fps;
+                            }
                         }
+                        if (!seek_to_target && retained_at_or_after_target &&
+                            (retained_frame_timestamp != AV_NOPTS_VALUE
+                                 ? retained_frame_timestamp < end_timestamp_boundary.first_at_or_after
+                                 : retained_frame_time < end_time)) {
+                            process_selected_frame(sparse_previous_frame, retained_frame_time);
+                            continue;
+                        }
+                        if (seek_to_target) {
+                            const int seek_result = av_seek_frame(
+                                fmt_ctx, video_stream_idx, target_timestamp,
+                                AVSEEK_FLAG_BACKWARD);
+                            if (seek_result < 0) {
+                                LOG_WARN(
+                                    "Sparse extraction seek failed at {:.6f}s ({}); "
+                                    "continuing sequentially",
+                                    target_time, ffmpegError(seek_result));
+                                sparse_seek_fallback = true;
+                                frame_selection_reason =
+                                    "sparse_seek_failed_sequential_fallback";
+                                next_capture_time = target_time;
+                                break;
+                            }
 
-                        ++keyframe_seek_count;
-                        avcodec_flush_buffers(codec_ctx);
-                        decoder_pump.resetAfterSeek();
-                        av_frame_unref(sparse_previous_frame);
-                        has_retained_frame = false;
+                            ++keyframe_seek_count;
+                            avcodec_flush_buffers(codec_ctx);
+                            decoder_pump.resetAfterSeek();
+                            av_frame_unref(sparse_previous_frame);
+                            has_retained_frame = false;
+                        }
                         bool found_target = false;
+                        bool first_frame_after_seek = seek_to_target;
 
                         while (!found_target) {
                             throw_if_cancelled();
                             const DecoderPumpResult result =
-                                decoder_pump.next(frame, error);
+                                next_decoded_frame();
                             if (result == DecoderPumpResult::Error)
                                 throw std::runtime_error(error);
                             if (result == DecoderPumpResult::EndOfStream) {
                                 if (has_retained_frame &&
-                                    frameCoversSampleTime(
-                                        retained_frame_time,
-                                        retained_frame_duration, target_time)) {
+                                    ((retained_frame_timestamp != AV_NOPTS_VALUE &&
+                                      retained_frame_duration_ticks > 0)
+                                         ? frameCoversFpsTarget(
+                                               start_time, target_fps, target_index,
+                                               video_stream->time_base,
+                                               stream_start_timestamp,
+                                               retained_frame_timestamp,
+                                               retained_frame_duration_ticks)
+                                         : frameCoversSampleTime(
+                                               retained_frame_time,
+                                               retained_frame_duration,
+                                               target_time))) {
                                     process_selected_frame(
                                         sparse_previous_frame,
                                         retained_frame_time);
@@ -2128,22 +2365,39 @@ namespace lfs::io {
                                 throw std::runtime_error(error);
                             }
 
-                            const double frame_time =
-                                static_cast<double>(timestamp) * time_base -
-                                stream_start_seconds;
+                            const double frame_time = frameTimestampSeconds(
+                                frame, time_base, decoded_frame_count - 1,
+                                video_fps, stream_start_timestamp);
+                            if (first_frame_after_seek) {
+                                observed_seek_preroll = std::max(0.0, target_time - frame_time);
+                                first_frame_after_seek = false;
+                            }
+                            // A forward-decoded keyframe refreshes the fallback
+                            // estimate even when no further seek has occurred.
+                            if (!seek_to_target && (frame->flags & AV_FRAME_FLAG_KEY))
+                                observed_seek_preroll = std::max(0.0, target_time - frame_time);
                             const double frame_duration = frame->duration > 0
                                                               ? static_cast<double>(frame->duration) * time_base
                                                               : 1.0 / video_fps;
-                            if (frame_time < target_time) {
+                            if (timestamp < target_timestamp) {
                                 retain_frame(frame, frame_time, frame_duration);
                                 continue;
                             }
 
-                            if (frame_time >= end_time) {
+                            if (timestamp >= end_timestamp_boundary.first_at_or_after) {
                                 if (has_retained_frame &&
-                                    frameCoversSampleTime(
-                                        retained_frame_time,
-                                        retained_frame_duration, target_time)) {
+                                    ((retained_frame_timestamp != AV_NOPTS_VALUE &&
+                                      retained_frame_duration_ticks > 0)
+                                         ? frameCoversFpsTarget(
+                                               start_time, target_fps, target_index,
+                                               video_stream->time_base,
+                                               stream_start_timestamp,
+                                               retained_frame_timestamp,
+                                               retained_frame_duration_ticks)
+                                         : frameCoversSampleTime(
+                                               retained_frame_time,
+                                               retained_frame_duration,
+                                               target_time))) {
                                     process_selected_frame(
                                         sparse_previous_frame,
                                         retained_frame_time);
@@ -2176,7 +2430,7 @@ namespace lfs::io {
                             break;
                         }
                         const DecoderPumpResult result =
-                            decoder_pump.next(frame, error);
+                            next_decoded_frame();
                         if (result == DecoderPumpResult::EndOfStream) {
                             reached_eof = true;
                             break;
@@ -2191,13 +2445,30 @@ namespace lfs::io {
                            params.mode == ExtractionMode::FPS &&
                            !params.sharpness.window_mode && has_retained_frame &&
                            saved_count + skipped_count < estimated_total &&
-                           next_capture_time < end_time &&
-                           frameCoversSampleTime(retained_frame_time,
-                                                 retained_frame_duration,
-                                                 next_capture_time)) {
+                           next_fps_target_index < fps_target_count &&
+                           ((retained_frame_timestamp != AV_NOPTS_VALUE &&
+                             retained_frame_duration_ticks > 0)
+                                ? frameCoversFpsTarget(
+                                      start_time, target_fps,
+                                      next_fps_target_index,
+                                      video_stream->time_base,
+                                      stream_start_timestamp,
+                                      retained_frame_timestamp,
+                                      retained_frame_duration_ticks)
+                                : frameCoversSampleTime(
+                                      retained_frame_time,
+                                      retained_frame_duration,
+                                      next_capture_time))) {
                         process_selected_frame(sparse_previous_frame,
                                                retained_frame_time);
-                        next_capture_time += target_interval;
+                        ++next_fps_target_index;
+                        if (next_fps_target_index < fps_target_count) {
+                            next_fps_target_timestamp =
+                                fps_timestamp_for_index(next_fps_target_index);
+                            next_capture_time = fpsSampleTime(
+                                start_time, end_time, target_fps,
+                                next_fps_target_index);
+                        }
                     }
                 }
 
@@ -2215,11 +2486,15 @@ namespace lfs::io {
                     (gpu_encoding_enabled || completed_count != estimated_total || completed_count == 0))
                     params.progress_callback(completed_count, completed_count, skipped_count);
 
+                check_sink(sink.prepareComplete({media::SinkOutcome::Completed, accepted_frames, {}}));
                 if (!custom_sink && params.generate_metadata && !saved_frames.empty()) {
                     const std::filesystem::path meta_path = params.output_dir / "extraction_metadata.json";
                     try {
                         nlohmann::json root;
                         root["schema_version"] = 2;
+                        root["provenance"] = {{"ffmpeg_version", av_version_info()},
+                                              {"avcodec_version", avcodec_version()},
+                                              {"avformat_version", avformat_version()}};
 
                         // Structured fields are intentionally kept alongside
                         // the legacy top-level keys below, so existing tools
@@ -2273,9 +2548,19 @@ namespace lfs::io {
                                         {"source_bit_depth", input_bit_depth > 0 ? input_bit_depth : source_bit_depth},
                                     }},
                         };
+                        // Static timing belongs to the selected stream, not every
+                        // frame. Preserve unknown start separately from the effective
+                        // origin used by the legacy relative-seconds calculation.
+                        root["input"]["video"]["stream_index"] = video_stream_idx;
+                        root["input"]["video"]["time_base"] = {video_stream->time_base.num, video_stream->time_base.den};
+                        root["input"]["video"]["start_pts"] = video_stream->start_time != AV_NOPTS_VALUE
+                                                                  ? nlohmann::json(video_stream->start_time)
+                                                                  : nlohmann::json(nullptr);
+                        root["input"]["video"]["relative_origin_pts"] = stream_start_timestamp;
                         root["output"] = {
-                            {"format", params.format == ImageFormat::PNG ? "png" : params.format == ImageFormat::EXR ? "exr"
-                                                                                                                     : "jpg"},
+                            {"format", params.format == ImageFormat::TIFF16 ? "tiff16" : params.format == ImageFormat::PNG ? "png"
+                                                                                     : params.format == ImageFormat::EXR   ? "exr"
+                                                                                                                           : "jpg"},
                             {"size", (params.rotation == 90 || params.rotation == 270)
                                          ? nlohmann::json{out_height, out_width}
                                          : nlohmann::json{out_width, out_height}},
@@ -2292,24 +2577,54 @@ namespace lfs::io {
                             root["output"]["bit_depth"] = params.exr_precision == media::ExrPrecision::Half ? 16 : 32;
                             root["output"].erase("jpeg_quality");
                             root["output"]["pixel_format"] = "linear_rgb_float32";
-                            root["output"]["color_space"] = output_color.primaries == media::ColorPrimaries::Bt709 ? "linear BT709, relative" : "linear BT2020, relative";
+                            const bool pq_nits = output_color.units == media::ColorUnits::Nits;
+                            const bool hlg_scene = output_color.units == media::ColorUnits::SceneRelative;
+                            const std::string units(media::outputOptionName(output_color.units));
+                            root["output"]["color_space"] = std::string(output_color.primaries == media::ColorPrimaries::Bt709 ? "linear BT709, " : "linear BT2020, ") + units;
+                            root["output"]["units"] = units;
                             root["output"]["compression"] = params.exr_compression == media::ExrCompression::ZIP ? "zip" : "none";
                             root["output"]["alpha"] = "none";
                             const int component_depth = input_bit_depth > 0 ? input_bit_depth : source_bit_depth;
                             root["output"]["source_component_depth"] = component_depth > 0 ? nlohmann::json(component_depth) : nlohmann::json(nullptr);
-                            root["output"]["color_profile"] = "linear-sdr";
-                            root["output"]["input_transfer"] = linear_converter->inputTransfer() == media::ColorTransfer::Linear ? "linear" : linear_converter->inputTransfer() == media::ColorTransfer::Srgb ? "srgb"
-                                                                                                                                                                                                              : "bt709";
+                            root["output"]["color_profile"] = pq_nits ? "linear-pq-nits" : hlg_scene ? "linear-hlg-scene"
+                                                                                                     : "linear-sdr";
+                            if (hlg_scene) {
+                                root["output"]["encoded_rgb_policy"] = "clamp to [0,1] before HLG inverse OETF";
+                                root["output"]["linear_domain"] = "scene";
+                                root["output"]["hlg_scene_normalization"] = "Eprime=1 maps to E=1";
+                                root["output"]["display_ootf"] = false;
+                                root["output"]["mastering_rescale"] = false;
+                            }
+                            if (pq_nits) {
+                                root["output"]["encoded_rgb_policy"] = "clamp to [0,1] before PQ EOTF";
+                                root["output"]["pq_reference_peak_nits"] = 10000;
+                                root["output"]["mastering_rescale"] = false;
+                            }
+                            root["output"]["input_transfer"] = linear_converter->inputTransfer() == media::ColorTransfer::Hlg ? "arib-std-b67" : linear_converter->inputTransfer() == media::ColorTransfer::Pq   ? "smpte2084"
+                                                                                                                                             : linear_converter->inputTransfer() == media::ColorTransfer::Linear ? "linear"
+                                                                                                                                             : linear_converter->inputTransfer() == media::ColorTransfer::Srgb   ? "srgb"
+                                                                                                                                                                                                                 : "bt709";
                             if (linear_converter->inputTransfer() == media::ColorTransfer::Unspecified)
                                 root["output"]["input_transfer"] = nullptr;
                             root["output"]["transfer_override"] = params.input_color.transfer != media::ColorTransfer::Unspecified;
                             root["output"]["primaries_override"] = params.input_color.primaries != media::ColorPrimaries::Unspecified;
                             root["output"]["resize_filter"] = "area reduction / bilinear enlargement in linear light";
-                            root["output"]["sharpness_domain"] = params.sharpness.enabled ? "clipped quantized linear RGB8 proxy" : "disabled";
+                            root["output"]["sharpness_domain"] = params.sharpness.enabled ? (pq_nits ? "linear cd/m2 divided by 10000, clipped quantized RGB8 proxy" : (hlg_scene ? "clipped quantized scene-linear RGB8 proxy" : "clipped quantized linear RGB8 proxy")) : "disabled";
+                        }
+                        if (params.format == ImageFormat::TIFF16) {
+                            root["output"]["bit_depth"] = 16;
+                            root["output"]["pixel_format"] = "rgb_uint16";
+                            root["output"]["compression"] = "lzw";
+                            root["output"]["transfer"] = media::outputOptionName(params.tiff16_transfer);
+                            root["output"]["color_profile"] = "uint16-sdr";
+                            root["output"]["color_space"] = std::string(media::outputOptionName(params.tiff16_transfer)) +
+                                                            (output_color.primaries == media::ColorPrimaries::Bt709 ? " BT709, relative" : " BT2020, relative");
+                            root["output"]["quantization"] = "clamp-round-half-up-uint16";
                         }
                         root["processing"] = {
                             {"decoder", {
                                             {"backend", saw_hardware_frame ? decoder_backend : "ffmpeg_software"},
+                                            {"hardware_requested", params.allow_hardware_decode},
                                             {"name", codec && codec->name ? codec->name : "unknown"},
                                             {"threads", using_hw_decode ? 0 : codec_ctx->thread_count},
                                         }},
@@ -2319,7 +2634,7 @@ namespace lfs::io {
                                                  {"output", convert_hdr_to_sdr ? "sRGB transfer, BT.709 primaries, full range, 8-bit dithered" : "source"},
                                              }},
                             {"image_encoder", {
-                                                  {"backend", used_gpu_encoding ? "nvimagecodec_cuda" : "cpu"},
+                                                  {"backend", used_gpu_encoding ? "nvimagecodec_cuda" : sink.imageEncoderBackend()},
                                                   {"batch_size", used_gpu_encoding ? jpeg_batch_size : 1},
                                               }},
                             {"frame_selection", {
@@ -2336,7 +2651,7 @@ namespace lfs::io {
                                                 }},
                         };
                         root["performance"] = {
-                            {"decoded_frames", decoded_frame_count},
+                            {"decoded_frames", decoded_frame_count + discarded_color_probe_frames},
                             {"selected_frames", saved_count},
                             {"written_frames", written_count},
                             {"discarded_frames", skipped_count},
@@ -2361,8 +2676,9 @@ namespace lfs::io {
                         root["output_size"] = (params.rotation == 90 || params.rotation == 270)
                                                   ? nlohmann::json{out_height, out_width}
                                                   : nlohmann::json{out_width, out_height};
-                        root["output_format"] = params.format == ImageFormat::PNG ? "png" : params.format == ImageFormat::EXR ? "exr"
-                                                                                                                              : "jpg";
+                        root["output_format"] = params.format == ImageFormat::TIFF16 ? "tiff16" : params.format == ImageFormat::PNG ? "png"
+                                                                                              : params.format == ImageFormat::EXR   ? "exr"
+                                                                                                                                    : "jpg";
                         if (!float_output)
                             root["output_quality"] = params.jpg_quality;
                         root["filename_pattern"] = params.filename_pattern;
@@ -2407,29 +2723,29 @@ namespace lfs::io {
                         auto& frames = root["frames"];
                         for (const auto& f : saved_frames) {
                             frames.push_back({{"file", f.filename},
-                                              {"timestamp", f.timestamp},
-                                              {"source_frame", f.source_frame},
-                                              {"sharpness_score", f.sharpness_score}});
+                                              {"timestamp", f.frame.timestamp},
+                                              {"source_frame", f.frame.source_frame},
+                                              {"sharpness_score", f.frame.sharpness_score},
+                                              {"source_pts", f.frame.source_pts ? nlohmann::json(*f.frame.source_pts) : nlohmann::json(nullptr)},
+                                              {"timestamp_origin", f.frame.timestamp_origin == media::TimestampOrigin::BestEffort ? "best_effort" : f.frame.timestamp_origin == media::TimestampOrigin::Presentation ? "presentation"
+                                                                                                                                                                                                                     : "missing"}});
                         }
 
-                        if (float_output) {
-                            media::ExrOutputOptions options;
-                            options.overwrite = params.overwrite_metadata;
-                            options.cancelled = params.cancel_requested;
-                            const auto result = core::writeTextFileAtomically(meta_path, root.dump(2), {.overwrite = options.overwrite, .durable = false, .create_directories = false, .cancelled = options.cancelled});
-                            if (!result) {
-                                failure_ = result.error();
-                                if (failure_->code() == ErrorCode::Cancelled)
-                                    throw ExtractionCancelled{};
-                                throw std::runtime_error(std::string(failure_->detail()));
-                            }
-                        } else {
-                            std::ofstream meta_file(meta_path, std::ios::binary);
-                            meta_file << root.dump(2);
-                            meta_file.close();
-                            if (!meta_file)
-                                throw std::runtime_error("Could not write output file");
+                        // SDR historically replaces its manifest; float output has
+                        // an explicit collision policy. Preserve both contracts.
+                        const auto result = core::writeTextFileAtomically(meta_path, root.dump(2),
+                                                                          {.overwrite = !float_output || params.overwrite_metadata,
+                                                                           .durable = false,
+                                                                           .create_directories = false,
+                                                                           .cancelled = params.cancel_requested});
+                        if (!result) {
+                            failure_ = result.error();
+                            if (failure_->code() == ErrorCode::Cancelled)
+                                throw ExtractionCancelled{};
+                            throw std::runtime_error(std::string(failure_->detail()));
                         }
+                    } catch (const ExtractionCancelled&) {
+                        throw;
                     } catch (const std::exception& e) {
                         if (float_output)
                             throw;
@@ -2448,7 +2764,7 @@ namespace lfs::io {
                     LOG_INFO("HDR extraction timing: total={:.3f}s decoded={} selected={} written={} init={:.3f}s "
                              "render={:.3f}s readback={:.3f}s rgba_to_rgb={:.3f}s cuda_upload={:.3f}s "
                              "jpeg_encode={:.3f}s file_write={:.3f}s",
-                             elapsedSeconds(extraction_started), decoded_frame_count, saved_count, written_count,
+                             elapsedSeconds(extraction_started), decoded_frame_count + discarded_color_probe_frames, saved_count, written_count,
                              hdr_timing_total.initialization_seconds, hdr_timing_total.render_seconds,
                              hdr_timing_total.readback_seconds, hdr_timing_total.rgba_to_rgb_seconds,
                              cuda_upload_seconds, jpeg_encode_seconds, jpeg_write_seconds);

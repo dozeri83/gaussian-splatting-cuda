@@ -319,6 +319,11 @@ namespace lfs::training {
 
     float SSIM::compute(const lfs::core::Tensor& pred, const lfs::core::Tensor& target,
                         const lfs::core::Tensor& mask) {
+        return compute_impl(pred, target, mask, true);
+    }
+
+    float SSIM::compute_impl(const lfs::core::Tensor& pred, const lfs::core::Tensor& target,
+                             const lfs::core::Tensor& mask, const bool normalize_windows) {
         if (pred.shape() != target.shape()) {
             throw std::runtime_error("SSIM: prediction and target must have the same shape");
         }
@@ -330,7 +335,7 @@ namespace lfs::training {
             }
             ops_ = training_ops(backend).photometric;
         }
-        if (ops_ == nullptr || ops_->metric == nullptr || ops_->create == nullptr) {
+        if (ops_ == nullptr || ops_->metric == nullptr || ops_->masked_metric_map == nullptr || ops_->create == nullptr) {
             throw std::runtime_error("SSIM: photometric ops are unavailable");
         }
         if (!saved_.backend) {
@@ -338,14 +343,22 @@ namespace lfs::training {
         }
 
         if (mask.is_valid()) {
-            // Match masked training semantics: no valid-padding crop, masked mean over all pixels.
+            // Ordinary masks exclude samples from each window as well as its center.
             const auto layout = get_layout_info(pred, "SSIM");
-            const auto mask_f = mask_as_float01(mask);
+            const auto mask_f = (mask.dtype() == lfs::core::DataType::UInt8 ||
+                                 mask.dtype() == lfs::core::DataType::Bool)
+                                    ? mask.to(lfs::core::DataType::Float32).clamp(0.0f, 1.0f)
+                                    : mask;
             validate_mask_shape_or_throw(mask_f, layout, "SSIM");
             const float mask_sum = get_non_empty_mask_sum_or_throw(mask_f, "SSIM");
 
-            (void)ops_->metric(saved_, pred, target, true, false);
-            auto ssim_map = saved_.ssim_map;
+            lfs::core::Tensor ssim_map;
+            if (normalize_windows) {
+                ssim_map = ops_->masked_metric_map(pred, target, mask);
+            } else {
+                (void)ops_->metric(saved_, pred, target, true, false);
+                ssim_map = saved_.ssim_map;
+            }
             assert(ssim_map.ndim() == 4);
             assert(static_cast<int>(ssim_map.shape()[2]) == layout.h);
             assert(static_cast<int>(ssim_map.shape()[3]) == layout.w);
@@ -462,16 +475,33 @@ namespace lfs::training {
         }
     } // namespace
 
+    namespace {
+        std::pair<lfs::core::Tensor, bool> select_ssim_evaluation_mask(
+            const lfs::core::Tensor& mask, const bool complete_windows_only,
+            const std::string_view camera_name) {
+            if (!complete_windows_only || !mask.is_valid())
+                return {mask, false};
+            auto complete_windows = lfs::training::erode_metrics_mask(mask, 5);
+            if (complete_windows.to(lfs::core::DataType::Float32).sum().item<float>() > 0.0f)
+                return {std::move(complete_windows), true};
+            LOG_WARN("Eval: camera '{}' has no complete SSIM window inside the evaluated pixels; SSIM includes partial windows",
+                     camera_name);
+            return {mask, false};
+        }
+    } // namespace
+
     lfs::core::Tensor ssim_evaluation_mask(const lfs::core::Tensor& mask, const bool complete_windows_only,
                                            const std::string_view camera_name) {
-        if (!complete_windows_only || !mask.is_valid())
-            return mask;
-        auto complete_windows = lfs::training::erode_metrics_mask(mask, 5);
-        if (complete_windows.to(lfs::core::DataType::Float32).sum().item<float>() > 0.0f)
-            return complete_windows;
-        LOG_WARN("Eval: camera '{}' has no complete SSIM window inside the evaluated pixels; SSIM includes partial windows",
-                 camera_name);
-        return mask;
+        return select_ssim_evaluation_mask(mask, complete_windows_only, camera_name).first;
+    }
+
+    float SSIM::compute_evaluation(const lfs::core::Tensor& pred, const lfs::core::Tensor& target,
+                                   const lfs::core::Tensor& mask, const bool complete_windows_only,
+                                   const std::string_view camera_name) {
+        const auto [centers, complete] = select_ssim_evaluation_mask(mask, complete_windows_only, camera_name);
+        // Erosion selects centers, not sample support. These windows already
+        // exclude ignored input, so retain their original statistics exactly.
+        return compute_impl(pred, target, centers, !complete);
     }
 
     lfs::Error evaluation_error(std::string detail, const lfs::core::SourceSite site) {
@@ -1500,7 +1530,8 @@ namespace lfs::training {
                                            const lfs::core::SplatData& splatData,
                                            std::shared_ptr<CameraDataset> val_dataset,
                                            lfs::core::Tensor& background,
-                                           lfs::io::PipelinedImageLoader* image_loader) {
+                                           lfs::io::PipelinedImageLoader* image_loader,
+                                           std::function<bool()> on_view_boundary) {
         bool render_normal = false;
         for (size_t image_idx = 0; image_idx < val_dataset->size(); ++image_idx) {
             if (val_dataset->get_camera(image_idx)->has_normal()) {
@@ -1554,14 +1585,16 @@ namespace lfs::training {
                 return evaluation_error(e.what(), LFS_SOURCE_SITE_CURRENT());
             }
         };
-        return evaluate_views(iteration, std::move(val_dataset), source, background, image_loader);
+        return evaluate_views(iteration, std::move(val_dataset), source, background, image_loader,
+                              std::move(on_view_boundary));
     }
 
     EvalMetrics MetricsEvaluator::evaluate_views(const int iteration,
                                                  std::shared_ptr<CameraDataset> val_dataset,
                                                  const EvaluationViewSource& source,
                                                  const lfs::core::Tensor& background,
-                                                 lfs::io::PipelinedImageLoader* image_loader) {
+                                                 lfs::io::PipelinedImageLoader* image_loader,
+                                                 std::function<bool()> on_view_boundary) {
         if (!_params.optimization.enable_eval) {
             throw std::runtime_error("Evaluation is not enabled");
         }
@@ -1630,6 +1663,10 @@ namespace lfs::training {
         }
         result.views.reserve(val_dataset_size);
         for (size_t image_idx = 0; image_idx < val_dataset_size; ++image_idx) {
+            if (on_view_boundary && !on_view_boundary()) {
+                result.cancelled = true;
+                break;
+            }
             lfs::core::Camera* cam = val_dataset->get_camera(image_idx);
             auto& view = result.views.emplace_back();
             view.index = static_cast<int>(image_idx);
@@ -1680,9 +1717,8 @@ namespace lfs::training {
             float ssim = 0.0f;
             try {
                 psnr = _psnr_metric->compute(r_output.image, gt_image, mask);
-                ssim = _ssim_metric->compute(
-                    r_output.image, gt_image,
-                    ssim_evaluation_mask(mask, erode_ssim_mask, cam->image_name()));
+                ssim = _ssim_metric->compute_evaluation(
+                    r_output.image, gt_image, mask, erode_ssim_mask, cam->image_name());
             } catch (const std::exception& e) {
                 LOG_WARN("Eval: skipping camera '{}' (metric computation failed: {})", cam->image_name(), e.what());
                 view.skipped_reason = std::string("metric computation failed: ") + e.what();
@@ -2033,6 +2069,8 @@ namespace lfs::training {
                 saved_images++;
             }
         }
+        if (!result.cancelled && on_view_boundary && !on_view_boundary())
+            result.cancelled = true;
 
         // Wait for queued eval PNGs before returning so callers can read them
         // without racing the BatchImageSaver workers.
@@ -2048,6 +2086,10 @@ namespace lfs::training {
         if (_lpips_metric) {
             _lpips_metric->release_activations();
             lfs::core::Tensor::trim_memory_pool();
+        }
+        if (result.cancelled) {
+            LOG_INFO("Evaluation stopped at iteration {} after {} views", iteration, result.views.size());
+            return result;
         }
         const auto end_time = std::chrono::steady_clock::now();
         const auto elapsed = std::chrono::duration<float>(end_time - start_time).count();

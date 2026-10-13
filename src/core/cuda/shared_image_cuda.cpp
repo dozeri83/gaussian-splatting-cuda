@@ -3,6 +3,7 @@
 
 #include "shared_image_cuda.hpp"
 #include "core/cuda/lanczos_resize/lanczos_resize.hpp"
+#include "core/cuda/mask_normalization.hpp"
 #include "core/cuda/undistort/undistort.hpp"
 #include "core/tensor.hpp"
 #include "core/tensor_cuda_interop.hpp"
@@ -37,11 +38,24 @@ namespace lfs::core {
             case ImageConversion::NormalCHWToJ2KHWC: kernels::launch_normal_chw_to_jpeg2k_hwc(f32, out_f32, h, w, stream); break;
             case ImageConversion::J2KHWCToNormalCHW: kernels::launch_jpeg2k_hwc_to_normal_chw(f32, out_f32, h, w, stream); break;
             case ImageConversion::NormalPriorU8: kernels::launch_normal_prior_u8_hwc_to_float32_chw(u8, out_f32, h, w, transform, stream); break;
+            case ImageConversion::NormalPriorF32: kernels::launch_normal_prior_f32_hwc_to_float32_chw(f32, out_f32, h, w, transform, stream); break;
             case ImageConversion::NormalPriorU16: kernels::launch_normal_prior_u16_hwc_to_float32_chw(u16, out_f32, h, w, transform, stream); break;
             case ImageConversion::U8HWCToU8CHW: kernels::launch_uint8_hwc_to_uint8_chw(u8, out_u8, h, w, c, stream); break;
             case ImageConversion::U16HWCToU8CHW: kernels::launch_uint16_hwc_to_uint8_chw(u16, out_u8, h, w, c, stream); break;
             case ImageConversion::F32CHWToU8CHW: kernels::launch_float32_chw_to_uint8_chw(f32, out_u8, h, w, c, stream); break;
             case ImageConversion::U8HWToF32HW: kernels::launch_uint8_hw_to_float32_hw(u8, out_f32, h, w, stream); break;
+            case ImageConversion::MaskU8HWToF32HW: {
+                Tensor input = source;
+                Tensor output = destination;
+                cuda::normalize_mask_bytes(input, output);
+                break;
+            }
+            case ImageConversion::U8HWCToF32CHWExactMaskAlpha:
+                kernels::launch_uint8_hwc_to_float32_chw(u8, out_f32, h, w, c, stream, true);
+                break;
+            case ImageConversion::U16HWCToF32CHWExactMaskAlpha:
+                kernels::launch_uint16_hwc_to_float32_chw(u16, out_f32, h, w, c, stream, true);
+                break;
             }
         }
         void rgba_split(const Tensor& rgba, Tensor& rgb, Tensor& alpha) {
@@ -58,8 +72,10 @@ namespace lfs::core {
             const auto stream = getCurrentCUDAStream();
             if (transform == MaskTransform::Invert) {
                 kernels::launch_mask_invert(value.ptr<float>(), h, w, stream);
-            } else {
+            } else if (transform == MaskTransform::Threshold) {
                 kernels::launch_mask_threshold(value.ptr<float>(), h, w, threshold, stream);
+            } else {
+                (void)cuda::quantize_mask_to_byte_grid(value, false);
             }
         }
         Tensor resize(const Tensor& source, int h, int w, Resample mode, int kernel_size) {

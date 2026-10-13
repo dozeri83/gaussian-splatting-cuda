@@ -4,7 +4,7 @@ add_executable(media_linear_video_contracts linear_video_contracts.cpp)
 set_target_properties(media_linear_video_contracts PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 target_compile_features(media_linear_video_contracts PRIVATE cxx_std_23)
 target_include_directories(media_linear_video_contracts PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(media_linear_video_contracts PRIVATE lfs_video lfs_core lfs_media)
+target_link_libraries(media_linear_video_contracts PRIVATE lfs_video lfs_core lfs_media lfs_io)
 if(APPLE)
     find_package(Python REQUIRED COMPONENTS Development.Embed)
     target_link_options(media_linear_video_contracts PRIVATE "LINKER:-force_load,$<TARGET_LINKER_FILE:Python::Python>")
@@ -86,7 +86,12 @@ if(TARGET nvjpeg_ext)
 endif()
 add_test(NAME MediaStudioBackendContracts COMMAND ${Python_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../test_studio_backends.py --runner $<TARGET_FILE:media_studio_runner>)
+add_test(NAME MediaExactFrameBoundaryNvdec COMMAND ${Python_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../test_exact_frame_boundaries.py
+        --studio-runner $<TARGET_FILE:media_studio_runner>)
 set_tests_properties(MediaStudioBackendContracts PROPERTIES LABELS "media;gpu;integration" TIMEOUT 300
+    SKIP_RETURN_CODE 77 ENVIRONMENT "LFS_MEDIA_TEST_FFMPEG=${LFS_MEDIA_TEST_FFMPEG};LFS_MEDIA_TEST_FFPROBE=${LFS_MEDIA_TEST_FFPROBE}")
+set_tests_properties(MediaExactFrameBoundaryNvdec PROPERTIES LABELS "media;gpu;integration" TIMEOUT 300
     SKIP_RETURN_CODE 77 ENVIRONMENT "LFS_MEDIA_TEST_FFMPEG=${LFS_MEDIA_TEST_FFMPEG};LFS_MEDIA_TEST_FFPROBE=${LFS_MEDIA_TEST_FFPROBE}")
 if(WIN32)
     set_tests_properties(MediaStudioBackendContracts PROPERTIES ENVIRONMENT_MODIFICATION

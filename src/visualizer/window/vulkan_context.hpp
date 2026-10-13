@@ -297,12 +297,24 @@ namespace lfs::vis {
         [[nodiscard]] LFS_VIS_API bool beginFrame(const VkClearValue& clear_value, Frame& frame);
         // Dynamic rendering must be closed while external-image layout barriers
         // are recorded. These helpers bracket that interop window.
-        [[nodiscard]] bool finishActiveRendering(VkCommandBuffer command_buffer);
-        [[nodiscard]] bool restartActiveRendering(VkCommandBuffer command_buffer,
-                                                  const Frame& frame);
+        [[nodiscard]] LFS_VIS_API bool finishActiveRendering(VkCommandBuffer command_buffer);
+        [[nodiscard]] LFS_VIS_API bool restartActiveRendering(VkCommandBuffer command_buffer,
+                                                              const Frame& frame);
         [[nodiscard]] LFS_VIS_API bool endFrame();
         [[nodiscard]] bool hasActiveFrame() const noexcept { return frame_active_; }
-        [[nodiscard]] LFS_VIS_API std::expected<WindowCapture, std::string> captureAndEndActiveFrameRgba();
+        void requestSceneCapture() noexcept {
+            scene_capture_requested_.store(true, std::memory_order_release);
+        }
+        void cancelSceneCaptureRequest() noexcept {
+            scene_capture_requested_.store(false, std::memory_order_release);
+        }
+        [[nodiscard]] bool sceneCaptureRequested() const noexcept {
+            return scene_capture_requested_.load(std::memory_order_acquire);
+        }
+        [[nodiscard]] LFS_VIS_API bool recordSceneCapture(VkCommandBuffer command_buffer,
+                                                          const Frame& frame);
+        [[nodiscard]] LFS_VIS_API std::expected<WindowCapture, std::string> captureAndEndActiveFrameRgba(
+            bool scene_before_overlays = false);
         [[nodiscard]] bool waitForNextFrameSlot();
         [[nodiscard]] bool waitForCurrentFrameSlot();
         [[nodiscard]] LFS_VIS_API bool waitForSubmittedFrames();
@@ -311,7 +323,7 @@ namespace lfs::vis {
         [[nodiscard]] std::uint64_t lastFrameSubmitSerial() const;
         // Serial of the most recent *successful* graphics frame vkQueueSubmit.
         // Used by interop layout-commit rollback when endFrame submit fails.
-        [[nodiscard]] std::uint64_t lastSuccessfulFrameSubmitSerial() const;
+        [[nodiscard]] LFS_VIS_API std::uint64_t lastSuccessfulFrameSubmitSerial() const;
         // Immediate vkQueueSubmit count for the current GUI frame (proof counter for #1575).
         // Accounting starts at resetImmediateSubmitsThisFrame (prepareFrame) and is logged
         // at endFrame; beginFrame must not clear it because prepare runs first.
@@ -335,7 +347,7 @@ namespace lfs::vis {
         // is already covered by a queued or submitted wait on the same semaphore
         // is treated as already satisfied (success, no extra submit wait). Callers
         // that commit layout optimistically must not do so on false.
-        [[nodiscard]] bool addFrameTimelineWait(
+        [[nodiscard]] LFS_VIS_API bool addFrameTimelineWait(
             VkSemaphore semaphore,
             std::uint64_t value,
             VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
@@ -584,6 +596,14 @@ namespace lfs::vis {
         std::chrono::steady_clock::time_point framebuffer_resize_last_recreate_{};
         bool frame_active_ = false;
         bool frame_rendering_active_ = false;
+        std::atomic_bool scene_capture_requested_{false};
+        struct SceneCaptureStaging {
+            VkBuffer buffer = VK_NULL_HANDLE;
+            VmaAllocation allocation = VK_NULL_HANDLE;
+            VkExtent2D extent{};
+            std::uint32_t image_index = 0;
+        } scene_capture_staging_;
+        void destroySceneCaptureStaging();
         bool frame_suboptimal_ = false;
         // Phase 7B: owner quarantine latch (10 s policy) shared by the six UI waits.
         std::atomic<bool> gpu_wait_quarantined_{false};

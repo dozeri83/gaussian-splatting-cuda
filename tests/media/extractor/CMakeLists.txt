@@ -31,6 +31,12 @@ add_test(NAME MediaExtractionContracts
 set_tests_properties(MediaExtractionContracts PROPERTIES LABELS "media;cpu;offline;integration"
     TIMEOUT 180
     ENVIRONMENT "LFS_MEDIA_TEST_FFMPEG=${LFS_MEDIA_TEST_FFMPEG};LFS_MEDIA_TEST_FFPROBE=${LFS_MEDIA_TEST_FFPROBE}")
+add_test(NAME MediaExactFrameBoundarySoftware
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../test_exact_frame_boundaries.py
+        --runner $<TARGET_FILE:media_extraction_runner>)
+set_tests_properties(MediaExactFrameBoundarySoftware PROPERTIES
+    LABELS "media;cpu;offline;integration" TIMEOUT 300
+    ENVIRONMENT "LFS_MEDIA_TEST_FFMPEG=${LFS_MEDIA_TEST_FFMPEG};LFS_MEDIA_TEST_FFPROBE=${LFS_MEDIA_TEST_FFPROBE}")
 if(WIN32)
     set_tests_properties(MediaExtractionContracts PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${MEDIA_RUNTIME_LIBRARY_DIR}")
@@ -90,11 +96,24 @@ add_test(NAME MediaPythonBindingsContracts
 set_tests_properties(MediaPythonBindingsContracts PROPERTIES LABELS "media;cpu;offline;integration"
     TIMEOUT 180
     ENVIRONMENT "LFS_MEDIA_TEST_FFMPEG=${LFS_MEDIA_TEST_FFMPEG};LFS_MEDIA_TEST_FFPROBE=${LFS_MEDIA_TEST_FFPROBE}")
+if(APPLE)
+    add_library(media_reservation_crash SHARED reservation_crash.cpp)
+    target_compile_features(media_reservation_crash PRIVATE cxx_std_23)
+    add_dependencies(media_test_bindings media_reservation_crash)
+    set_property(TEST MediaPythonBindingsContracts APPEND PROPERTY ENVIRONMENT
+        "LFS_MEDIA_TEST_RESERVATION_SHIM=$<TARGET_FILE:media_reservation_crash>")
+endif()
 
 add_test(NAME MediaFloatExrUnitContracts COMMAND media_extraction_runner --float-exr-unit)
 add_test(NAME MediaAtomicFileContracts COMMAND media_extraction_runner --atomic-unit)
 set_tests_properties(MediaAtomicFileContracts PROPERTIES LABELS "media;cpu;offline" TIMEOUT 30)
 add_executable(media_public_image_output public_image_output.cpp)
+add_executable(media_tiff_roundtrip tiff_roundtrip.cpp)
+target_link_libraries(media_tiff_roundtrip PRIVATE lfs_media lfs_core lfs_image_codecs TIFF::TIFF)
+target_include_directories(media_tiff_roundtrip PRIVATE ${MEDIA_ROOT}/src)
+set_target_properties(media_tiff_roundtrip PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME MediaTiffRoundTripContracts COMMAND media_tiff_roundtrip)
+set_tests_properties(MediaTiffRoundTripContracts PROPERTIES LABELS "media;cpu;offline" TIMEOUT 30)
 target_link_libraries(media_public_image_output PRIVATE lfs_media)
 set_target_properties(media_public_image_output PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_test(NAME MediaPublicImageOutputContracts COMMAND media_public_image_output)

@@ -2,12 +2,20 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Production Media Ingest bindings: GIL, ownership, file parity and callbacks."""
 import argparse
+import errno
+import hashlib
 import importlib.util
+import json
+import math
 import os
+import shutil
 from pathlib import Path
 import sys
+import subprocess
+import struct
 import tempfile
 import threading
+import unicodedata
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,14 +27,161 @@ MEDIA_ERROR = None
 
 
 class MediaBindings(unittest.TestCase):
+    def test_tiff16_public_output_precision_alpha_and_failures(self):
+        ffmpeg = os.environ.get("LFS_MEDIA_TEST_FFMPEG", "ffmpeg")
+        color = media.FrameColor()
+        color.transfer = media.ColorTransfer.Linear
+        color.primaries = media.ColorPrimaries.Bt709
+        options = media.Tiff16OutputOptions()
+        samples = (0., .125, .5, 1., .9, .0001)
+        frame = media.FrameSurface.from_bytes(2, 1, media.FramePixelFormat.RGBFloat32,
+                                              struct.pack("=6f", *samples), color=color)
+        path = self.root / "tiff16-precision.tif"
+        for transfer in (media.ColorTransfer.Linear, media.ColorTransfer.Srgb, media.ColorTransfer.Bt709):
+            options.transfer = transfer
+            options.overwrite = True
+            media.ImageOutput.write_tiff16(path, frame, options)
+            result = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "rgb48le", "-"],
+                                    check=True, capture_output=True, timeout=30)
+            actual = struct.unpack("<6H", result.stdout)
+            def encode(v):
+                if transfer == media.ColorTransfer.Srgb:
+                    v = 12.92 * v if v <= .0031308 else 1.055 * v ** (1 / 2.4) - .055
+                elif transfer == media.ColorTransfer.Bt709:
+                    v = 4.5 * v if v < .018 else 1.099 * v ** .45 - .099
+                return math.floor(max(0., min(1., v)) * 65535 + .5)
+            self.assertLessEqual(max(abs(a - encode(v)) for a, v in zip(actual, samples)), 1)
+            self.assertTrue(any(v % 257 for v in actual), "genuine precision beyond RGB8")
+        before = path.read_bytes()
+        options.overwrite = False
+        with self.assertRaises(MEDIA_ERROR):
+            media.ImageOutput.write_tiff16(path, frame, options)
+        options.overwrite = True
+        with self.assertRaises(MEDIA_ERROR):
+            media.ImageOutput.write_tiff16(path, frame, options, cancelled=lambda: True)
+        self.assertEqual(path.read_bytes(), before)
+        for units in (media.ColorUnits.Nits, media.ColorUnits.SceneRelative):
+            color.units = units
+            invalid = media.FrameSurface.from_bytes(2, 1, media.FramePixelFormat.RGBFloat32,
+                                                    struct.pack("=6f", *samples), color=color)
+            with self.assertRaises(MEDIA_ERROR):
+                media.ImageOutput.write_tiff16(path, invalid, options)
+            self.assertEqual(path.read_bytes(), before)
+        color.units = media.ColorUnits.Relative
+        options.transfer = media.ColorTransfer.Linear
+        for alpha in (media.AlphaMode.Straight, media.AlphaMode.Premultiplied):
+            color.alpha = alpha
+            rgba = (.25, .125, .5, .5) if alpha == media.AlphaMode.Premultiplied else (.5, .25, 1., .5)
+            rgba_frame = media.FrameSurface.from_bytes(1, 1, media.FramePixelFormat.RGBAFloat32,
+                                                       struct.pack("=4f", *rgba), color=color)
+            media.ImageOutput.write_tiff16(path, rgba_frame, options)
+            result = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "rgba64le", "-"],
+                                    check=True, capture_output=True, timeout=30)
+            self.assertEqual(struct.unpack("<4H", result.stdout), (32768, 16384, 65535, 32768))
+        zero_alpha = media.FrameSurface.from_bytes(1, 1, media.FramePixelFormat.RGBAFloat32,
+                                                   struct.pack("=4f", 1., .5, .25, 0.), color=color)
+        media.ImageOutput.write_tiff16(path, zero_alpha, options)
+        raw = subprocess.check_output([ffmpeg, "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "rgba64le", "-"], timeout=30)
+        self.assertEqual(struct.unpack("<4H", raw), (0, 0, 0, 0))
+        before = path.read_bytes()
+        for rgba in ((float("nan"), 0., 0., 1.), (0., float("inf"), 0., 1.), (0., 0., 0., -.1), (0., 0., 0., 1.1)):
+            invalid = media.FrameSurface.from_bytes(1, 1, media.FramePixelFormat.RGBAFloat32,
+                                                    struct.pack("=4f", *rgba), color=color)
+            with self.assertRaises(MEDIA_ERROR):
+                media.ImageOutput.write_tiff16(path, invalid, options)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_tiff16_sequence_precision_metadata_and_resume(self):
+        ffmpeg = os.environ.get("LFS_MEDIA_TEST_FFMPEG", "ffmpeg")
+        source = self.root / "tiff16-source.mkv"
+        expression = ("nullsrc=s=32x24:r=4:d=1,format=gbrp10le,"
+                      "geq=r='mod(X*17+Y*3+N*31,1024)':g='mod(X*7+Y*11+N*29,1024)':b='mod(X*13+Y*5+N*23,1024)',"
+                      "setparams=color_primaries=bt709:color_trc=linear:colorspace=gbr:range=full")
+        subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", expression, "-c:v", "ffv1", "-level", "3",
+                        "-pix_fmt", "gbrp10le", "-color_trc", "linear", "-color_primaries", "bt709",
+                        "-colorspace", "rgb", "-color_range", "pc", str(source)], check=True, capture_output=True, timeout=60)
+        request = media.IngestRequest()
+        request.input = source
+        request.allow_hardware_decode = False
+        request.output_format = media.FramePixelFormat.RGBFloat32
+        request.input_color.transfer = media.ColorTransfer.Linear
+        request.input_color.primaries = media.ColorPrimaries.Bt709
+        request.selection.fps = 4
+        output = media.FileExtraction()
+        output.files.output_directory = self.root / "tiff16-sequence"
+        output.files.format = media.FrameFileFormat.TIFF16
+        output.files.tiff16.transfer = media.ColorTransfer.Linear
+        output.resume = True
+        output.write_metadata = True
+        report = media.MediaIngest.extract_files(request, output)
+        self.assertEqual(report.frames_accepted, 4)
+        paths = sorted(output.files.output_directory.glob("*.tif"))
+        self.assertEqual(len(paths), 4)
+        values = subprocess.run([ffmpeg, "-v", "error", "-i", str(paths[0]), "-f", "rawvideo", "-pix_fmt", "rgb48le", "-"],
+                                check=True, capture_output=True, timeout=30).stdout
+        actual = struct.unpack("<" + "H" * (len(values) // 2), values)
+        expected = [math.floor((v / 1023) * 65535 + .5) for y in range(24) for x in range(32)
+                    for v in ((x * 17 + y * 3) % 1024, (x * 7 + y * 11) % 1024, (x * 13 + y * 5) % 1024)]
+        self.assertLessEqual(max(abs(a - b) for a, b in zip(actual, expected)), 1)
+        metadata = json.loads((output.files.output_directory / "extraction_metadata.json").read_text())
+        self.assertEqual(metadata["output"]["bit_depth"], 16)
+        self.assertEqual(metadata["output"]["source_component_depth"], 10)
+        self.assertEqual(metadata["output"]["pixel_format"], "rgb_uint16")
+        self.assertEqual(metadata["output"]["transfer"], "linear")
+        hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths]
+        mtimes = [path.stat().st_mtime_ns for path in paths]
+        metadata_path = output.files.output_directory / "extraction_metadata.json"
+        metadata_before = metadata_path.read_bytes()
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, output)
+        self.assertEqual(metadata_path.read_bytes(), metadata_before)
+        output.files.tiff16.overwrite = True
+        self.assertEqual(media.MediaIngest.extract_files(request, output).frames_accepted, 4)
+        self.assertEqual([hashlib.sha256(path.read_bytes()).hexdigest() for path in paths], hashes)
+        self.assertEqual([path.stat().st_mtime_ns for path in paths], mtimes)
+        output.files.tiff16.transfer = media.ColorTransfer.Srgb
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, output)
+        output.files.tiff16.transfer = media.ColorTransfer.Linear
+        identity_path = output.files.output_directory / ".media-ingest-checkpoint" / "identity.json"
+        identity = json.loads(identity_path.read_text())
+        self.assertEqual(identity["tiff16"][0], "tiff16-sdr-v1")
+        # Older or incompatible encoding identities must not reuse verified files.
+        identity["tiff16"][0] = "tiff16-sdr-v0"
+        identity_path.write_text(json.dumps(identity))
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, output)
+        self.assertEqual([hashlib.sha256(path.read_bytes()).hexdigest() for path in paths], hashes)
+        self.assertEqual([path.stat().st_mtime_ns for path in paths], mtimes)
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="lfs-python-media-")
-        cls.addClassCleanup(cls.temp.cleanup)
+        cls.addClassCleanup(cls.cleanup_temp)
         cls.root = Path(cls.temp.name)
         cls.corpus = cls.root / "é 日本語"
         fixtures.prepare(cls.corpus, os.environ.get("LFS_MEDIA_TEST_FFMPEG", "ffmpeg"),
                          os.environ.get("LFS_MEDIA_TEST_FFPROBE", "ffprobe"))
+
+    @classmethod
+    def cleanup_temp(cls):
+        try:
+            cls.temp.cleanup()
+        except OSError as error:
+            if sys.platform != "darwin" or error.errno != errno.ENOTEMPTY:
+                raise
+            # macOS/exFAT can enumerate Unicode fixture names in NFD while
+            # lookup requires the NFC spelling used to create them. Restrict
+            # this fallback to normalized children of our own temporary root.
+            for entry in cls.root.iterdir():
+                normalized = entry.with_name(unicodedata.normalize("NFC", entry.name))
+                if normalized == entry or not normalized.exists():
+                    continue
+                if normalized.is_symlink() or not normalized.is_dir():
+                    normalized.unlink()
+                else:
+                    shutil.rmtree(normalized)
+            cls.temp.cleanup()
 
     def request(self):
         request = media.IngestRequest()
@@ -36,6 +191,58 @@ class MediaBindings(unittest.TestCase):
         request.end_seconds = 0.35
         request.allow_hardware_decode = False
         return request
+
+    def test_hdr_units_survive_owned_surfaces_and_verified_file_resume(self):
+        for hlg,profile,transfer,units in [(False,media.FloatColorProfile.PqNits,"smpte2084",media.ColorUnits.Nits),
+                                           (True,media.FloatColorProfile.HlgScene,"arib-std-b67",media.ColorUnits.SceneRelative)]:
+            source=self.root/("hlg-bindings.mkv" if hlg else "pq-bindings.mkv")
+            subprocess.run([os.environ.get("LFS_MEDIA_TEST_FFMPEG","ffmpeg"),"-v","error",
+                            "-f","lavfi","-i","testsrc2=size=64x32:rate=10:duration=1",
+                            "-vf",f"format=yuv444p10le,setparams=color_primaries=bt2020:color_trc={transfer}:colorspace=bt2020nc:range=limited",
+                            "-c:v","ffv1","-level","3",str(source)],check=True,capture_output=True)
+            request=self.request()
+            request.input=source
+            request.output_format=media.FramePixelFormat.RGBFloat32
+            request.float_color_profile=profile
+            request.end_seconds=.5
+            report,frames=media.MediaIngest.extract(request)
+            self.assertGreater(report.frames_accepted,0)
+            self.assertEqual(frames[0].layout.color.units,units)
+            self.assertEqual(frames[0].layout.color.transfer,media.ColorTransfer.Linear)
+            self.assertEqual(frames[0].layout.color.primaries,media.ColorPrimaries.Bt2020)
+            snapshot=media.FrameSurface.from_bytes(frames[0].layout.width,frames[0].layout.height,
+                        frames[0].layout.format,frames[0].pixels,color=frames[0].layout.color,info=frames[0].info)
+            self.assertEqual(snapshot.layout.color.units,units)
+            self.assertEqual(snapshot.pixels,frames[0].pixels)
+            files=media.FileExtraction()
+            files.files.format=media.FrameFileFormat.EXR
+            files.files.output_directory=self.root/("hlg-resume" if hlg else "pq-resume")
+            files.files.exr.precision=media.ExrPrecision.Float
+            files.files.exr.overwrite=True
+            files.resume=True
+            files.write_metadata=True
+            def stop(progress):
+                if progress.processed>=2:
+                    raise ValueError("interrupt PQ checkpoint")
+            with self.assertRaisesRegex(ValueError,"interrupt PQ checkpoint"):
+                media.MediaIngest.extract_files(request,files,progress=stop)
+            media.MediaIngest.extract_files(request,files)
+            def proof():
+                return {path.name:(path.read_bytes(),path.stat().st_mtime_ns) for path in files.files.output_directory.glob("*.exr")}
+            before=proof()
+            media.MediaIngest.extract_files(request,files)
+            self.assertEqual(proof(),before)
+            missing=next(iter(before))
+            (files.files.output_directory/missing).unlink()
+            media.MediaIngest.extract_files(request,files)
+            self.assertEqual((files.files.output_directory/missing).read_bytes(),before[missing][0])
+            manifest=json.loads((files.files.output_directory/"extraction_metadata.json").read_text())
+            self.assertEqual(manifest["output"]["units"],"scene-relative" if hlg else "cd/m2")
+            request.float_color_profile=media.FloatColorProfile.Sdr
+            with self.assertRaises(MEDIA_ERROR):
+                media.MediaIngest.extract_files(request,files)
+            self.assertEqual({name:data for name,(data,_) in proof().items()},
+                             {name:data for name,(data,_) in before.items()})
 
     def test_probe_optional_inventory_unicode(self):
         self.assertTrue(media.MediaIngest.codec_build_info().ffmpeg_license)
@@ -60,7 +267,7 @@ class MediaBindings(unittest.TestCase):
         files.write_metadata = True
         file_report = media.MediaIngest.extract_files(request, files)
         self.assertEqual(file_report.frames_accepted, len(frames))
-        self.assertEqual(len(list(files.files.output_directory.glob("*.png"))), len(frames))
+        self.assertEqual(len(list(files.files.output_directory.glob("frame_*.png"))), len(frames))
         del request, report, file_report
         self.assertEqual(before, frames[0].pixels)
 
@@ -73,7 +280,328 @@ class MediaBindings(unittest.TestCase):
         files.files.output_directory = self.root / "cancel-output"
         with self.assertRaises(MEDIA_ERROR):
             media.MediaIngest.extract_files(self.request(), files, cancelled=lambda: True)
-        self.assertFalse(list(files.files.output_directory.glob("*.png")))
+        self.assertFalse(list(files.files.output_directory.glob("frame_*.png")))
+
+    def resume_files(self, directory, file_format=None):
+        files = media.FileExtraction()
+        files.files.output_directory = directory
+        files.write_metadata = True
+        files.resume = True
+        if file_format is not None:
+            files.files.format = file_format
+        return files
+
+    def interrupt_resume(self, request, files):
+        processed = []
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, files,
+                progress=lambda value: processed.append(value.processed),
+                cancelled=lambda: bool(processed))
+        self.assertTrue(processed)
+
+    def test_resume_replays_selection_without_rewriting_verified_images(self):
+        for label, file_format in (("png", media.FrameFileFormat.PNG), ("jpeg", media.FrameFileFormat.JPEG),
+                                   ("exr", media.FrameFileFormat.EXR)):
+            with self.subTest(format=label):
+                request = self.request()
+                if label == "exr":
+                    request.output_format = media.FramePixelFormat.RGBFloat32
+                    request.input_color.transfer = media.ColorTransfer.Linear
+                    request.input_color.primaries = media.ColorPrimaries.Bt709
+                files = self.resume_files(self.root / ("resume-" + label), file_format)
+                self.interrupt_resume(request, files)
+                previous = {p: (p.read_bytes(), p.stat().st_mtime_ns)
+                            for p in files.files.output_directory.iterdir() if p.is_file()}
+                report = media.MediaIngest.extract_files(request, files)
+                self.assertEqual(report.frames_accepted, 4)
+                for path, (data, modified) in previous.items():
+                    self.assertEqual(path.read_bytes(), data)
+                    self.assertEqual(path.stat().st_mtime_ns, modified)
+                manifest = json.loads((files.files.output_directory / "extraction_metadata.json").read_text())
+                self.assertEqual(len(manifest["frames"]), 4)
+                self.assertEqual(len(list((files.files.output_directory / ".media-ingest-checkpoint").glob("frame-*.json"))), 4)
+
+    def test_resume_sha256_matches_independent_input_pixels_and_files(self):
+        request = self.request()
+        _, frames = media.MediaIngest.extract(request)
+        files = self.resume_files(self.root / "resume-sha256")
+        media.MediaIngest.extract_files(request, files)
+        checkpoint = files.files.output_directory / ".media-ingest-checkpoint"
+        identity = json.loads((checkpoint / "identity.json").read_text())
+        self.assertEqual(identity["input_sha256"], hashlib.sha256(request.input.read_bytes()).hexdigest())
+        for index, frame in enumerate(frames):
+            record = json.loads((checkpoint / f"frame-{index}.json").read_text())
+            digest = hashlib.sha256()
+            for row in range(frame.layout.height):
+                start = row * frame.layout.row_stride
+                digest.update(frame.pixels[start:start + frame.layout.width * 3])
+            self.assertEqual(record["pixels_sha256"], digest.hexdigest())
+            self.assertEqual(record["file_sha256"], hashlib.sha256(
+                (files.files.output_directory / record["file"]).read_bytes()).hexdigest())
+
+    def test_resume_manifest_preserves_selected_source_timestamps(self):
+        for fixture, end in (("cfr-asymmetric", 0.35), ("vfr-asymmetric", 1.5)):
+            for label, file_format in (("png", media.FrameFileFormat.PNG), ("exr", media.FrameFileFormat.EXR)):
+                with self.subTest(fixture=fixture, format=label):
+                    request = self.request()
+                    request.input = self.corpus / (fixture + ".nut")
+                    request.end_seconds = end
+                    if label == "exr":
+                        request.output_format = media.FramePixelFormat.RGBFloat32
+                        request.input_color.transfer = media.ColorTransfer.Linear
+                        request.input_color.primaries = media.ColorPrimaries.Bt709
+                    _, selected = media.MediaIngest.extract(request)
+                    files = self.resume_files(self.root / ("resume-timing-" + fixture + label), file_format)
+                    files.files.exr.overwrite = True
+                    self.interrupt_resume(request, files)
+                    media.MediaIngest.extract_files(request, files)
+                    manifest_path = files.files.output_directory / "extraction_metadata.json"
+                    manifest = json.loads(manifest_path.read_text())
+                    self.assertEqual(len(manifest["frames"]), len(selected))
+                    for entry, surface in zip(manifest["frames"], selected):
+                        self.assertEqual(entry["source_pts"], surface.info.source_timestamp.ticks)
+                        self.assertEqual(entry["timestamp_origin"], "best_effort")
+                        self.assertAlmostEqual(entry["timestamp"], surface.info.relative_seconds, places=6)
+                    images = {entry["file"]: (files.files.output_directory / entry["file"]).read_bytes()
+                              for entry in manifest["frames"]}
+                    media.MediaIngest.extract_files(request, files)
+                    self.assertEqual(json.loads(manifest_path.read_text())["frames"], manifest["frames"])
+                    missing = files.files.output_directory / manifest["frames"][-1]["file"]
+                    missing.unlink()
+                    media.MediaIngest.extract_files(request, files)
+                    self.assertEqual(json.loads(manifest_path.read_text())["frames"], manifest["frames"])
+                    self.assertEqual(images, {name: (files.files.output_directory / name).read_bytes() for name in images})
+
+    def test_resume_rejects_changed_request_and_corrupt_output(self):
+        request = self.request()
+        files = self.resume_files(self.root / "resume-reject")
+        self.interrupt_resume(request, files)
+        image = next(files.files.output_directory.glob("frame_*.png"))
+        original = image.read_bytes()
+        request.selection.interval = 2
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, files)
+        self.assertEqual(image.read_bytes(), original)
+        request.selection.interval = 1
+        image.write_bytes(original[:16])
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, files)
+        self.assertEqual(image.read_bytes(), original[:16])
+        self.assertFalse((files.files.output_directory / "extraction_metadata.json").exists())
+
+    def test_resume_recovers_empty_publication_reservations(self):
+        for kind in ("identity", "record", "image"):
+            with self.subTest(reservation=kind):
+                files = self.resume_files(self.root / ("resume-empty-" + kind))
+                checkpoint = files.files.output_directory / ".media-ingest-checkpoint"
+                if kind == "identity":
+                    checkpoint.mkdir(parents=True)
+                    (checkpoint / "identity.json").touch()
+                    (checkpoint / "identity.json.tmp-interrupted").write_text("partial")
+                else:
+                    self.interrupt_resume(self.request(), files)
+                    image = next(files.files.output_directory.glob("frame_*.png"))
+                    if kind == "record":
+                        image.unlink()
+                        (checkpoint / "frame-0.json").write_bytes(b"")
+                    else:
+                        image.write_bytes(b"")
+                self.assertEqual(media.MediaIngest.extract_files(self.request(), files).frames_accepted, 4)
+                self.assertTrue(all(path.stat().st_size > 0 for path in files.files.output_directory.glob("frame_*.png")))
+
+    def test_resume_surplus_records_preserve_previous_manifest(self):
+        files = self.resume_files(self.root / "resume-surplus")
+        media.MediaIngest.extract_files(self.request(), files)
+        checkpoint = files.files.output_directory / ".media-ingest-checkpoint"
+        # Schema-valid extra record: only end-of-selection validation can reject it.
+        shutil.copyfile(checkpoint / "frame-0.json", checkpoint / "frame-4.json")
+        manifest = files.files.output_directory / "extraction_metadata.json"
+        before = (manifest.read_bytes(), manifest.stat().st_mtime_ns)
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(self.request(), files)
+        self.assertEqual((manifest.read_bytes(), manifest.stat().st_mtime_ns), before)
+
+    def test_resume_rejects_different_application_build(self):
+        files = self.resume_files(self.root / "resume-build")
+        self.interrupt_resume(self.request(), files)
+        identity = files.files.output_directory / ".media-ingest-checkpoint" / "identity.json"
+        value = json.loads(identity.read_text())
+        self.assertTrue(value["application_build"])
+        value["application_build"] += "-different-codecs"
+        identity.write_text(json.dumps(value))
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(self.request(), files)
+
+    def test_completed_exr_resume_requires_manifest_replacement(self):
+        request = self.request()
+        request.output_format = media.FramePixelFormat.RGBFloat32
+        request.input_color.transfer = media.ColorTransfer.Linear
+        request.input_color.primaries = media.ColorPrimaries.Bt709
+        files = self.resume_files(self.root / "resume-complete-exr", media.FrameFileFormat.EXR)
+        media.MediaIngest.extract_files(request, files)
+        image = next(files.files.output_directory.glob("frame_*.exr"))
+        before = (image.read_bytes(), image.stat().st_mtime_ns)
+        manifest = files.files.output_directory / "extraction_metadata.json"
+        original_manifest = manifest.read_bytes()
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, files)
+        self.assertEqual(manifest.read_bytes(), original_manifest)
+        files.files.exr.overwrite = True
+        self.assertEqual(media.MediaIngest.extract_files(request, files).frames_accepted, 4)
+        self.assertEqual((image.read_bytes(), image.stat().st_mtime_ns), before)
+
+    def test_resume_reconstructs_missing_image_and_pending_publication(self):
+        for label, file_format, extension in (("png", media.FrameFileFormat.PNG, "png"),
+                                               ("jpeg", media.FrameFileFormat.JPEG, "jpg"),
+                                               ("exr", media.FrameFileFormat.EXR, "exr"),
+                                               ("tiff16", media.FrameFileFormat.TIFF16, "tif")):
+            with self.subTest(format=label):
+                request = self.request()
+                if label in ("exr", "tiff16"):
+                    request.output_format = media.FramePixelFormat.RGBFloat32
+                    request.input_color.transfer = media.ColorTransfer.Linear
+                    request.input_color.primaries = media.ColorPrimaries.Bt709
+                files = self.resume_files(self.root / ("resume-missing-" + label), file_format)
+                self.interrupt_resume(request, files)
+                image = next(files.files.output_directory.glob("frame_*." + extension))
+                expected = image.read_bytes()
+                image.unlink()
+                report = media.MediaIngest.extract_files(request, files)
+                self.assertEqual(report.frames_accepted, 4)
+                self.assertEqual(image.read_bytes(), expected)
+
+    def test_resume_recovers_record_published_before_image(self):
+        request = self.request()
+        files = self.resume_files(self.root / "resume-pending")
+        record = files.files.output_directory / ".media-ingest-checkpoint" / "frame-0.json"
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, files, cancelled=record.exists)
+        self.assertTrue(record.is_file())
+        self.assertFalse(list(files.files.output_directory.glob("frame_*.png")))
+        self.assertEqual(media.MediaIngest.extract_files(request, files).frames_accepted, 4)
+
+    def resume_child(self, directory, environment=None, exit_after_progress=True):
+        # Exit only this disposable child, after a completed image publication.
+        program = r'''
+import os, sys
+from pathlib import Path
+handles = []
+if os.name == "nt":
+    for directory in sys.argv[4:]:
+        if directory:
+            handles.append(os.add_dll_directory(directory))
+sys.path.insert(0, sys.argv[1])
+import media_test_bindings as media
+r = media.IngestRequest()
+r.input = Path(sys.argv[2])
+r.selection.mode = media.SelectionMode.Interval
+r.selection.interval = 1
+r.end_seconds = .35
+r.allow_hardware_decode = False
+f = media.FileExtraction()
+f.files.output_directory = Path(sys.argv[3])
+f.write_metadata = True
+f.resume = True
+media.MediaIngest.extract_files(r, f, progress=lambda _: os._exit(73))
+'''
+        if args.studio:
+            program = program.replace("import media_test_bindings as media", "from lichtfeld import media")
+        if not exit_after_progress:
+            program = program.replace("progress=lambda _: os._exit(73)", "progress=lambda _: None")
+        command = [sys.executable, "-c", program, str(args.module_dir.resolve()),
+                   str(self.request().input), str(directory), str(args.runtime_dir.resolve()),
+                   str(args.dependency_dir.resolve()) if args.dependency_dir else ""]
+        return subprocess.run(command, capture_output=True, timeout=30, env=environment)
+
+    def test_resume_after_abrupt_process_exit(self):
+        directory = self.root / "resume-crash"
+        child = self.resume_child(directory)
+        self.assertEqual(child.returncode, 73, child.stderr.decode(errors="replace"))
+        self.assertEqual(len(list(directory.glob("frame_*.png"))), 1)
+        self.assertEqual(media.MediaIngest.extract_files(self.request(), self.resume_files(directory)).frames_accepted, 4)
+
+    @unittest.skipUnless(sys.platform == "darwin" and os.environ.get("LFS_MEDIA_TEST_RESERVED_PUBLICATION") == "1",
+                         "requires explicit macOS/exFAT reserved-publication qualification")
+    def test_resume_after_exit_inside_reserved_publication(self):
+        shim = Path(os.environ["LFS_MEDIA_TEST_RESERVATION_SHIM"])
+        self.assertTrue(shim.is_file())
+        for name in ("identity.json", "frame-0.json", "frame_1.png"):
+            with self.subTest(reservation=name):
+                directory = self.root / ("reserved-crash-" + name)
+                environment = dict(os.environ, DYLD_INSERT_LIBRARIES=str(shim),
+                                   LFS_MEDIA_TEST_RESERVED_FILENAME=name)
+                child = self.resume_child(directory, environment, exit_after_progress=False)
+                self.assertEqual(child.returncode, 73, child.stderr.decode(errors="replace"))
+                reservation = directory / name if name.endswith(".png") else directory / ".media-ingest-checkpoint" / name
+                self.assertEqual(reservation.stat().st_size, 0)
+                self.assertEqual(media.MediaIngest.extract_files(self.request(), self.resume_files(directory)).frames_accepted, 4)
+
+    def test_resume_refuses_to_adopt_legacy_output(self):
+        request = self.request()
+        directory = self.root / "resume-legacy"
+        files = self.resume_files(directory)
+        files.resume = False
+        media.MediaIngest.extract_files(request, files)
+        before = {p: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+        files.resume = True
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, files)
+        self.assertEqual(before, {p: p.read_bytes() for p in directory.iterdir() if p.is_file()})
+
+    def test_resume_preserves_unowned_checkpoint_directory(self):
+        files = self.resume_files(self.root / "resume-unowned")
+        checkpoint = files.files.output_directory / ".media-ingest-checkpoint"
+        checkpoint.mkdir(parents=True)
+        sentinel = checkpoint / "frame_1.png"
+        sentinel.write_bytes(b"unrelated photograph")
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(self.request(), files)
+        self.assertEqual(sentinel.read_bytes(), b"unrelated photograph")
+        self.assertFalse((checkpoint / "identity.json").exists())
+
+    def test_resume_vfr_and_sharpness_match_uninterrupted_extraction(self):
+        for window in (False, True):
+            with self.subTest(window=window):
+                request = self.request()
+                request.input = self.corpus / "vfr-asymmetric.nut"
+                request.end_seconds = -1
+                request.selection.mode = media.SelectionMode.FPS
+                request.selection.fps = 3
+                request.sharpness.enabled = True
+                request.sharpness.window = window
+                files = self.resume_files(self.root / ("resume-vfr-" + str(window)))
+                self.interrupt_resume(request, files)
+                actual = media.MediaIngest.extract_files(request, files)
+                reference = self.resume_files(self.root / ("reference-vfr-" + str(window)))
+                reference.resume = False
+                expected = media.MediaIngest.extract_files(request, reference)
+                self.assertEqual(actual.frames_accepted, expected.frames_accepted)
+                for image in reference.files.output_directory.glob("frame_*.png"):
+                    self.assertEqual((files.files.output_directory / image.name).read_bytes(), image.read_bytes())
+                actual_metadata = json.loads((files.files.output_directory / "extraction_metadata.json").read_text())
+                expected_metadata = json.loads((reference.files.output_directory / "extraction_metadata.json").read_text())
+                self.assertEqual(actual_metadata["frames"], expected_metadata["frames"])
+
+    def test_resume_changed_input_and_invalid_checkpoint_preserve_output(self):
+        request = self.request()
+        original_input = request.input
+        request.input = self.root / "resume-input.nut"
+        shutil.copyfile(original_input, request.input)
+        files = self.resume_files(self.root / "resume-input-change")
+        self.interrupt_resume(request, files)
+        image = next(files.files.output_directory.glob("frame_*.png"))
+        before = image.read_bytes()
+        with request.input.open("ab") as source:
+            source.write(b"changed identity")
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, files)
+        self.assertEqual(image.read_bytes(), before)
+        shutil.copyfile(original_input, request.input)
+        record = files.files.output_directory / ".media-ingest-checkpoint" / "frame-0.json"
+        record.write_text('{"file":"../../outside.png"}', encoding="utf-8")
+        with self.assertRaises(MEDIA_ERROR):
+            media.MediaIngest.extract_files(request, files)
+        self.assertEqual(image.read_bytes(), before)
 
     def test_callback_exception_preserves_python_error(self):
         def failed(*args):
@@ -99,7 +627,19 @@ class MediaBindings(unittest.TestCase):
         files.files.format = media.FrameFileFormat.EXR
         files.files.exr.precision = media.ExrPrecision.Float
         self.assertEqual(media.MediaIngest.extract_files(request, files).frames_accepted, len(frames))
-        self.assertTrue((files.files.output_directory / "extraction_metadata.json").is_file())
+        manifest = json.loads((files.files.output_directory / "extraction_metadata.json").read_text())
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["output"]["bit_depth"], 32)
+        self.assertFalse(manifest["processing"]["decoder"]["hardware_requested"])
+        self.assertEqual(manifest["output"]["input_transfer"], "linear")
+        self.assertTrue(manifest["output"]["transfer_override"])
+        self.assertEqual(len(manifest["frames"]), len(frames))
+        for entry, surface in zip(manifest["frames"], frames):
+            self.assertEqual(entry["source_pts"], surface.info.source_timestamp.ticks)
+            self.assertEqual(entry["timestamp_origin"], "best_effort")
+            self.assertEqual(manifest["input"]["video"]["time_base"],
+                             [surface.info.source_timestamp.time_base.numerator,
+                              surface.info.source_timestamp.time_base.denominator])
         color = media.FrameColor()
         color.transfer = media.ColorTransfer.Linear
         color.primaries = media.ColorPrimaries.Bt709

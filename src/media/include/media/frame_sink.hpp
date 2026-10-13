@@ -9,16 +9,24 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lfs::media {
     enum class FramePixelFormat { RGB8,
                                   RGBFloat32,
                                   RGBAFloat32 };
+    enum class ColorUnits { Relative,
+                            Nits,
+                            SceneRelative };
+    enum class FloatColorProfile { Sdr,
+                                   PqNits,
+                                   HlgScene };
     struct FrameColor {
         ColorTransfer transfer = ColorTransfer::Unspecified;
         ColorPrimaries primaries = ColorPrimaries::Unspecified;
         AlphaMode alpha = AlphaMode::None;
+        ColorUnits units = ColorUnits::Relative;
     };
     [[nodiscard]] constexpr std::size_t pixelBytes(FramePixelFormat format) {
         switch (format) {
@@ -95,6 +103,11 @@ namespace lfs::media {
         virtual ~FrameSink() = default;
         virtual SinkResult begin(const SinkSession&) { return {}; }
         virtual SinkResult write(const FrameView&) = 0;
+        // Validate the finished sequence before dependent metadata is published.
+        // This does not complete the sink; failure is followed by abort.
+        virtual SinkResult prepareComplete(const SinkSummary&) { return {}; }
+        // Effective provider selected by file sinks, including verified replay.
+        virtual std::string_view imageEncoderBackend() const noexcept { return "cpu"; }
         virtual SinkResult complete(const SinkSummary&) { return {}; }
         virtual void abort(const SinkSummary&) noexcept {}
     };

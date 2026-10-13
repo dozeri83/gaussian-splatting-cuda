@@ -230,6 +230,31 @@ namespace lfs::core {
             return Status::failure(make_error({.code = ErrorCode::Internal, .domain = ErrorDomain::IO, .detail = std::format("Atomic write failed (path='{}', exception={})", path_to_utf8(target), error.what()), .detection = LFS_SOURCE_SITE_CURRENT()}));
         }
     }
+    Status publishStagedFileAtomically(const std::filesystem::path& staged, const std::filesystem::path& target,
+                                       const std::function<bool()>& cancelled) {
+        try {
+            if (staged.empty() || target.empty() || target.filename().empty() ||
+                staged.native().find(std::filesystem::path::value_type{}) != std::filesystem::path::string_type::npos ||
+                target.native().find(std::filesystem::path::value_type{}) != std::filesystem::path::string_type::npos ||
+                !std::filesystem::is_regular_file(std::filesystem::symlink_status(staged)))
+                return Status::failure(make_error({.code = ErrorCode::InvalidArgument, .domain = ErrorDomain::IO, .detail = "Staged publication requires a regular non-symlink source and valid destination", .detection = LFS_SOURCE_SITE_CURRENT()}));
+            if (cancelled && cancelled())
+                return Status::failure(make_error({.code = ErrorCode::Cancelled, .domain = ErrorDomain::IO, .detail = "Staged publication cancelled: " + path_to_utf8(target), .detection = LFS_SOURCE_SITE_CURRENT()}));
+            Temporary temporary;
+            temporary.path = staged;
+            auto result = commit(temporary, target, false);
+            // Hard-link fallback leaves the source name. Cleanup is best-effort:
+            // a successful publication must never become a failed extraction.
+            if (result)
+                temporary.owned = true;
+            return result;
+        } catch (const Exception& error) {
+            return Status::failure(error.error());
+        } catch (const std::exception& error) {
+            // LFS-CENSUS-OK(empty-catch): staged publication failures retain the exception as a structured error; the source remains caller-owned.
+            return Status::failure(make_error({.code = ErrorCode::Internal, .domain = ErrorDomain::IO, .detail = std::format("Staged publication failed (path='{}', exception={})", path_to_utf8(target), error.what()), .detection = LFS_SOURCE_SITE_CURRENT()}));
+        }
+    }
     Status writeTextFileAtomically(const std::filesystem::path& target, std::string_view contents,
                                    const AtomicFileOptions& options) {
         return writeFileAtomically(target, [&](FILE* stream) -> Status {

@@ -47,6 +47,43 @@ class StudioBackends(unittest.TestCase):
         self.assertTrue(actual["cuda_diagnostics"])
         return actual,output
 
+    def test_native_manifest_preserves_offset_reordered_pts(self):
+        source = self.root / "offset-reordered.mkv"
+        subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=4", "-itsoffset", "2", "-f", "lavfi", "-i",
+                        "testsrc2=size=128x96:rate=30:duration=4", "-map", "0:a", "-map", "1:v",
+                        "-c:a", "pcm_s16le", "-c:v", "libx264", "-bf", "3", "-g", "120",
+                        "-pix_fmt", "yuv420p", str(source)], check=True, timeout=30)
+        reference = json.loads(subprocess.check_output([
+            FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_streams",
+            "-show_frames", "-of", "json", str(source)]))
+        stream = reference["streams"][0]
+        self.assertEqual(stream["index"], 1)
+        self.assertTrue(any(frame["pict_type"] == "B" for frame in reference["frames"]))
+        for options in ({}, {"fps": 2}):
+            with self.subTest(options=options):
+                _, output = self.invoke(input=str(source), end_seconds=3, **options)
+                manifest = json.loads((output / "extraction_metadata.json").read_text())
+                self.assertIn("nvdec", json.dumps(manifest))
+                timing = manifest["input"]["video"]
+                self.assertEqual(timing["stream_index"], 1)
+                self.assertGreater(timing["start_pts"], 0)
+                self.assertEqual(timing["time_base"], [int(p) for p in stream["time_base"].split("/")])
+                expected = {int(frame["best_effort_timestamp"]) for frame in reference["frames"]}
+                self.assertTrue(manifest["frames"])
+                self.assertEqual(manifest["frames"][0]["source_pts"],
+                                 int(reference["frames"][0]["best_effort_timestamp"]))
+                self.assertEqual(manifest["frames"][0]["timestamp"], 0)
+                if "fps" in options:
+                    self.assertEqual([frame["timestamp"] for frame in manifest["frames"]],
+                                     [0, .5, 1, 1.5, 2, 2.5])
+                for frame in manifest["frames"]:
+                    self.assertIn(frame["source_pts"], expected)
+                    self.assertEqual(frame["timestamp_origin"], "best_effort")
+                    seconds = ((frame["source_pts"] - timing["relative_origin_pts"])
+                               * timing["time_base"][0] / timing["time_base"][1])
+                    self.assertAlmostEqual(frame["timestamp"], seconds, places=6)
+
     def test_shared_player_uses_native_decode_and_seeks(self):
         actual, _ = self.invoke(operation="native-preview")
         self.assertTrue(actual["hardware_decode"])
@@ -118,6 +155,11 @@ class StudioBackends(unittest.TestCase):
             self.assertLess(error, 3, f"NVENC retained frame {index} was overwritten: {error}")
 
     def test_native_decode_jpeg_rotation_and_scoring(self):
+        reference = json.loads(subprocess.check_output([
+            FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_frames",
+            "-show_streams", "-of", "json", str(self.source)]))
+        expected_pts = {int(frame["best_effort_timestamp"]) for frame in reference["frames"]}
+        expected_time_base = [int(part) for part in reference["streams"][0]["time_base"].split("/")]
         for options in ({}, {"jpeg":True}, {"jpeg":True,"rotation":90},
                         {"jpeg":True,"rotation":180}, {"jpeg":True,"rotation":270},
                         {"jpeg":True,"scale":0.5},
@@ -128,6 +170,11 @@ class StudioBackends(unittest.TestCase):
                 self.assertEqual(actual["accepted"],len(metadata["frames"]))
                 self.assertGreater(actual["accepted"],0)
                 self.assertIn("nvdec",json.dumps(metadata))
+                self.assertTrue(metadata["processing"]["decoder"]["hardware_requested"])
+                self.assertEqual(metadata["input"]["video"]["time_base"], expected_time_base)
+                for frame in metadata["frames"]:
+                    self.assertIn(frame["source_pts"], expected_pts)
+                    self.assertEqual(frame["timestamp_origin"], "best_effort")
                 expected_size = [96,128] if options.get("rotation") in (90,270) else [128,96]
                 if options.get("scale"):
                     expected_size = [64,48]
@@ -155,6 +202,126 @@ class StudioBackends(unittest.TestCase):
                 # JPEG quantization/chroma differ after rotation; the image geometry must agree.
                 mean_error = sum(abs(a - b) for a, b in zip(actual, expected)) / len(actual)
                 self.assertLess(mean_error, 10, f"GPU rotation disagrees with FFmpeg: MAE {mean_error}")
+
+    def test_sparse_seek_preserves_targets_without_repeated_long_gop_decode(self):
+        original_source = self.source
+        self.addCleanup(setattr, self, "source", original_source)
+        for label, gop, variable in (("long", 120, False), ("short", 6, False),
+                                     ("variable", 120, True), ("one-second", 30, False),
+                                     ("two-second", 60, False)):
+            with self.subTest(clip=label):
+                self.source = self.root / f"sparse-{label}.mp4"
+                command = [FFMPEG, "-v", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=128x96:rate=30:duration=4"]
+                if variable:
+                    command += ["-vf", "select=not(eq(mod(n\\,5)\\,1))", "-fps_mode", "vfr"]
+                subprocess.run(command + ["-c:v", "libx264", "-g", str(gop),
+                                          "-keyint_min", str(gop), "-sc_threshold", "0",
+                                          "-pix_fmt", "yuv420p", str(self.source)], check=True, timeout=30)
+                fps = 1 if label == "two-second" else 2 if variable or label == "one-second" else 5
+                _, output = self.invoke(fps=fps, end_seconds=4)
+                metadata = json.loads((output / "extraction_metadata.json").read_text())
+                self.assertEqual(metadata["performance"]["selected_frames"], 4 * fps)
+                probe = json.loads(subprocess.check_output([
+                    FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_frames",
+                    "-show_streams", "-show_entries", "frame=best_effort_timestamp_time,best_effort_timestamp,key_frame:stream=index,time_base,start_pts",
+                    "-of", "json", str(self.source)]))
+                timestamps = [float(frame["best_effort_timestamp_time"]) for frame in probe["frames"]]
+                source_pts = {float(frame["best_effort_timestamp_time"]): int(frame["best_effort_timestamp"])
+                              for frame in probe["frames"]}
+                timing = metadata["input"]["video"]
+                self.assertEqual(timing["stream_index"], probe["streams"][0]["index"])
+                self.assertEqual(timing["time_base"], [int(part) for part in probe["streams"][0]["time_base"].split("/")])
+                for index, frame in enumerate(metadata["frames"]):
+                    expected = next(value for value in timestamps if value + 1e-7 >= index / fps)
+                    self.assertAlmostEqual(frame["timestamp"], expected, places=6)
+                    self.assertEqual(frame["source_pts"], source_pts[expected])
+                    self.assertEqual(frame["timestamp_origin"], "best_effort")
+                if label == "long":
+                    self.assertLessEqual(metadata["performance"]["decoded_frames"], 150)
+                if label in ("one-second", "two-second"):
+                    # Independent per-target seeking visits the keyframe through
+                    # the first frame at/after the requested time, inclusive.
+                    keyframes = [float(frame["best_effort_timestamp_time"])
+                                 for frame in probe["frames"] if frame.get("key_frame") == 1]
+                    baseline = sum(sum(key <= value <= next(
+                        value for value in timestamps if value + 1e-7 >= index / fps)
+                        for value in timestamps)
+                        for index in range(4 * fps)
+                        for key in [max(value for value in keyframes if value <= index / fps)])
+                    self.assertLessEqual(metadata["performance"]["decoded_frames"], baseline)
+                if label == "short":
+                    self.assertGreater(metadata["processing"]["frame_selection"]["keyframe_seek_count"], 2)
+
+    def test_verified_gpu_jpeg_resume(self):
+        work = Path(tempfile.mkdtemp(dir=self.root))
+        output = work / "frames"
+        path = work / "request.json"
+        def run(**options):
+            request = {"input": str(self.source), "output": str(output),
+                       "jpeg": True, "resume": True, **options}
+            path.write_text(json.dumps(request), encoding="utf-8")
+            return subprocess.run([str(RUNNER), str(path)], capture_output=True, timeout=60)
+
+        interrupted = run(exit_after=1)
+        self.assertEqual(interrupted.returncode, 73, interrupted.stderr.decode(errors="replace"))
+        first = next(output.glob("*.jpg"))
+        original = (first.read_bytes(), first.stat().st_mtime_ns)
+        complete = run()
+        self.assertEqual(complete.returncode, 0, complete.stderr.decode(errors="replace"))
+        self.assertEqual(json.loads(complete.stdout)["accepted"], 4)
+        self.assertEqual((first.read_bytes(), first.stat().st_mtime_ns), original)
+        identity = json.loads((output/".media-ingest-checkpoint"/"identity.json").read_text())
+        self.assertEqual(identity["image_encoder"], "nvimagecodec_cuda")
+        metadata = json.loads((output/"extraction_metadata.json").read_text())
+        self.assertEqual(metadata["processing"]["image_encoder"], {"backend": "nvimagecodec_cuda", "batch_size": 1})
+        images = {image.name: (image.read_bytes(), image.stat().st_mtime_ns) for image in output.glob("*.jpg")}
+        replay = run()
+        self.assertEqual(replay.returncode, 0, replay.stderr.decode(errors="replace"))
+        self.assertEqual(images, {image.name: (image.read_bytes(), image.stat().st_mtime_ns) for image in output.glob("*.jpg")})
+        first.unlink()
+        restored = run()
+        self.assertEqual(restored.returncode, 0, restored.stderr.decode(errors="replace"))
+        self.assertEqual(first.read_bytes(), original[0])
+        unavailable = run(disable_jpeg_provider=True)
+        self.assertNotEqual(unavailable.returncode, 0)
+        self.assertIn("provider is unavailable", unavailable.stdout.decode(errors="replace"))
+        first.write_bytes(b"corrupt")
+        corrupt = run()
+        self.assertNotEqual(corrupt.returncode, 0)
+        self.assertEqual(first.read_bytes(), b"corrupt")
+
+        # A CPU checkpoint keeps its provider even when the GPU becomes available.
+        output = work / "cpu"
+        cpu = run(disable_jpeg_provider=True)
+        self.assertEqual(cpu.returncode, 0, cpu.stderr.decode(errors="replace"))
+        resumed_cpu = run()
+        self.assertEqual(resumed_cpu.returncode, 0, resumed_cpu.stderr.decode(errors="replace"))
+        self.assertEqual(json.loads((output/".media-ingest-checkpoint"/"identity.json").read_text())["image_encoder"], "cpu")
+        for options in ({"rotation": 90}, {"scale": .5}, {"sharpness": True, "window": True}):
+            with self.subTest(options=options):
+                output = Path(tempfile.mkdtemp(dir=work)) / "frames"
+                fresh = run(**options)
+                self.assertEqual(fresh.returncode, 0, fresh.stderr.decode(errors="replace"))
+                before = {image.name: image.read_bytes() for image in output.glob("*.jpg")}
+                self.assertTrue(before)
+                replay = run(**options)
+                self.assertEqual(replay.returncode, 0, replay.stderr.decode(errors="replace"))
+                self.assertEqual(before, {image.name: image.read_bytes() for image in output.glob("*.jpg")})
+                gpu_output = output
+                output = Path(tempfile.mkdtemp(dir=work)) / "cpu-reference"
+                reference = run(disable_jpeg_provider=True, **options)
+                self.assertEqual(reference.returncode, 0, reference.stderr.decode(errors="replace"))
+                self.assertEqual(set(before), {image.name for image in output.glob("*.jpg")})
+                name = sorted(before)[0]
+                def decoded(image):
+                    return subprocess.check_output([FFMPEG, "-v", "error", "-i", str(image),
+                                                    "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                actual, expected = decoded(gpu_output/name), decoded(output/name)
+                self.assertEqual(len(actual), len(expected))
+                # Different JPEG providers quantize/chroma-sample differently;
+                # the transformed content must agree with the CPU writer.
+                self.assertLess(sum(abs(a-b) for a,b in zip(actual,expected))/len(actual), 10)
 
     def test_memory_delivery_keeps_software_pixels(self):
         actual, output = self.invoke(memory=True)

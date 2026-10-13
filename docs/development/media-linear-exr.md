@@ -1,4 +1,64 @@
-# Linear SDR frames and EXR output
+# Linear frames, EXR and TIFF16 output
+
+## TIFF16 SDR output
+
+`ImageOutput::writeTiff16` (Python `ImageOutput.write_tiff16`) writes single
+images independently of decoding or rendering. `FrameFileFormat::TIFF16`
+uses the same writer for sequences, including resumable extraction. Existing
+PNG/JPEG, TIFF8 and EXR defaults are unchanged.
+
+Input must be native-endian RGBFloat32/RGBAFloat32, linear, with relative SDR
+units and declared BT.709 or BT.2020 primaries. Padded and unaligned views are
+accepted. NaN/Inf, incompatible alpha and HDR nits/scene-relative units are
+rejected. Finite RGB is clamped to [0,1], encoded using the selected transfer
+(sRGB by default; linear or BT.709 also available), and rounded half up to
+UINT16. Alpha is unassociated, stays linear and must be in [0,1]; premultiplied
+input is unpremultiplied, with zero-alpha RGB canonicalized to zero.
+
+Files use `.tif` or `.tiff`, LZW compression and standard TIFF chromaticities,
+D65 white point and a 65536-entry transfer-function table. ImageDescription
+contains JSON transfer, primaries, alpha, provenance and available timing and
+source precision and a versioned `lfsEncoding: tiff16-sdr-v1` identifier.
+LichtFeld's RGB/RGBA image loaders recognize this contract, invert the declared
+transfer, convert BT.2020 to BT.709 in linear light when needed, and encode
+the existing bounded sRGB display/training representation. Alpha is unchanged.
+Conversion runs at 16-bit precision before an optional RGB8 request or resizing;
+wide-gamut colors outside BT.709 are clipped to that display contract.
+Raw codec decode, `load_image_float` and high-bitdepth data/normal loaders retain
+the stored samples and do not apply display color management. Untagged TIFFs
+keep their existing behavior. Malformed JSON, non-object descriptions, missing
+or unsupported encoding markers and oversized descriptions remain foreign TIFFs
+and preserve legacy loading, even when they contain other `lfs` field names.
+Only a valid object with the supported `lfsEncoding` opts into strict validation:
+incomplete or duplicate-key records are rejected, and their
+sample type, alpha, primaries and complete transfer table must agree with the
+TIFF tags. Oversized external descriptions remain outside this color contract.
+The TIFF tags are not an ICC profile; other software must interpret them itself.
+The expected transfer tables are initialized once per transfer and reused for
+export and direct comparison against libtiff-owned tables on load, without a
+per-image table copy or repeated transfer-function evaluation.
+The transfer table adds approximately 128 KiB per
+image. Conversion and encoding run on the CPU with a packed UINT16 image buffer;
+this is not a device-resident or zero-copy writer.
+
+CLI extraction selects `--format tiff16`, optionally `--tiff16-transfer
+linear|srgb|bt709`. MCP uses `format: "tiff16"` and `tiff16_transfer`. Input
+transfer/primaries overrides retain the existing float SDR contract. TIFF16
+extraction writes metadata automatically; it does not pass through RGB8 before
+quantization. EXR precision/compression and JPEG quality do not apply.
+
+Writes reuse the existing atomic-file service. Overwrite is opt-in; cancellation
+or failure preserves an existing destination. Resume identity includes transfer
+and provenance and rejects incompatible reuse. As for EXR, replay that would
+replace existing extraction metadata requires explicit overwrite permission;
+verified frame files are retained without rewriting. The checkpoint includes the
+TIFF encoding version as well as transfer and provenance; incompatible versions
+cannot reuse already published frames.
+
+The shared image loader honors `LoadParams::decode_16bit` and separates cached
+RGB8 and UINT16 decode results, including cold/warm loads and resized requests.
+RGBA resizing uses the existing Lanczos service on CUDA, Vulkan and Metal;
+the Metal path accepts four channels and retains alpha alongside RGB.
 
 `lfs_media` provides `RGBFloat32` and `RGBAFloat32` CPU frame views and immutable
 owning surfaces. `RGB8` remains the default for ingest, preview and PNG/JPEG.
@@ -13,13 +73,15 @@ Rendered/external writers do not require source frame ordinals or fake PTS.
 Optional `source_component_depth` describes decoded source precision rather than
 the output representation.
 
-## Qualified extraction profile
+## Default SDR extraction profile
 
-Set `IngestRequest::output_format` to `RGBFloat32`. The software decoder feeds
+Set `IngestRequest::output_format` to `RGBFloat32`. The default
+`FloatColorProfile::Sdr` profile is described here; the explicit PQ profile is
+specified below. The software decoder feeds
 integer RGB or planar/semiplanar YUV of 8–16 component bits, including 4:2:0,
 4:2:2 and 4:4:4. Components are unpacked directly at source precision; YUV uses
 chroma-location-aware sampling and an unclipped float matrix with
-declared BT.709, BT.601 or BT.2020 NCL and full/limited range. Inverse transfer
+declared BT.709, BT.601, SMPTE 240M or BT.2020 NCL and full/limited range. Inverse transfer
 supports Linear, sRGB and BT.709. Output retains BT.709 or BT.2020 primaries;
 it does not convert primaries or claim physical luminance units.
 
@@ -80,7 +142,8 @@ Cancellation is checked before work, between chunks and before commit. It cannot
 interrupt an arbitrary filesystem call. Chunk scratch is bounded to 64 MiB;
 provenance is bounded to 1 MiB. No OpenImageIO dependency is introduced.
 
-Headers record chromaticities, linear transfer, relative units, alpha convention,
+Headers record chromaticities, linear transfer, explicit sample units (relative
+by default, or cd/m2), alpha convention,
 optional provenance, origin, source/output timestamps and source component depth.
 `FileFrameSink` still names decoded frames by the existing source ordinal.
 EXR extraction requires float output and always creates schema-3 metadata with
@@ -142,3 +205,230 @@ Tensor program against independent analytic references on available native GPUs.
 Hosted Windows/Linux tests are CPU-only. Native GPU regression qualification must
 run separately on physical hardware. See `tests/media/README.md` for root test
 invocation and fixture/tool requirements; synthetic tests need no media downloads.
+
+## Color and backend contract matrix
+
+This inventory describes existing behavior. A format being decodable does not
+imply that its transfer, gamut or mastering metadata can be preserved by every
+output path. Decoder availability, color conversion and image encoding are
+separate capabilities. Matrix/range and transfer/primaries are independent.
+
+| Input or operation | Current contract | Reference or boundary test |
+| --- | --- | --- |
+| Integer SDR RGB/YUV, 8–16 bits to float | Linear, sRGB and BT.709 inverse transfer; BT.709 or BT.2020 primaries retained | `test_transfers_and_linear_resize_rotation_reference`, `test_yuv_depths_and_subsampled_reference` |
+| YUV limited/full range | Explicit range required; negative and superwhite RGB retained | `test_yuv_nominal_range_superwhites_and_matrix_analytic` |
+| YUV matrix | BT.709, BT.470BG/SMPTE 170M, SMPTE 240M, BT.2020 NCL supported | Independent raw-code analytic reference, five matrices × three curves × two ranges |
+| Missing YUV matrix/range or BT.2020 CL | Unsupported for float extraction; no resolution-based guess or substitution of NCL | Public preflight units and actual tagged-file rejection; transfer/primaries overrides cannot supply matrix/range |
+| Missing transfer/primaries | Explicit supported overrides required for float output | `test_unknown_hdr_and_yuv_colorimetry` |
+| PQ, HLG, Log, LogSqrt under the default SDR profile | Unsupported; an SDR override cannot relabel a known HDR/LOG source | `test_float_color_profile_rejects_unsupported_tags_without_relabeling_hdr` |
+| Other transfer or primaries | Unsupported unless covered by an explicit permitted override; no implicit gamut conversion | BT.470M transfer and BT.470BG primaries rejection fixtures |
+| Chroma subsampling and location | 4:2:0/4:2:2/4:4:4; location-aware reconstruction | Raw-code and FFprobe siting references; source codes verified before comparison |
+| Float resize/rotation | Area reduction, bilinear enlargement in linear light, sample-preserving quarter turns | Analytic resize/rotation and checkerboard references |
+| Linear float RGB/RGBA to EXR | HALF/FLOAT, BT.709/BT.2020 chromaticities, explicit relative, scene-relative or cd/m2 units; alpha policy explicit | Independent EXR binary reader, FFmpeg HALF/ZIP reader and writer units |
+| RGB8 PNG/JPEG and video export | Existing display/quantization contracts; not a linear HDR master path | Extraction pixel contracts, frozen CPU producer and native video round trips |
+| HDR to SDR | Existing host renderer, explicit request; output is dithered RGB8 sRGB/BT.709 | Existing HDR renderer tests; not evidence of HDR-preserving EXR support |
+| Dolby Vision | Existing format-specific host handling where metadata is available; excluded from float SDR profile | Existing HDR contracts; no generic vendor/model or enhancement-layer claim |
+
+`validateFloatSdrSource` is the public metadata/layout preflight also used by
+Studio. Extraction validates decoded frames as well: a frame-level rejection
+after sink initialization can leave an empty output directory, but must publish
+no image or manifest. Tests distinguish that from a successful conversion.
+FFV1 may supply nominal range when no range was tagged; absent-range validation
+therefore uses the public preflight directly rather than a mislabeled fixture.
+
+| Layer | Headless media/CLI | Studio host | Remaining boundary |
+| --- | --- | --- | --- |
+| Float video decode | Software FFmpeg | Also deliberately software for this profile | Native decoded-GPU float import is not implemented |
+| Linear conversion | Shared C++ sampler, CPU/TBB | Existing Tensor adapter, selected CUDA/Vulkan/Metal when available | Adapter uploads host planes and reads float output back to CPU; device-resident ingest is not implied |
+| No linear GPU renderer available | Shared CPU sampler | Factory can return no renderer, using that CPU sampler | Failure after choosing a renderer is propagated; no universal automatic GPU-error fallback |
+| HDR display conversion | Unsupported without a registered HDR host | Vulkan builds use `libplacebo_vulkan`; other builds use the existing Tensor HDR implementation | Compile-time provider choice, not an automatic runtime fallback chain; renderer initialization can fail |
+| Image output | CPU PNG/JPEG/EXR services | Existing optional CUDA JPEG encoder; EXR remains CPU | No GPU EXR encoder; resume pins its selected JPEG provider |
+
+Runtime registration is not proof that a device or renderer can initialize.
+Capability discovery must not be used as a numerical color reference. Native
+backend tests assert the backend actually exercised; CPU results and hardware
+skips do not qualify another backend.
+
+### Gates before extending HDR or LOG
+
+1. Define the output contract first: PQ has an absolute luminance interpretation,
+   HLG must distinguish relative scene light from a declared display/viewing
+   policy; scene-referred LOG needs
+   the actual curve and gamut. Existing relative-linear SDR EXR must not silently
+   change units or acquire a display tone map.
+2. Decide how source mastering/content-light metadata, unknown values and any
+   assumptions are represented. The existing HDR detector can use mastering
+   metadata heuristics; detection alone is not an inverse-transfer policy.
+3. Specify preservation versus conversion of primaries, out-of-gamut and negative
+   samples, clipping, precision, alpha and resize order. Do not infer a camera
+   LOG curve or vendor calibration from file extension or component depth.
+4. Add independent numerical references and representative real inputs before
+   claiming a new transfer/gamut combination. Current synthetic SDR tests do not
+   qualify all HDR mastering combinations, LOG vendors or Dolby Vision profiles.
+5. Qualify each selected native backend and its explicit CPU/error policy on
+   Windows, Linux and macOS. Reuse existing color math, Tensor programs, writer
+   and backend registration; introduce only the missing contract or operation.
+
+These gates do not require adding new codecs first. HEVC/HEIF/AVIF availability,
+license/build inventory and CPU/hardware codec fallback remain a separate
+increment. GPU import and batching require measured benefit and explicit device,
+ownership and synchronization contracts.
+
+
+## Explicit PQ luminance profile
+
+The default `FloatColorProfile::Sdr` contract remains relative-linear SDR.
+`FloatColorProfile::PqNits` explicitly accepts integer PQ RGB/YUV sources and
+produces linear RGB in absolute cd/m2. CLI uses `--float-profile pq-nits` with
+`--format exr`; MCP uses `float_profile: "pq-nits"`; C++/Python use
+`IngestRequest.float_color_profile`. `FrameColor.units` distinguishes
+`ColorUnits::Relative` from `ColorUnits::Nits`, including owned memory surfaces.
+The existing GUI continues to use its SDR profile/preflight.
+
+```sh
+media-ingest extract pq-source.mkv --output pq-exr --format exr \
+  --float-profile pq-nits --interval 1 --exr-precision float
+```
+
+The PQ source must declare SMPTE ST 2084 transfer and BT.709 or BT.2020 primaries.
+Input transfer/primaries overrides are rejected for this profile; missing values
+are not supplied from resolution, bit depth, mastering metadata or an extension.
+Frame declarations can supply tags omitted by the container. PQ extraction reads
+the first decoded frame before starting the sink, then retains it for normal
+selection; an explicit trim seek resets the prefetch. Subsequent color changes
+remain errors. The public `validateFloatSource` metadata preflight is conservative:
+missing container tags require decoded-frame validation and are not proof that
+the bitstream lacks those tags. `validateFloatSdrSource` retains its existing
+contract.
+
+YUV uses the same supported matrix/range/siting reconstruction as SDR. PQ RGB
+requires full range. Encoded RGB is clamped to the PQ domain [0,1] after YUV
+reconstruction, then the shared PQ EOTF produces absolute luminance with a
+10,000 cd/m2 reference peak. Primaries are retained; no tone map, gamut conversion
+or rescale to mastering-display/MaxCLL peak occurs. HALF and FLOAT EXR preserve
+these units through `lfsUnits = "cd/m2"` and the existing chromaticities attribute.
+The manifest reports the explicit profile, units, clipping domain and reference
+peak. This is luminance calibration, not a display-ready exposure policy.
+The standard reference is [ITU-R BT.2100](https://www.itu.int/rec/R-REC-BT.2100).
+
+Resize still operates on linear samples before image encoding. Sharpness reuses
+the existing RGB8 scorer with a documented linear proxy: PQ nits divided by
+10,000, clamped and quantized to RGB8. This proxy can discard low-luminance detail;
+it is not a perceptual HDR sharpness metric. The float master is not normalized
+or quantized by that scoring path. Resume identity distinguishes non-default
+profile and units; replay retains encoder pinning and complete verification.
+
+The conversion is shared by CPU and the existing CUDA/Vulkan/Metal Tensor
+programs. The headless path remains CPU; Studio adapters retain the existing
+upload/readback contract and backend-selection/error policy. This does not add
+native decoded-GPU HDR ingest or GPU EXR encoding. Existing HDR-display PQ math
+uses the same normalized EOTF without changing its display tonemap policy.
+
+Independent tests cover 50 matrix/transfer/range combinations (30 SDR + 10 PQ + 10 HLG),
+raw RGB16 absolute references including the 10,000 endpoint, HALF/FLOAT units,
+linear resize, owned surfaces, MCP, resume/replay/reconstruction and rejection of
+SDR/HLG/LOG or overrides under PQ. Two HEVC streams with identical decoded
+samples and different mastering/MaxCLL peaks produce identical EXR samples; the
+fixture verifies actual frame tags, first-frame preservation and trim output.
+Additional contracts reject actual midstream transfer/primaries changes before
+publishing the changed frame (already completed images remain). Metadata-only
+preflight rejects absent tags; frame-level declarations are validated separately.
+Tensor references cover varied 8-bit 4:2:0 chroma, planar RGB16 and shifted
+semiplanar 10-bit 4:2:0 in both byte orders, including native, reduced and enlarged
+extents. Sharpness-enabled extraction preserves the unscored EXR bytes. The
+shared normalized HDR EOTF matches the previous float expression over all 14-bit
+codes; existing HDR renderer contracts remain part of qualification.
+Synthetic references do not qualify every real HDR bitstream, metadata change,
+Dolby Vision profile or damaged stream. HLG requires its separate scene-linear profile below; vendor LOG, BT.2020 CL and
+Dolby Vision remain unsupported by these float profiles.
+
+
+## Opt-in HLG scene-linear extraction
+
+`FloatColorProfile::HlgScene` / `--float-profile hlg-scene` / MCP
+`float_profile: "hlg-scene"` decodes the declared ARIB STD-B67 HLG signal with
+the inverse OETF from [ITU-R BT.2100-3](https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.2100-3-202502-I%21%21PDF-E.pdf).
+The result is relative **scene-linear** RGB normalized so encoded 1 maps to
+scene-light 1 (within floating-point rounding), and encoded 0.5 maps to 1/12.
+This is not the HLG display EOTF: no display OOTF, system gamma, reference display
+peak/black lift, viewing environment or conversion to absolute cd/m2 is applied.
+A display-linear HLG profile would require a separate explicit display contract;
+it is not inferred from mastering metadata or silently assigned a 1000-nit peak.
+
+Only declared HLG with BT.709 or BT.2020 primaries is accepted. Primaries are
+retained, not converted; BT.709-tagged input support is not a claim of full
+BT.2100 production conformance. Input transfer/primaries overrides are rejected.
+Integer RGB/YUV 8–16-bit layout/range/matrix/siting validation is shared with PQ;
+RGB requires explicit full range. Reconstructed encoded RGB is clamped to [0,1]
+before inverse OETF. Missing declarations, PQ under HLG, HLG under PQ, LOG,
+Dolby Vision and BT.2020 CL fail rather than being relabeled.
+
+The existing CPU/Tensor conversion, first-frame prefetch, trim/selection, linear
+resize/rotation, file sink and verified resume paths are reused. `ColorUnits::SceneRelative`
+is preserved by owned surfaces and written as EXR `lfsUnits="scene-relative"`.
+The manifest identifies `linear-hlg-scene`, `linear_domain="scene"`, normalization,
+no display OOTF and no mastering rescale. HALF/FLOAT keep the existing precision,
+compression and failure contracts. The non-default profile and units participate
+in resume identity; SDR/PQ checkpoint semantics remain unchanged.
+
+Sharpness uses a clipped, quantized scene-linear RGB8 proxy. It is not a
+perceptual HDR metric and can discard dark detail; it does not change master
+samples. CLI/Python/MCP expose the explicit profile and capability description;
+the GUI remains on its existing SDR contract. Existing HLG-to-SDR rendering uses
+its display policy and is not changed by scene-linear extraction.
+
+```sh
+media-ingest extract hlg.mkv --output scene-frames --format exr \
+  --float-profile hlg-scene --exr-precision float --interval 1
+```
+
+Reference coverage includes curve branch/endpoints, 50 matrix/transfer/range
+combinations, HALF/FLOAT units/primaries, linear resize, byte-order/layout Tensor
+references, frame-only HEVC color declarations, trim, mastering independence,
+midstream transfer/primaries rejection, API/MCP and verified resume/replay.
+Synthetic fixtures do not qualify every camera, damaged stream, HLG grading
+convention or external application's interpretation of custom EXR attributes.
+
+## Existing-format portability checks
+
+Dataset discovery includes EXR and WebP alongside JPEG, PNG, BMP and TIFF.
+These formats use the existing CPU image decoders; recognizing their paths
+also applies to flat COLMAP layouts, image counts and basename ambiguity checks.
+For previews, existing JPEG/PNG/BMP/TIFF files retain priority over EXR/WebP;
+lexical order is preserved within each group. Same-directory, same-stem
+EXR/WebP companions of an existing format do not inflate image counts.
+Standalone EXR/WebP files and files in different directories still count.
+COLMAP reference resolution and basename ambiguity rules remain unchanged.
+This does not change the existing training RGB conversion or preserve an EXR
+HDR master inside a display-byte training cache. The extraction master and the
+training representation remain distinct contracts.
+
+TIFF sample descriptions and decoding accept unsigned 8/16-bit samples and
+32-bit floating-point samples. Unsigned 32-bit integer TIFF is converted to
+Float32 using `sample / (2^32 - 1)`, preserving 0 and 1 endpoints with float32
+precision. Both extension and signature probes report this supported output
+type. The direct-buffer path refuses UINT32 because it requires conversion;
+native Float32 TIFF retains its original samples and direct-buffer support.
+
+CPU AV1 extraction and preview use FFmpeg's libdav1d decoder. The manifest
+explicitly enables the dav1d feature, because FFmpeg's native AV1 decoder in the
+pinned version requires hardware acceleration. CUDA/VideoToolbox selection is
+retained; software selection prefers dav1d without changing other codec choices.
+If dav1d is absent from another provider's registry, the native AV1 decoder is
+still attempted as before; this does not promise CPU capability for FFmpeg's
+hardware-only native implementation.
+The dav1d BSD-2-Clause notice is included with the distributed licenses.
+
+Regression fixtures cover flat EXR/WebP loading and ambiguous basenames, TIFF
+sample types and both byte orders, and AV1 8/10-bit extraction plus CPU preview
+against an independently decoded RGB reference. The AV1 inputs are checked-in
+project-generated four-frame fixtures, so missing AV1 encoders cannot skip
+CPU decoder coverage. These checks do not add new
+image writers, new sequence formats, or new video encoders. TIFF16 output is
+described above; HEIF/AVIF/JPEG XL support and HEVC export remain separate
+increments.
+
+The native Mac Release-only dependency profile keeps its macOS 26 deployment
+target when using SDK 27. For curl, the profile disables `pipe2` detection below
+macOS 27 and uses curl's existing compatible fallback. This setting is limited
+to curl; an additional private curl overlay is not required.

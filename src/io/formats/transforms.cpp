@@ -8,6 +8,8 @@
 #include "core/path_utils.hpp"
 #include "core/tensor.hpp"
 #include "formats/colmap.hpp"
+#include "io/loaders/invalid_dataset_cameras.hpp"
+#include "ply_property_order.hpp"
 #include "tinyply.hpp"
 #include <algorithm>
 #include <array>
@@ -218,20 +220,43 @@ namespace lfs::io {
     std::filesystem::path GetTransformImagePath(
         const std::filesystem::path& dir_path,
         const std::string& frame_file_path) {
-        // Use utf8_to_path for proper Unicode handling since JSON is UTF-8 encoded
-        const auto file_path = lfs::core::utf8_to_path(frame_file_path);
-        auto image_path = dir_path / file_path;
-        auto images_image_path = dir_path / "images" / file_path;
-        // Use path concatenation for proper Unicode handling
-        auto image_path_png = image_path;
-        image_path_png += ".png";
-        if (std::filesystem::exists(image_path_png)) {
-            // blender data set has not extension, must assumes png
-            image_path = image_path_png;
-            LOG_TRACE("Using PNG extension for image: {}", lfs::core::path_to_utf8(image_path));
-        }
-        if (std::filesystem::exists(images_image_path) && std::filesystem::is_regular_file(images_image_path)) {
-            image_path = images_image_path;
+        const auto resolve = [&](const std::string& path_text) {
+            // Use utf8_to_path for proper Unicode handling since JSON is UTF-8 encoded
+            const auto file_path = lfs::core::utf8_to_path(path_text);
+            auto image_path = dir_path / file_path;
+            auto images_image_path = dir_path / "images" / file_path;
+            // Use path concatenation for proper Unicode handling
+            auto image_path_png = image_path;
+            image_path_png += ".png";
+            if (std::filesystem::exists(image_path_png)) {
+                // blender data set has not extension, must assumes png
+                image_path = image_path_png;
+                LOG_TRACE("Using PNG extension for image: {}", lfs::core::path_to_utf8(image_path));
+            } else if (!file_path.has_extension() && !std::filesystem::exists(image_path)) {
+                auto image_path_upper_png = image_path;
+                image_path_upper_png += ".PNG";
+                if (std::filesystem::exists(image_path_upper_png)) {
+                    image_path = image_path_upper_png;
+                    LOG_TRACE("Using PNG extension for image: {}", lfs::core::path_to_utf8(image_path));
+                }
+            }
+            if (std::filesystem::exists(images_image_path) && std::filesystem::is_regular_file(images_image_path)) {
+                image_path = images_image_path;
+            }
+            return image_path;
+        };
+
+        auto image_path = resolve(frame_file_path);
+        if (frame_file_path.find('\\') != std::string::npos) {
+            // A backslash can also be part of a POSIX filename; keep a working literal path.
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(image_path, ec)) {
+                auto portable_path = frame_file_path;
+                std::replace(portable_path.begin(), portable_path.end(), '\\', '/');
+                const auto alternate = resolve(portable_path);
+                if (std::filesystem::is_regular_file(alternate, ec))
+                    image_path = alternate;
+            }
         }
         return image_path;
     }
@@ -319,7 +344,7 @@ namespace lfs::io {
         // Resolve intrinsics for a frame, preferring per-frame fields and falling
         // back to the global object. Mirrors the historical global-only parsing so
         // datasets that only carry root-level intrinsics behave identically.
-        [[nodiscard]] FrameIntrinsics resolve_frame_intrinsics(
+        [[nodiscard]] std::optional<FrameIntrinsics> resolve_frame_intrinsics(
             const nlohmann::json& frame,
             const nlohmann::json& global,
             const int w,
@@ -358,8 +383,21 @@ namespace lfs::io {
             const auto* angle_y_value = find("camera_angle_y");
 
             float fl_x = -1.0f, fl_y = -1.0f;
+            bool invalid_focal = false;
+            const auto read_focal = [&](const nlohmann::json& value, const std::string_view key) {
+                if (!value.is_number())
+                    throw std::runtime_error("Transforms field '" + std::string(key) + "' must be numeric");
+                const double parsed = value.get<double>();
+                if (!std::isfinite(parsed) || std::abs(parsed) > std::numeric_limits<float>::max()) {
+                    invalid_focal = true;
+                    return -1.0f;
+                }
+                const float focal = static_cast<float>(parsed);
+                invalid_focal = invalid_focal || focal <= 0.0f;
+                return focal;
+            };
             if (fl_x_value) {
-                fl_x = finite_json_float_value(*fl_x_value, "fl_x");
+                fl_x = read_focal(*fl_x_value, "fl_x");
             } else if (angle_x_value) {
                 const float angle = finite_json_float_value(*angle_x_value, "camera_angle_x");
                 if (angle <= 0.0f || angle >= std::numbers::pi_v<float>)
@@ -368,7 +406,7 @@ namespace lfs::io {
             }
 
             if (fl_y_value) {
-                fl_y = finite_json_float_value(*fl_y_value, "fl_y");
+                fl_y = read_focal(*fl_y_value, "fl_y");
             } else if (angle_y_value) {
                 const float angle = finite_json_float_value(*angle_y_value, "camera_angle_y");
                 if (angle <= 0.0f || angle >= std::numbers::pi_v<float>)
@@ -393,14 +431,18 @@ namespace lfs::io {
                 }
             }
 
+            if (invalid_focal)
+                return std::nullopt;
+
             if (fl_x < 0.0f && fl_y > 0.0f) {
                 if (w != h)
                     throw std::runtime_error("Transforms JSON is missing horizontal intrinsics for a non-square image");
                 fl_x = fl_y;
             }
+            if (!std::isfinite(fl_x) || !std::isfinite(fl_y) || fl_x <= 0.0f || fl_y <= 0.0f)
+                return std::nullopt;
             const float max_focal = static_cast<float>(std::max(w, h)) * MAX_INTRINSIC_DIMENSION_MULTIPLIER;
-            if (!std::isfinite(fl_x) || !std::isfinite(fl_y) || fl_x <= 0.0f || fl_y <= 0.0f ||
-                fl_x > max_focal || fl_y > max_focal) {
+            if (fl_x > max_focal || fl_y > max_focal) {
                 throw std::runtime_error("Transforms focal lengths must be positive bounded finite values");
             }
             intrinsics.fl_x = fl_x;
@@ -483,7 +525,8 @@ namespace lfs::io {
 
     std::tuple<std::vector<CameraData>, lfs::core::Tensor, std::optional<std::tuple<std::vector<std::string>, std::vector<std::string>>>> read_transforms_cameras_and_images(
         const std::filesystem::path& transPath,
-        const LoadOptions& options) {
+        const LoadOptions& options,
+        std::vector<std::string>* warnings) {
 
         LOG_TIMER_TRACE("Read transforms file");
 
@@ -557,6 +600,7 @@ namespace lfs::io {
         }
 
         IntrinsicsWarningState intrinsics_warnings;
+        std::vector<std::string> invalid_focal_names;
         std::vector<CameraData> camerasdata;
         {
             uint64_t counter = 0;
@@ -576,8 +620,13 @@ namespace lfs::io {
                 const auto& frame_json = transforms["frames"][frameInd];
                 const auto [frame_w, frame_h] =
                     resolve_frame_dimensions(frame_json, global_w, global_h, dir_path, frame.file_path);
-                const FrameIntrinsics intrinsics =
+                const auto intrinsics_result =
                     resolve_frame_intrinsics(frame_json, transforms, frame_w, frame_h, intrinsics_warnings);
+                if (!intrinsics_result) {
+                    invalid_focal_names.push_back(frame.file_path);
+                    continue;
+                }
+                const FrameIntrinsics& intrinsics = *intrinsics_result;
 
                 // Create camera-to-world transform matrix
                 lfs::core::Tensor c2w = lfs::core::Tensor::empty({4, 4}, Device::CPU, DataType::Float32);
@@ -703,6 +752,15 @@ namespace lfs::io {
             LOG_WARN("Unsupported distortion coefficients ignored: {}", keys);
         }
 
+        if (!invalid_focal_names.empty()) {
+            const std::string message = format_invalid_dataset_cameras_warning(invalid_focal_names);
+            notify_invalid_dataset_cameras(invalid_focal_names);
+            if (warnings)
+                warnings->push_back(message);
+        }
+        if (camerasdata.empty() && !invalid_focal_names.empty())
+            throw std::runtime_error(format_no_valid_dataset_cameras_error());
+
         auto center = lfs::core::Tensor::zeros({3}, Device::CPU, DataType::Float32);
 
         LOG_INFO("Loaded {} cameras from transforms file", camerasdata.size());
@@ -805,6 +863,10 @@ namespace lfs::io {
             file.read(ss);
             throw_if_load_cancel_requested(options, "Transforms PLY read cancelled");
 
+            detail::order_ply_vertex_properties(file, *vertices, {"x", "y", "z"}, options);
+            if (has_colors && colors)
+                detail::order_ply_vertex_properties(file, *colors, {"red", "green", "blue"}, options);
+
             // Get vertex count
             const size_t vertex_count = vertices->count;
             LOG_DEBUG("Loaded {} vertices from PLY file", vertex_count);
@@ -884,7 +946,36 @@ namespace lfs::io {
                 color_tensor = lfs::core::Tensor::full({static_cast<size_t>(vertex_count), 3}, 255, Device::CPU, DataType::UInt8);
             }
 
-            LOG_INFO("Successfully loaded PLY point cloud with {} points", vertex_count);
+            // Validate after conversion so double values overflowing float32 are removed too.
+            // Compact positions and colors together before either tensor reaches the GPU.
+            size_t finite_count = 0;
+            auto* color_ptr = color_tensor.ptr<uint8_t>();
+            for (size_t i = 0; i < vertex_count; ++i) {
+                if ((i % 4096) == 0) {
+                    throw_if_load_cancel_requested(options, "Transforms PLY point validation cancelled");
+                }
+                const float* point = pos_ptr + i * 3;
+                if (!std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2])) {
+                    continue;
+                }
+                if (finite_count != i) {
+                    std::copy_n(point, 3, pos_ptr + finite_count * 3);
+                    std::copy_n(color_ptr + i * 3, 3, color_ptr + finite_count * 3);
+                }
+                ++finite_count;
+            }
+            if (finite_count != vertex_count) {
+                LOG_WARN("Removed {} PLY points with non-finite coordinates; keeping {} points",
+                         vertex_count - finite_count, finite_count);
+                if (finite_count == 0) {
+                    // Let the dataset loader use its existing no-point-cloud initialization.
+                    return {};
+                }
+                positions = positions.slice(0, 0, finite_count);
+                color_tensor = color_tensor.slice(0, 0, finite_count);
+            }
+
+            LOG_INFO("Successfully loaded PLY point cloud with {} points", finite_count);
             throw_if_load_cancel_requested(options, "Transforms PLY upload cancelled");
 
             // Move to CUDA for GPU rendering

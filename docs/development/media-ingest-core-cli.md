@@ -145,6 +145,144 @@ structured errors use the existing Studio exception translation. The synchronous
 memory convenience call raises on failed extraction; C++ custom sinks can retain
 partial frames and inspect the structured result.
 
+## Extraction manifest publication
+
+The extractor publishes `extraction_metadata.json` through the existing shared
+atomic-file service for both SDR and float output. SDR retains its legacy
+replacement policy; float output retains its explicit metadata overwrite option.
+The existing schemas and frame naming/timestamps are unchanged. This publication
+does not request durable filesystem synchronization.
+
+A write, close or publication failure is an extraction failure. Cancellation
+observed before publication is reported as cancellation. Either leaves the
+previous manifest intact and removes the owned temporary file. Images already
+committed remain available; a failure to publish the manifest does not roll them
+back. Cancellation earlier in extraction still does not publish a partial
+manifest. A pre-existing manifest therefore describes its previous run, not the
+newly interrupted one: callers must use the terminal job/result state rather
+than infer completion from manifest existence or progress alone.
+
+This is per-file publication, not an atomic transaction of a whole sequence,
+a checkpoint/resume protocol or a power-loss durability guarantee. Once a
+manifest is published, later cancellation cannot undo that commit.
+
+## Extraction manifest timing and provenance
+
+Extraction manifests retain `schema_version: 2` and all legacy fields. Optional
+additive fields describe the actual extraction without introducing a separate
+metadata API or a second manifest. Consumers should tolerate additional keys.
+
+- `input.video.stream_index` identifies the selected stream;
+  `input.video.time_base` is its `[numerator, denominator]` in seconds per tick.
+- `input.video.start_pts` is the declared stream start, or `null` when unknown.
+  `relative_origin_pts` records the effective origin used by the existing
+  relative-seconds calculation, which uses zero when the stream start is absent.
+- Each frame's `source_pts` is the original integer timestamp, or `null` when
+  absent. `timestamp_origin` is `best_effort`, `presentation`, or `missing`.
+  Relative seconds are calculated by subtracting the stream origin in ticks
+  before scaling. This preserves the first frame and FPS sampling boundaries
+  when the stream starts at a nonzero timestamp, including native decoding.
+  Missing source timing is not replaced with a synthetic integer PTS. The legacy
+  `timestamp` remains the extraction's relative seconds; `source_frame` remains
+  its legacy nominal-rate-derived number, not a decoded ordinal. The timebase is
+  stored once at stream level rather than repeated in every frame.
+- `provenance` records `ffmpeg_version`, `avcodec_version` and `avformat_version`
+  once per manifest. Numeric library versions use FFmpeg's packed version integer.
+- `processing.decoder.hardware_requested` records the request independently of
+  the existing `backend` field, which describes the observed execution path.
+
+Existing color, EXR precision/overrides, encoder backend and performance fields
+remain authoritative. No projection, vendor metadata or unknown calibration is
+inferred. These additions use the shared extractor for legacy, CLI, Python and
+host file extraction; custom in-memory sinks retain their existing `FrameInfo`.
+Manifest publication and overwrite policies are unchanged.
+When metadata is requested, publication failure is terminal rather than a
+best-effort warning; already published images are not rolled back. PNG/JPEG
+metadata is opt-in, while EXR retains its mandatory manifest and explicit
+overwrite policy. Verified replay and missing-image reconstruction retain the
+same selected source timestamps as uninterrupted extraction.
+
+## Verified image-sequence resume
+
+`media-ingest extract ... --resume` and `FileExtraction.resume = true` opt into
+checkpointed file extraction. Defaults and ordinary extraction remain unchanged.
+PNG, JPEG and SDR linear EXR are supported through the existing file writers.
+This option does not resume an interrupted encoded video or a custom memory sink.
+
+The `.media-ingest-checkpoint` directory contains a versioned input/request
+identity and one bounded immutable JSON record per selected image. Input identity
+uses a streaming SHA-256 of the complete input; stream, selection, geometry,
+sharpness, color, output encoding and pipeline/build identity must match. An
+existing extraction without a checkpoint is not adopted. Changed requests,
+malformed checkpoints and modified/truncated output files fail without replacing
+those files. Missing recorded images can be reconstructed only when their
+regenerated encoded bytes match the recorded hash.
+
+Checkpoint hashing uses the project's existing OpenSSL SHA-256 provider through
+a private media dependency. The algorithm, input bytes and checkpoint digest
+format are unchanged; input, selected pixel rows and encoded files are still
+verified in full.
+
+The extractor replays decoding and selection from the original start to preserve
+VFR timestamps, naming, deduplication and sharpness windows. It verifies retained
+file bytes and regenerated selected pixels. Verified images are not re-encoded
+or rewritten. JPEG resume reuses the registered Studio GPU encoder when hardware
+is requested and it can allocate one frame; otherwise a new checkpoint selects
+the existing CPU writer. The standalone CLI has no registered Studio GPU encoder.
+The selected encoder is recorded in the checkpoint identity. CPU checkpoints
+stay CPU when a GPU later becomes available; GPU checkpoints fail explicitly if
+their provider is unavailable. Encoding failures never silently switch providers.
+GPU JPEG bytes pass through the same staging, record-before-image and no-replace
+publication as CPU output. Only missing images are encoded, one frame at a time;
+decoded pixels still pass through host memory for checkpoint verification.
+The existing hardware decode option remains explicit. Input, pixel and retained-output verification still
+cost CPU time and I/O. A verified replay can be slower than a fresh ordinary
+extraction, particularly for JPEG; resume promises verified reuse, not a speedup.
+The extractor's detailed upload/JPEG/file-write timing counters cover its native
+writer, not checkpoint sink work; use total elapsed time for resume comparisons.
+Accepted-frame and manifest counts include verified retained images as well as
+newly published images; progress describes the replayed selection.
+
+Sparse hardware FPS extraction can continue decoding between nearby targets
+instead of seeking repeatedly into the same GOP. The demuxer index determines
+whether the target keyframe is beyond the retained decoder position; only then
+does another seek help. Without a usable index, observed seek preroll is the
+fallback and is refreshed when forward decoding encounters a keyframe. This applies to ordinary extraction and replay,
+preserves the first-frame-at-or-after-target selection, and does not enable
+sparse seeking for sharpness, interval, software or Dolby Vision paths.
+
+For a new image, the existing writer encodes into the checkpoint directory,
+then an immutable record of the expected encoded hash is atomically published
+before the image is published with no-replace. The shared core publication
+primitive renames the staged image on the same filesystem, avoiding a second
+image write. Its older-filesystem hard-link/reservation fallbacks remain shared.
+Empty reservation files left by process death on exFAT are treated as unpublished:
+an initial identity is republished only before any frame record/image exists;
+an empty last record is regenerated; an empty recorded image is reconstructed
+only if its regenerated encoded digest matches. Nonempty corrupt files remain
+errors. Completion checks run before the previous manifest can be replaced.
+Staging cleanup cannot turn a committed image into a failed/unaccounted commit.
+Abandoned staged copies can remain even after a successful replay: retained
+final images return without re-encoding or removing an older staged copy.
+
+Checkpoint frequency is one record per image. Record reads are capped at 16 KiB;
+hashing uses fixed-size buffers. File count grows linearly with selected
+images; decoding, input/pixel hashing, retained-file hashing and staging I/O have a
+cost. The final manifest retains its existing schema and overwrite policy,
+including EXR's explicit overwrite option. Replaying an already completed EXR
+sequence therefore requires `files.exr.overwrite = true` to replace its manifest
+(`--overwrite` in the CLI); retained images still are not overwritten.
+Application build/version participates in checkpoint identity, covering changes
+to the image encoder implementations as well as FFmpeg. Checkpoint format 1
+from the initial implementation is incompatible with format 2; no silent adoption.
+Each retained output is read/hashed once during replay, after pixel verification.
+Checkpoints remain available after
+completion. Resume cannot be combined with stale-output removal. Use one active
+extraction per output directory; concurrent extraction is not a supported mode.
+This assumes trusted local input/output directories: protection against another
+writer swapping files between verification and publication/open is not promised.
+No durable synchronization, global transaction or power-loss guarantee is added.
+
 ## Verification
 
 Configure the application with its existing preset/toolchain and enable

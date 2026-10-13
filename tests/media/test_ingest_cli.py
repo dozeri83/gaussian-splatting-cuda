@@ -176,6 +176,36 @@ class IngestCLI(unittest.TestCase):
                 self.assertEqual(actual["frames_accepted"],len(metadata["frames"]))
                 progress=[json.loads(line) for line in stderr.splitlines() if line.startswith(b'{')]
                 self.assertTrue(progress)
+    def test_tiff16_output_and_option_validation(self):
+        output=self.root/"tiff16-cli"
+        result,_=self.invoke("extract",self.source(),"--output",output,"--interval","1","--end","0.35",
+                             "--format","tiff16","--tiff16-transfer","linear",
+                             "--input-transfer","linear","--input-primaries","bt709")
+        self.assertEqual(result["frames_accepted"],4)
+        self.assertEqual(len(list(output.glob("*.tif"))),4)
+        metadata=json.loads((output/"extraction_metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["output"]["bit_depth"],16)
+        self.assertEqual(metadata["output"]["transfer"],"linear")
+        for index,flags in enumerate(( ("--format","png","--tiff16-transfer","linear"),
+                                      ("--format","tiff16","--exr-precision","half"),
+                                      ("--format","tiff16","--quality","95") )):
+            destination=self.root/f"tiff16-invalid-{index}"
+            self.invoke("extract",self.source(),"--output",destination,*flags,code=2)
+            self.assertFalse(destination.exists())
+
+    def test_resume_is_opt_in_and_preserves_verified_image_files(self):
+        output=self.root/"resume-cli"
+        command=("extract",self.source(),"--output",output,"--interval","1","--end","0.35","--metadata","--resume","--quiet")
+        first,_=self.invoke(*command)
+        images={p:(p.read_bytes(),p.stat().st_mtime_ns) for p in output.glob("*.png")}
+        second,_=self.invoke(*command)
+        self.assertEqual(first["frames_accepted"],second["frames_accepted"])
+        self.assertEqual(len(images),4)
+        for path,(data,modified) in images.items():
+            self.assertEqual(path.read_bytes(),data)
+            self.assertEqual(path.stat().st_mtime_ns,modified)
+        self.assertTrue((output/".media-ingest-checkpoint"/"identity.json").is_file())
+
     def test_fps_vfr_quiet_and_metadata_off(self):
         output=self.root/"fps-output"
         actual,stderr=self.invoke("extract",self.source("vfr-asymmetric"),"--output",output,"--fps","5","--end","1.5","--quiet")

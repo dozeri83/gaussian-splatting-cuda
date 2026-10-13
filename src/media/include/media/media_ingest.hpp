@@ -53,10 +53,14 @@ namespace lfs::media {
         FramePixelFormat output_format = FramePixelFormat::RGB8;
         // Unspecified means use source metadata. Overrides are explicit assumptions.
         FrameColor input_color;
+        FloatColorProfile float_color_profile = FloatColorProfile::Sdr;
     };
     struct FileExtraction {
         FileFrameSinkOptions files;
         bool write_metadata = false;
+        // Opt-in verified image-sequence replay. Existing output without a
+        // compatible checkpoint is never adopted or overwritten.
+        bool resume = false;
     };
     struct IngestReport {
         std::size_t frames_accepted = 0;
@@ -71,6 +75,11 @@ namespace lfs::media {
         bool hdr_to_sdr = false;
         bool rgb_float_sdr = true;
         bool exr = true;
+        bool rgb_float_pq = true;
+        std::string_view float_pq_profile = "Opt-in PQ to linear cd/m2; declared BT709/BT2020 primaries preserved; encoded RGB clamped to [0,1]; no tone mapping, mastering rescale, HLG, LOG or Dolby Vision";
+        bool rgb_float_hlg = true;
+        std::string_view float_hlg_profile = "Opt-in HLG inverse OETF to relative scene-linear [0,1]; declared BT709/BT2020 primaries preserved; encoded RGB clamped to [0,1]; no display OOTF, absolute nits, tone mapping, mastering rescale, LOG or Dolby Vision";
+        bool tiff16 = true;
         // Stable capability description shared by CLI, Python and MCP.
         std::string_view float_sdr_profile = "Integer RGB or planar/semiplanar YUV 8-16-bit, including subsampled chroma; Linear/sRGB/BT709 transfer; BT709/BT2020 primaries; explicit metadata or overrides; shared CPU reference and optional tensor backend; no HDR or alpha video";
     };

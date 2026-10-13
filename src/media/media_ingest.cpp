@@ -4,6 +4,7 @@
 #include "media/media_options.hpp"
 #include "media/video_frame_extractor.hpp"
 #include "media_backends.hpp"
+#include "resumable_file_sink.hpp"
 #include <cmath>
 #include <exception>
 extern "C" {
@@ -48,6 +49,7 @@ namespace lfs::media {
             p.convert_hdr_to_sdr = request.convert_hdr_to_sdr;
             p.output_format = request.output_format;
             p.input_color = request.input_color;
+            p.float_color_profile = request.float_color_profile;
             return p;
         }
         struct TrackingSink final : FrameSink {
@@ -55,6 +57,7 @@ namespace lfs::media {
             std::optional<Error> last_error;
             std::size_t accepted = 0;
             explicit TrackingSink(FrameSink& value) : destination(value) {}
+            std::string_view imageEncoderBackend() const noexcept override { return destination.imageEncoderBackend(); }
             SinkResult track(SinkResult value) {
                 if (!value)
                     last_error = value.error();
@@ -67,6 +70,7 @@ namespace lfs::media {
                     ++accepted;
                 return result;
             }
+            SinkResult prepareComplete(const SinkSummary& s) override { return track(destination.prepareComplete(s)); }
             SinkResult complete(const SinkSummary& s) override {
                 accepted = s.frames_accepted;
                 return track(destination.complete(s));
@@ -92,31 +96,44 @@ namespace lfs::media {
                 if (request.output_format != FramePixelFormat::RGB8 && request.output_format != FramePixelFormat::RGBFloat32)
                     return failure(ErrorCode::Unsupported, "Ingest supports RGB8 or integer SDR to linear RGBFloat32", 0);
                 if (outputOptionName(request.input_color.transfer) == "unknown" ||
-                    outputOptionName(request.input_color.primaries) == "unknown" || request.input_color.alpha != AlphaMode::None)
+                    outputOptionName(request.input_color.primaries) == "unknown" || request.input_color.alpha != AlphaMode::None ||
+                    request.input_color.units != ColorUnits::Relative || outputOptionName(request.float_color_profile) == "unknown")
                     return failure(ErrorCode::InvalidArgument, "Invalid input color override", 0);
                 if (request.output_format == FramePixelFormat::RGB8 && (request.input_color.transfer != ColorTransfer::Unspecified || request.input_color.primaries != ColorPrimaries::Unspecified))
                     return failure(ErrorCode::InvalidArgument, "Input color overrides apply only to float SDR output", 0);
+                if (request.float_color_profile != FloatColorProfile::Sdr &&
+                    (request.output_format != FramePixelFormat::RGBFloat32 || request.convert_hdr_to_sdr))
+                    return failure(ErrorCode::InvalidArgument, "HDR float profiles require float output without HDR tone mapping", 0);
                 auto p = parameters(request);
                 if (files) {
+                    p.allow_hardware_encode = !files->resume;
                     p.output_dir = files->files.output_directory;
                     p.filename_pattern = files->files.filename_pattern;
-                    p.format = files->files.format == FrameFileFormat::PNG ? io::ImageFormat::PNG : files->files.format == FrameFileFormat::EXR ? io::ImageFormat::EXR
-                                                                                                                                                : io::ImageFormat::JPG;
+                    p.format = files->files.format == FrameFileFormat::TIFF16 ? io::ImageFormat::TIFF16 : files->files.format == FrameFileFormat::PNG ? io::ImageFormat::PNG
+                                                                                                      : files->files.format == FrameFileFormat::EXR   ? io::ImageFormat::EXR
+                                                                                                                                                      : io::ImageFormat::JPG;
                     p.jpg_quality = files->files.jpeg_quality;
-                    p.generate_metadata = files->write_metadata || files->files.format == FrameFileFormat::EXR;
-                    p.overwrite_metadata = files->files.exr.overwrite;
+                    p.generate_metadata = files->write_metadata || files->files.format == FrameFileFormat::EXR || files->files.format == FrameFileFormat::TIFF16;
+                    p.overwrite_metadata = files->files.format == FrameFileFormat::TIFF16 ? files->files.tiff16.overwrite : files->files.exr.overwrite;
+                    p.tiff16_transfer = files->files.tiff16.transfer;
                     p.exr_precision = files->files.exr.precision;
                     p.exr_compression = files->files.exr.compression;
-                    if ((files->files.format == FrameFileFormat::EXR) != (request.output_format == FramePixelFormat::RGBFloat32))
-                        return failure(ErrorCode::InvalidArgument, "EXR file extraction requires float output; PNG/JPEG require RGB8", 0);
+                    if ((files->files.format == FrameFileFormat::EXR || files->files.format == FrameFileFormat::TIFF16) != (request.output_format == FramePixelFormat::RGBFloat32))
+                        return failure(ErrorCode::InvalidArgument, "EXR/TIFF16 file extraction requires float output; PNG/JPEG require RGB8", 0);
                     if (files->files.format == FrameFileFormat::EXR) {
                         if (auto valid = validateExrOutputOptions(files->files.exr); !valid)
+                            return std::move(valid).error();
+                    }
+                    if (files->files.format == FrameFileFormat::TIFF16) {
+                        if (request.float_color_profile != FloatColorProfile::Sdr)
+                            return failure(ErrorCode::Unsupported, "TIFF16 requires relative SDR; PQ/HLG masters require EXR", 0);
+                        if (auto valid = validateTiff16OutputOptions(files->files.tiff16); !valid)
                             return std::move(valid).error();
                     }
                     if (files->files.output_directory.empty() ||
                         files->files.output_directory.native().find(std::filesystem::path::value_type{}) != std::filesystem::path::string_type::npos ||
                         files->files.filename_pattern.find('\0') != std::string::npos ||
-                        (files->files.format != FrameFileFormat::PNG && files->files.format != FrameFileFormat::JPEG && files->files.format != FrameFileFormat::EXR))
+                        (files->files.format != FrameFileFormat::PNG && files->files.format != FrameFileFormat::JPEG && files->files.format != FrameFileFormat::EXR && files->files.format != FrameFileFormat::TIFF16))
                         return failure(ErrorCode::InvalidArgument, "File extraction requires a nonempty output directory, supported format and NUL-free paths/names", 0);
                 }
                 // Request-only validation reuses the same rules as the compatibility
@@ -145,8 +162,17 @@ namespace lfs::media {
                     file_options.exr.cancelled = [&, sink_cancel] { return (request.cancelled && request.cancelled()) || (sink_cancel && sink_cancel()); };
                     p.cancel_requested = file_options.exr.cancelled;
                 }
+                if (files && files->files.format == FrameFileFormat::TIFF16) {
+                    const auto sink_cancel = files->files.tiff16.cancelled;
+                    file_options.tiff16.cancelled = [&, sink_cancel] { return (request.cancelled && request.cancelled()) || (sink_cancel && sink_cancel()); };
+                    p.cancel_requested = file_options.tiff16.cancelled;
+                }
                 FileFrameSink file_sink(std::move(file_options));
-                TrackingSink tracked(sink ? *sink : static_cast<FrameSink&>(file_sink));
+                std::unique_ptr<detail::ResumableFileSink> resume_sink;
+                if (files && files->resume)
+                    resume_sink = std::make_unique<detail::ResumableFileSink>(request, *files);
+                TrackingSink tracked(sink ? *sink : resume_sink ? static_cast<FrameSink&>(*resume_sink)
+                                                                : static_cast<FrameSink&>(file_sink));
                 const bool ok = sink ? engine.extractToSink(p, tracked, error) : engine.extractFilesToSink(p, tracked, error);
                 accepted = tracked.accepted;
                 if (!ok) {
