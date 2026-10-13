@@ -1,4 +1,64 @@
-# Linear frames and EXR output
+# Linear frames, EXR and TIFF16 output
+
+## TIFF16 SDR output
+
+`ImageOutput::writeTiff16` (Python `ImageOutput.write_tiff16`) writes single
+images independently of decoding or rendering. `FrameFileFormat::TIFF16`
+uses the same writer for sequences, including resumable extraction. Existing
+PNG/JPEG, TIFF8 and EXR defaults are unchanged.
+
+Input must be native-endian RGBFloat32/RGBAFloat32, linear, with relative SDR
+units and declared BT.709 or BT.2020 primaries. Padded and unaligned views are
+accepted. NaN/Inf, incompatible alpha and HDR nits/scene-relative units are
+rejected. Finite RGB is clamped to [0,1], encoded using the selected transfer
+(sRGB by default; linear or BT.709 also available), and rounded half up to
+UINT16. Alpha is unassociated, stays linear and must be in [0,1]; premultiplied
+input is unpremultiplied, with zero-alpha RGB canonicalized to zero.
+
+Files use `.tif` or `.tiff`, LZW compression and standard TIFF chromaticities,
+D65 white point and a 65536-entry transfer-function table. ImageDescription
+contains JSON transfer, primaries, alpha, provenance and available timing and
+source precision and a versioned `lfsEncoding: tiff16-sdr-v1` identifier.
+LichtFeld's RGB/RGBA image loaders recognize this contract, invert the declared
+transfer, convert BT.2020 to BT.709 in linear light when needed, and encode
+the existing bounded sRGB display/training representation. Alpha is unchanged.
+Conversion runs at 16-bit precision before an optional RGB8 request or resizing;
+wide-gamut colors outside BT.709 are clipped to that display contract.
+Raw codec decode, `load_image_float` and high-bitdepth data/normal loaders retain
+the stored samples and do not apply display color management. Untagged TIFFs
+keep their existing behavior. Malformed JSON, non-object descriptions, missing
+or unsupported encoding markers and oversized descriptions remain foreign TIFFs
+and preserve legacy loading, even when they contain other `lfs` field names.
+Only a valid object with the supported `lfsEncoding` opts into strict validation:
+incomplete or duplicate-key records are rejected, and their
+sample type, alpha, primaries and complete transfer table must agree with the
+TIFF tags. Oversized external descriptions remain outside this color contract.
+The TIFF tags are not an ICC profile; other software must interpret them itself.
+The expected transfer tables are initialized once per transfer and reused for
+export and direct comparison against libtiff-owned tables on load, without a
+per-image table copy or repeated transfer-function evaluation.
+The transfer table adds approximately 128 KiB per
+image. Conversion and encoding run on the CPU with a packed UINT16 image buffer;
+this is not a device-resident or zero-copy writer.
+
+CLI extraction selects `--format tiff16`, optionally `--tiff16-transfer
+linear|srgb|bt709`. MCP uses `format: "tiff16"` and `tiff16_transfer`. Input
+transfer/primaries overrides retain the existing float SDR contract. TIFF16
+extraction writes metadata automatically; it does not pass through RGB8 before
+quantization. EXR precision/compression and JPEG quality do not apply.
+
+Writes reuse the existing atomic-file service. Overwrite is opt-in; cancellation
+or failure preserves an existing destination. Resume identity includes transfer
+and provenance and rejects incompatible reuse. As for EXR, replay that would
+replace existing extraction metadata requires explicit overwrite permission;
+verified frame files are retained without rewriting. The checkpoint includes the
+TIFF encoding version as well as transfer and provenance; incompatible versions
+cannot reuse already published frames.
+
+The shared image loader honors `LoadParams::decode_16bit` and separates cached
+RGB8 and UINT16 decode results, including cold/warm loads and resized requests.
+RGBA resizing uses the existing Lanczos service on CUDA, Vulkan and Metal;
+the Metal path accepts four channels and retains alpha alongside RGB.
 
 `lfs_media` provides `RGBFloat32` and `RGBAFloat32` CPU frame views and immutable
 owning surfaces. `RGB8` remains the default for ingest, preview and PNG/JPEG.
@@ -364,8 +424,9 @@ sample types and both byte orders, and AV1 8/10-bit extraction plus CPU preview
 against an independently decoded RGB reference. The AV1 inputs are checked-in
 project-generated four-frame fixtures, so missing AV1 encoders cannot skip
 CPU decoder coverage. These checks do not add new
-image writers, new sequence formats, or new video encoders. TIFF16 export,
-HEIF/AVIF/JPEG XL support and HEVC export remain separate increments.
+image writers, new sequence formats, or new video encoders. TIFF16 output is
+described above; HEIF/AVIF/JPEG XL support and HEVC export remain separate
+increments.
 
 The native Mac Release-only dependency profile keeps its macOS 26 deployment
 target when using SDK 27. For curl, the profile disables `pipe2` detection below
