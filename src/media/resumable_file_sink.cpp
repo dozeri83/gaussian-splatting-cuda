@@ -243,8 +243,8 @@ namespace lfs::media::detail {
         }
         const auto output_frame_number = output_.files.first_source_frame_number + frame.info.legacy_source_frame - 1;
         const auto extension = output_.files.format == FrameFileFormat::TIFF16 ? ".tif" : output_.files.format == FrameFileFormat::PNG ? ".png"
-                                                                                       : output_.files.format == FrameFileFormat::JPEG  ? ".jpg"
-                                                                                                                                        : ".exr";
+                                                                                      : output_.files.format == FrameFileFormat::JPEG  ? ".jpg"
+                                                                                                                                       : ".exr";
         const auto name = core::utf8_to_path(io::formatFrameFilenameStem(output_.files.filename_pattern, output_frame_number) + extension);
         if (name != name.filename() || name.empty() || !filenames_.insert(name).second)
             return SinkResult::failure(checkpointError(ErrorCode::InvalidArgument, "Resume requires unique plain frame filenames"));
