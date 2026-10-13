@@ -1719,7 +1719,7 @@ class PreferencesPanel(Panel):
             lf.ui.set_remember_camera_view_snap(False)
             lf.set_camera_navigation_mode("orbit")
             lf.set_camera_view_snap_enabled(False)
-            lf.set_zoom_toward_cursor_enabled(True)
+            lf.set_zoom_toward_cursor_enabled(False)
         elif section == "interface":
             if not self._mcp_safe_mode:
                 lf.ui.set_scene_graph_selection_markers(False)

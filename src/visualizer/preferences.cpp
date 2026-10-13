@@ -699,7 +699,7 @@ namespace lfs::vis {
         std::scoped_lock lock(impl_->mutex);
         impl_->loadLocked();
         const auto it = impl_->values.find("zoom_toward_cursor");
-        return it != impl_->values.end() && it->is_boolean() ? it->get<bool>() : true;
+        return it != impl_->values.end() && it->is_boolean() && it->get<bool>();
     }
     void UserPreferences::setSceneGraphSelectionMarkers(const bool enabled) {
         std::scoped_lock lock(impl_->mutex);

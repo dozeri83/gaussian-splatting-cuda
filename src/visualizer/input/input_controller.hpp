@@ -10,6 +10,7 @@
 #include "core/export.hpp"
 #include "core/services.hpp"
 #include "input/input_bindings.hpp"
+#include "input/zoom_toward_cursor.hpp"
 #include "internal/viewport.hpp"
 #include "rendering/rendering_types.hpp"
 #include "visualizer/preferences.hpp"
@@ -242,9 +243,10 @@ namespace lfs::vis {
         void updateZoomSpeed(bool increase);
         // Wheel zoom by delta notches at the mouse zoom speed. With a cursor
         // (window pixels) orthographic views keep the point under it fixed and
-        // perspective views zoom toward the surface under it; without a cursor,
-        // or over background in perspective, or with zoom toward cursor turned
-        // off, they zoom toward the view center.
+        // perspective views zoom toward the surface under it. They zoom toward
+        // the view center without a cursor, with zoom toward cursor turned off,
+        // in panorama and split comparison views, and over background in
+        // perspective.
         void zoomViewport(Viewport& target_viewport, float delta,
                           std::optional<glm::dvec2> cursor = std::nullopt);
         // Trackpad zoom: a factor above 1 zooms in, independent of the wheel speed.
@@ -253,6 +255,11 @@ namespace lfs::vis {
         // World point of the displayed surface under the cursor, from the last
         // frame's depth; nullopt over background or when depth is unavailable.
         [[nodiscard]] std::optional<glm::vec3> surfacePointUnderCursor(double x, double y) const;
+        // surfacePointUnderCursor read once per zoom gesture (see ZoomAnchorCache).
+        [[nodiscard]] std::optional<glm::vec3> zoomAnchor(ViewId view, const glm::dvec2& cursor);
+        // Cursor zoom needs a pinhole or orthographic view of the scene itself:
+        // not a panorama, and not a comparison split whose halves show other images.
+        [[nodiscard]] bool zoomTowardCursorApplies(ViewId view) const;
         // Orthographic views zoom by scaling ortho_scale, shifting the camera so
         // the point under the cursor stays put; false for perspective views.
         bool scaleOrthographicView(Viewport& target_viewport, float factor,
@@ -323,7 +330,8 @@ namespace lfs::vis {
         DragMode drag_mode_ = DragMode::None;
         CameraNavigationMode camera_navigation_mode_ = CameraNavigationMode::Orbit;
         bool camera_view_snap_enabled_ = false;
-        bool zoom_toward_cursor_enabled_ = true;
+        bool zoom_toward_cursor_enabled_ = false;
+        input::ZoomAnchorCache zoom_anchor_cache_;
         TrackpadPreferenceState trackpad_{};
         int trackpad_touches_ = 0;
         int drag_button_ = -1;

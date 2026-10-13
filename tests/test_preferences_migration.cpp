@@ -501,3 +501,25 @@ TEST(PreferencesMigration, StartupIgnoresBackendMissingFromBuildAndPreservesSave
     EXPECT_EQ(preferences.tensorBackend().backend, lfs::core::GpuBackend::Vulkan);
     EXPECT_EQ(readPreferences(*paths).at("tensor_backend").at("backend"), "vulkan");
 }
+
+TEST(PreferencesMigration, ZoomTowardCursorDefaultsOffAndPersists) {
+    const auto home = makeHome("lfs_preferences_zoom_toward_cursor");
+    const ScopedLfsHome scoped_home(home);
+    const auto paths = lfs::core::UserPaths::resolve();
+    ASSERT_TRUE(paths);
+    ASSERT_TRUE(paths->ensureDirectories());
+    writePreferences(*paths, {{"schema_version", 1}});
+
+    EXPECT_FALSE(lfs::vis::loadZoomTowardCursorPreference());
+
+    lfs::vis::saveZoomTowardCursorPreference(true);
+    EXPECT_TRUE(lfs::vis::loadZoomTowardCursorPreference());
+    EXPECT_EQ(readPreferences(*paths).at("zoom_toward_cursor"), true);
+
+    lfs::vis::saveZoomTowardCursorPreference(false);
+    EXPECT_FALSE(lfs::vis::loadZoomTowardCursorPreference());
+    EXPECT_EQ(readPreferences(*paths).at("zoom_toward_cursor"), false);
+
+    writePreferences(*paths, {{"schema_version", 1}, {"zoom_toward_cursor", "yes"}});
+    EXPECT_FALSE(lfs::vis::loadZoomTowardCursorPreference());
+}

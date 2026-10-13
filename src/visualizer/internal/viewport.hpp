@@ -226,9 +226,19 @@ class Viewport {
         void dollyToward(const glm::vec3& anchor, float fraction, bool carry_pivot = false) {
             // Never step onto or past the anchor; close to it, fall back to the
             // centered dolly so zooming in can still push through the surface.
+            // "Close" scales with the scene: camera and pivot shrink toward the
+            // anchor together, so a fraction of the pivot distance never changes
+            // while zooming in and cannot serve as the threshold.
             constexpr float kMaxAnchorFraction = 0.9f;
-            constexpr float kMinDistance = 0.1f;
-            if (fraction > 0.0f && glm::length(anchor - t) < kMinDistance) {
+            constexpr float kMinDistanceSceneFraction = 1.0e-3f;
+            constexpr float kMinDistanceUnknownScene = 0.1f;
+            const float min_distance = scene_extent_ > 0.0f ? kMinDistanceSceneFraction * scene_extent_
+                                                            : kMinDistanceUnknownScene;
+            // Measured along the view direction, so an anchor the camera has
+            // already passed (cached for the rest of a gesture) also falls back
+            // instead of pulling the camera backwards.
+            const float ahead = glm::dot(anchor - t, lfs::rendering::cameraForward(R));
+            if (fraction > 0.0f && ahead < min_distance) {
                 dolly(fraction, carry_pivot);
                 return;
             }
