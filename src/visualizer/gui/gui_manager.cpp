@@ -72,10 +72,10 @@
 
 #include "core/camera_metrics.hpp"
 #include "core/data_loading_service.hpp"
+#include "core/environment_math.hpp"
 #include "core/events.hpp"
 #include "core/parameters.hpp"
 #include "core/scene.hpp"
-#include "core/environment_math.hpp"
 #include "gui/error_surface_types.hpp"
 #include "operator/ops/depth_window_ops.hpp"
 #include "python/gil.hpp"
@@ -3144,7 +3144,7 @@ namespace lfs::vis::gui {
                                 const auto uv = lfs::core::envmath::equirectUvForDirection(
                                     {direction.x, direction.y, direction.z});
                                 screen_points[corner] = guide_view.pos + glm::vec2(
-                                    uv.u * guide_view.size.x, uv.v * guide_view.size.y);
+                                                                             uv.u * guide_view.size.x, uv.v * guide_view.size.y);
                                 depths[corner] = len;
                             } else {
                                 if (view.z >= -1e-4f) {

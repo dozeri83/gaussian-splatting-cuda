@@ -16,7 +16,6 @@
 #include "gui/line_renderer.hpp"
 #include "gui/line_renderer_overlays.hpp"
 #include "gui/panel_input_utils.hpp"
-#include "gui/gui_input.hpp"
 #include "gui/rml_menu_bar.hpp"
 #include "gui/rml_modal_overlay.hpp"
 #include "gui/rml_sequencer_overlay.hpp"

@@ -6,8 +6,8 @@
 #include "media/video_output_extent.hpp"
 #include <algorithm>
 #include <cctype>
-#include <exception>
 #include <cstring>
+#include <exception>
 #include <format>
 #include <string_view>
 extern "C" {
