@@ -256,7 +256,8 @@ namespace lfs::vis {
         // frame's depth; nullopt over background or when depth is unavailable.
         [[nodiscard]] std::optional<glm::vec3> surfacePointUnderCursor(double x, double y) const;
         // surfacePointUnderCursor read once per zoom gesture (see ZoomAnchorCache).
-        [[nodiscard]] std::optional<glm::vec3> zoomAnchor(ViewId view, const glm::dvec2& cursor);
+        [[nodiscard]] std::optional<glm::vec3> zoomAnchor(const Viewport& target_viewport, ViewId view,
+                                                          const glm::dvec2& cursor);
         // Cursor zoom needs a pinhole or orthographic view of the scene itself:
         // not a panorama, and not a comparison split whose halves show other images.
         [[nodiscard]] bool zoomTowardCursorApplies(ViewId view) const;

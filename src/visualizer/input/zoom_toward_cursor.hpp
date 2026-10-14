@@ -30,8 +30,10 @@ namespace lfs::vis::input {
 
     // Zooming toward a world point keeps that point under the cursor, so one
     // depth read serves a whole zoom gesture. The anchor (or its absence over
-    // background) is reused while the cursor stays put in the same view and
-    // zoom events keep arriving; moving the cursor or pausing starts a new one.
+    // background) is reused while the cursor stays put in the same view, zoom
+    // events keep arriving and the camera still has the pose the last zoom step
+    // left; moving the cursor, pausing, or any other camera motion (orbit, pan,
+    // WASD) starts a new gesture.
     class ZoomAnchorCache {
     public:
         using Clock = std::chrono::steady_clock;
@@ -39,9 +41,10 @@ namespace lfs::vis::input {
         static constexpr std::chrono::milliseconds kGestureIdle{300};
 
         [[nodiscard]] bool matches(const std::uint32_t view, const glm::dvec2 cursor,
-                                   const Clock::time_point now) const {
-            return valid_ && view == view_ && glm::length(cursor - cursor_) <= kMaxCursorDrift &&
-                   now - last_event_ <= kGestureIdle;
+                                   const Clock::time_point now, const glm::mat3& rotation,
+                                   const glm::vec3& translation) const {
+            return valid_ && posed_ && view == view_ && glm::length(cursor - cursor_) <= kMaxCursorDrift &&
+                   now - last_event_ <= kGestureIdle && rotation == rotation_ && translation == translation_;
         }
 
         // Returns the cached anchor and extends the gesture.
@@ -57,16 +60,27 @@ namespace lfs::vis::input {
             cursor_ = cursor;
             anchor_ = anchor;
             last_event_ = now;
+            posed_ = false;
+        }
+
+        // Records the camera pose a zoom step produced from the cached anchor.
+        void settle(const glm::mat3& rotation, const glm::vec3& translation) {
+            rotation_ = rotation;
+            translation_ = translation;
+            posed_ = true;
         }
 
         void clear() { valid_ = false; }
 
     private:
         bool valid_ = false;
+        bool posed_ = false;
         std::uint32_t view_ = 0;
         glm::dvec2 cursor_{0.0};
         std::optional<glm::vec3> anchor_;
         Clock::time_point last_event_{};
+        glm::mat3 rotation_{1.0f};
+        glm::vec3 translation_{0.0f};
     };
 
 } // namespace lfs::vis::input

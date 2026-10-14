@@ -234,15 +234,27 @@ class Viewport {
             constexpr float kMinDistanceUnknownScene = 0.1f;
             const float min_distance = scene_extent_ > 0.0f ? kMinDistanceSceneFraction * scene_extent_
                                                             : kMinDistanceUnknownScene;
-            // Measured along the view direction, so an anchor the camera has
-            // already passed (cached for the rest of a gesture) also falls back
-            // instead of pulling the camera backwards.
+            // Measured along the view direction and applied in both directions:
+            // once the camera has passed an anchor (cached for the rest of a
+            // gesture), moving toward or away from it would reverse the zoom.
             const float ahead = glm::dot(anchor - t, lfs::rendering::cameraForward(R));
-            if (fraction > 0.0f && ahead < min_distance) {
+            if (ahead < min_distance) {
                 dolly(fraction, carry_pivot);
                 return;
             }
             fraction = std::min(fraction, kMaxAnchorFraction);
+            if (fraction < 0.0f) {
+                // Zooming out multiplies the distances by 1 - fraction; keep them
+                // within the far plane like dolly() does, so a long scroll-out
+                // stays bounded and can zoom back in. A carried pivot keeps its
+                // offset, so only the anchor distance grows then.
+                constexpr float kMaxDistance = lfs::rendering::DEFAULT_FAR_PLANE;
+                const float anchor_distance = glm::length(anchor - t);
+                const float distance = carry_pivot ? anchor_distance
+                                                   : std::max(anchor_distance, glm::length(pivot - t));
+                if (distance > 0.0f)
+                    fraction = std::max(fraction, 1.0f - std::max(kMaxDistance, distance) / distance);
+            }
 
             const glm::vec3 movement = fraction * (anchor - t);
             t += movement;

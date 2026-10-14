@@ -15,6 +15,7 @@
 #include "test_view_targets.hpp"
 
 #include <SDL3/SDL_events.h>
+#include <cmath>
 #include <cstdlib>
 #include <gtest/gtest.h>
 #include <optional>
@@ -123,6 +124,35 @@ namespace lfs::vis {
         EXPECT_GT(glm::dot(viewport.camera.t - eye, forward), 0.0f);
     }
 
+    TEST(ZoomTowardCursorMath, ZoomOutAfterPassingTheAnchorMovesBackwards) {
+        auto viewport = lookingAtOrigin();
+        const glm::vec3 forward = lfs::rendering::cameraForward(viewport.camera.R);
+        const glm::vec3 anchor = viewport.camera.t - 3.0f * forward + glm::vec3(0.2f, 0.0f, 0.0f);
+        viewport.camera.setSceneExtent(10.0f);
+        const glm::vec3 eye = viewport.camera.t;
+
+        viewport.camera.dollyToward(anchor, -0.2f);
+
+        EXPECT_LT(glm::dot(viewport.camera.t - eye, forward), 0.0f);
+    }
+
+    TEST(ZoomTowardCursorMath, RepeatedZoomOutStaysBoundedAndCanZoomBackIn) {
+        auto viewport = lookingAtOrigin();
+        const glm::vec3 anchor = viewport.unprojectPixel(310.0f, 70.0f, 8.0f, kFocalLengthMm);
+        // Zoom speed 100: every notch doubles the distances without a bound.
+        for (int notch = 0; notch < 200; ++notch)
+            viewport.camera.dollyToward(anchor, -1.0f);
+
+        const float pivot_distance = glm::length(viewport.camera.pivot - viewport.camera.t);
+        EXPECT_TRUE(std::isfinite(pivot_distance));
+        EXPECT_LE(pivot_distance, lfs::rendering::DEFAULT_FAR_PLANE * 1.001f);
+        EXPECT_LE(glm::length(anchor - viewport.camera.t), lfs::rendering::DEFAULT_FAR_PLANE * 1.001f);
+
+        viewport.camera.dollyToward(anchor, 0.5f);
+        const float closer = glm::length(viewport.camera.pivot - viewport.camera.t);
+        EXPECT_NEAR(closer, 0.5f * pivot_distance, 1e-3f * pivot_distance);
+    }
+
     TEST(ZoomTowardCursorMath, OrthographicShiftKeepsCursorPointWhenRenderMatchesPanel) {
         const glm::mat3 rotation = lfs::rendering::makeVisualizerLookAtRotation({1.0f, 4.0f, 6.0f}, glm::vec3(0.0f));
         const glm::vec3 translation(1.0f, 4.0f, 6.0f);
@@ -161,29 +191,42 @@ namespace lfs::vis {
     TEST(ZoomTowardCursorMath, AnchorIsReadOncePerGesture) {
         using Clock = input::ZoomAnchorCache::Clock;
         input::ZoomAnchorCache cache;
+        const glm::mat3 rotation(1.0f);
+        const glm::vec3 eye(0.0f, 0.0f, 10.0f);
         const auto start = Clock::now();
         const glm::dvec2 cursor(120.0, 80.0);
-        EXPECT_FALSE(cache.matches(1, cursor, start));
+        EXPECT_FALSE(cache.matches(1, cursor, start, rotation, eye));
 
         cache.store(1, cursor, glm::vec3(1.0f, 2.0f, 3.0f), start);
+        // The anchor serves only once a zoom step has recorded its resulting pose.
+        EXPECT_FALSE(cache.matches(1, cursor, start, rotation, eye));
+        cache.settle(rotation, eye);
         const auto next = start + std::chrono::milliseconds(50);
-        ASSERT_TRUE(cache.matches(1, cursor + glm::dvec2(1.0, 1.0), next));
+        ASSERT_TRUE(cache.matches(1, cursor + glm::dvec2(1.0, 1.0), next, rotation, eye));
         EXPECT_EQ(cache.reuse(next), std::optional(glm::vec3(1.0f, 2.0f, 3.0f)));
 
-        // Each event extends the gesture, so a long steady zoom keeps the anchor.
-        const auto later = next + std::chrono::milliseconds(250);
-        EXPECT_TRUE(cache.matches(1, cursor, later));
+        // Each event extends the gesture: 330 ms after the first read is still
+        // the same gesture because the event at 50 ms restarted the idle timer.
+        const auto later = next + std::chrono::milliseconds(280);
+        EXPECT_TRUE(cache.matches(1, cursor, later, rotation, eye));
 
-        EXPECT_FALSE(cache.matches(1, cursor + glm::dvec2(5.0, 0.0), next));
-        EXPECT_FALSE(cache.matches(2, cursor, next));
-        EXPECT_FALSE(cache.matches(1, cursor, next + input::ZoomAnchorCache::kGestureIdle + std::chrono::milliseconds(1)));
+        EXPECT_FALSE(cache.matches(1, cursor + glm::dvec2(5.0, 0.0), next, rotation, eye));
+        EXPECT_FALSE(cache.matches(2, cursor, next, rotation, eye));
+        EXPECT_FALSE(cache.matches(1, cursor, next + input::ZoomAnchorCache::kGestureIdle + std::chrono::milliseconds(1),
+                                   rotation, eye));
+
+        // Any other camera motion between zoom events (orbit, pan, WASD) starts a new gesture.
+        EXPECT_FALSE(cache.matches(1, cursor, next, rotation, eye + glm::vec3(0.0f, 0.01f, 0.0f)));
+        const glm::mat3 orbited = lfs::rendering::makeVisualizerLookAtRotation(eye, glm::vec3(1.0f, 0.0f, 0.0f));
+        EXPECT_FALSE(cache.matches(1, cursor, next, orbited, eye));
 
         // Background is cached too, so it is not re-read on every notch either.
         cache.store(1, cursor, std::nullopt, later);
-        ASSERT_TRUE(cache.matches(1, cursor, later));
+        cache.settle(rotation, eye);
+        ASSERT_TRUE(cache.matches(1, cursor, later, rotation, eye));
         EXPECT_FALSE(cache.reuse(later).has_value());
         cache.clear();
-        EXPECT_FALSE(cache.matches(1, cursor, later));
+        EXPECT_FALSE(cache.matches(1, cursor, later, rotation, eye));
     }
 
     class ZoomTowardCursorControllerTest : public ::testing::Test {
@@ -265,6 +308,26 @@ namespace lfs::vis {
         EXPECT_NEAR(scale, 55.0f, 1e-4f);
         const glm::vec3 after = orthoWorldAt(viewport.camera.R, viewport.camera.t, viewport.windowSize, cursor, scale);
         expectNear(after, before, 1e-4f);
+    }
+
+    TEST_F(ZoomTowardCursorControllerTest, PerspectiveZoomOverBackgroundFallsBackToCenteredZoom) {
+        Viewport viewport(200, 200);
+        TestViewTargets targets(viewport);
+        InputController controller(nullptr, targets);
+        controller.setZoomTowardCursorEnabled(true);
+        screen::ScreenService screens;
+        RenderingManager rendering(screens);
+        services().set(&rendering);
+        ASSERT_FALSE(rendering.settingsForView(screens.activeView()).orthographic);
+        // Nothing has been rendered, so there is no depth under the cursor.
+        auto centered = viewport;
+        centered.camera.zoom(1.0f);
+
+        input::injectPointerMove(170.0f, 40.0f);
+        controller.handleScroll(0.0, 1.0);
+
+        expectNear(viewport.camera.t, centered.camera.t, 1e-5f);
+        expectNear(viewport.camera.pivot, centered.camera.pivot, 1e-5f);
     }
 
     TEST_F(ZoomTowardCursorControllerTest, ComparisonSplitFallsBackToCenteredZoom) {

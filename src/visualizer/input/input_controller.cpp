@@ -1988,13 +1988,15 @@ namespace lfs::vis {
         if (scaleOrthographicView(target_viewport, 1.0f + delta * ORTHO_ZOOM_FACTOR, cursor))
             return;
         const bool carry_pivot = zoomCarriesPivot(camera_navigation_mode_);
-        const auto anchor = cursor ? zoomAnchor(view, *cursor) : std::nullopt;
+        const auto anchor = cursor ? zoomAnchor(target_viewport, view, *cursor) : std::nullopt;
         if (anchor) {
             target_viewport.camera.setSceneExtent(sceneExtent());
             target_viewport.camera.zoomToward(*anchor, delta, carry_pivot);
         } else {
             target_viewport.camera.zoom(delta, carry_pivot);
         }
+        if (cursor)
+            zoom_anchor_cache_.settle(target_viewport.camera.R, target_viewport.camera.t);
     }
 
     void InputController::zoomViewportBy(Viewport& target_viewport, const float factor,
@@ -2006,13 +2008,15 @@ namespace lfs::vis {
             return;
         const float fraction = 1.0f - 1.0f / factor;
         const bool carry_pivot = zoomCarriesPivot(camera_navigation_mode_);
-        const auto anchor = cursor ? zoomAnchor(view, *cursor) : std::nullopt;
+        const auto anchor = cursor ? zoomAnchor(target_viewport, view, *cursor) : std::nullopt;
         if (anchor) {
             target_viewport.camera.setSceneExtent(sceneExtent());
             target_viewport.camera.dollyToward(*anchor, fraction, carry_pivot);
         } else {
             target_viewport.camera.dolly(fraction, carry_pivot);
         }
+        if (cursor)
+            zoom_anchor_cache_.settle(target_viewport.camera.R, target_viewport.camera.t);
     }
 
     bool InputController::zoomTowardCursorApplies(const ViewId view) const {
@@ -2023,9 +2027,10 @@ namespace lfs::vis {
         return !settings.equirectangular && !splitViewEnabled(settings.split_view_mode);
     }
 
-    std::optional<glm::vec3> InputController::zoomAnchor(const ViewId view, const glm::dvec2& cursor) {
+    std::optional<glm::vec3> InputController::zoomAnchor(const Viewport& target_viewport, const ViewId view,
+                                                         const glm::dvec2& cursor) {
         const auto now = input::ZoomAnchorCache::Clock::now();
-        if (zoom_anchor_cache_.matches(view, cursor, now))
+        if (zoom_anchor_cache_.matches(view, cursor, now, target_viewport.camera.R, target_viewport.camera.t))
             return zoom_anchor_cache_.reuse(now);
         const auto anchor = surfacePointUnderCursor(cursor.x, cursor.y);
         zoom_anchor_cache_.store(view, cursor, anchor, now);
