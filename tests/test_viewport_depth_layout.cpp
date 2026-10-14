@@ -8,6 +8,7 @@
 #include "visualizer/app_store.hpp"
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/ElementDocument.h>
+#include <RmlUi/Core/ElementText.h>
 #include <RmlUi/Core/RenderInterface.h>
 #include <SDL3/SDL_scancode.h>
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <iterator>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace lfs::vis::gui {
     class ViewportDepthLayoutTestAccess {
@@ -30,6 +32,9 @@ namespace lfs::vis::gui {
             overlay.toolbar_position_preference_dirty_ = false;
         }
         static bool update(RmlViewportOverlay& overlay) { return overlay.updateToolbarRoots(); }
+        static bool updateOverlayPanels(RmlViewportOverlay& overlay) {
+            return overlay.updateViewportOverlayPanelLayout();
+        }
         static void bindStore(RmlViewportOverlay& overlay) { overlay.bindReactiveStore(); }
         static void releaseStore(RmlViewportOverlay& overlay) {
             overlay.gt_metrics_config_subscription_.reset();
@@ -92,7 +97,11 @@ namespace {
             lfs::vis::gui::ViewportDepthLayoutTestAccess::attach(overlay_, document_);
             document_->Show();
         }
-        void TearDown() override { Rml::RemoveContext("viewport_depth_layout"); }
+        void TearDown() override {
+            if (Rml::GetContext("viewport_empty_state"))
+                Rml::RemoveContext("viewport_empty_state");
+            Rml::RemoveContext("viewport_depth_layout");
+        }
 
         void layout(bool split, float scale = 1.0f, float divider = 0.5f, int width = 920, int height = 840) {
             scale_ = scale;
@@ -238,6 +247,31 @@ namespace {
         }
     }
 
+    TEST_F(ViewportDepthLayoutTest, OverlayPanelsClearThePrimaryToolbarAtHighScale) {
+        auto* const content = document_->GetElementById("viewport-content");
+        auto toolbar_node = document_->CreateElement("div");
+        toolbar_node->SetId("primary-utility-toolbar");
+        toolbar_node->SetProperty("width", "44dp");
+        toolbar_node->SetProperty("height", "400dp");
+        auto* const toolbar = toolbar_node.get();
+        auto root_node = document_->CreateElement("div");
+        root_node->SetId("primary-toolbar-root");
+        root_node->SetClassNames("panel-toolbar-root");
+        root_node->AppendChild(std::move(toolbar_node));
+        content->AppendChild(std::move(root_node));
+        for (const float scale : {1.0f, 1.5f, 2.0f}) {
+            context_->SetDensityIndependentPixelRatio(scale);
+            context_->Update();
+            EXPECT_TRUE(lfs::vis::gui::ViewportDepthLayoutTestAccess::updateOverlayPanels(overlay_));
+            context_->Update();
+            const auto* const left = panel()->GetProperty("left");
+            ASSERT_NE(left, nullptr);
+            const auto toolbar_size = toolbar->GetBox().GetSize(Rml::BoxArea::Border);
+            EXPECT_GE(panel()->GetAbsoluteOffset(Rml::BoxArea::Border).x,
+                      toolbar->GetAbsoluteOffset(Rml::BoxArea::Border).x + toolbar_size.x + 8.0f * scale);
+        }
+    }
+
     TEST_F(ViewportDepthLayoutTest, SplitResizeAndExitRestoreLayoutWithoutRepeatedInvalidation) {
         for (const int width : {700, 920, 1400}) {
             for (const float divider : {0.3f, 0.5f, 0.7f}) {
@@ -290,6 +324,67 @@ namespace {
         std::sort(timings.begin(), timings.end());
         RecordProperty("median_update_us", std::to_string(timings[timings.size() / 2]));
         EXPECT_FALSE(lfs::vis::gui::ViewportDepthLayoutTestAccess::update(overlay_));
+    }
+
+    std::string elementText(Rml::Element* element) {
+        std::string text;
+        for (int i = 0; i < element->GetNumChildren(); ++i) {
+            auto* const child = element->GetChild(i);
+            if (auto* const node = dynamic_cast<Rml::ElementText*>(child))
+                text += node->GetText();
+            else
+                text += elementText(child);
+        }
+        return text;
+    }
+
+    // The hint is in the document before any overlay model exists. Without a
+    // model, data-if does not run, so the hint must start hidden. Once a model
+    // is bound, only an empty scene reveals it.
+    TEST_F(ViewportDepthLayoutTest, UnboundEmptyStateHintStaysHidden) {
+        const auto path = std::filesystem::path(PROJECT_ROOT_PATH) /
+                          "src/visualizer/gui/rmlui/resources/viewport_overlay.rml";
+        auto* const empty_context = Rml::CreateContext("viewport_empty_state", {1280, 720}, &renderer_);
+        ASSERT_NE(empty_context, nullptr);
+        auto* const loaded = empty_context->LoadDocument(path.string());
+        ASSERT_NE(loaded, nullptr);
+        loaded->Show();
+        empty_context->Update();
+        auto* const hint = loaded->GetElementById("empty-state-hint");
+        ASSERT_NE(hint, nullptr);
+        EXPECT_EQ(hint->GetDisplay(), Rml::Style::Display::None);
+        EXPECT_FALSE(hint->IsVisible(true));
+
+        bool show_empty_state = true;
+        std::string title = "Drop files here";
+        std::string subtitle = "A splat file";
+        std::string import_hint = "Or use File > Import";
+        auto constructor = empty_context->CreateDataModel("test_empty");
+        ASSERT_TRUE(static_cast<bool>(constructor));
+        ASSERT_TRUE(constructor.Bind("show_empty_state", &show_empty_state));
+        ASSERT_TRUE(constructor.Bind("empty_state_title", &title));
+        ASSERT_TRUE(constructor.Bind("empty_state_subtitle", &subtitle));
+        ASSERT_TRUE(constructor.Bind("empty_state_import_hint", &import_hint));
+        std::ifstream input(path);
+        std::string markup((std::istreambuf_iterator<char>(input)), {});
+        const std::string opener = "<body id=\"overlay-body\">";
+        const auto body = markup.find(opener);
+        ASSERT_NE(body, std::string::npos);
+        markup.replace(body, opener.size(), "<body id=\"overlay-body\" data-model=\"test_empty\">");
+        auto* const bound = empty_context->LoadDocumentFromMemory(markup, path.string());
+        ASSERT_NE(bound, nullptr);
+        bound->Show();
+        empty_context->Update();
+        auto* const bound_hint = bound->GetElementById("empty-state-hint");
+        ASSERT_NE(bound_hint, nullptr);
+        EXPECT_NE(bound_hint->GetDisplay(), Rml::Style::Display::None);
+        EXPECT_NE(elementText(bound_hint).find("Drop files here"), std::string::npos);
+        EXPECT_EQ(elementText(bound_hint).find("{{"), std::string::npos);
+
+        show_empty_state = false;
+        constructor.GetModelHandle().DirtyVariable("show_empty_state");
+        empty_context->Update();
+        EXPECT_EQ(bound_hint->GetDisplay(), Rml::Style::Display::None);
     }
 
     std::string viewportGtMetricsMarkup() {
